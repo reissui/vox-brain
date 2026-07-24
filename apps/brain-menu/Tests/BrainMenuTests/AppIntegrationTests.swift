@@ -87,14 +87,15 @@ struct AppIntegrationTests {
         #expect(appSource.contains("openWindow(id: BrainMenuApp.dashboardWindowID)"))
         #expect(appSource.contains("activate(ignoringOtherApps: true)"))
 
-        let overviewSource = try String(
+        let dashboardSource = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "Sources/BrainMenu/Views/OverviewView.swift"
+                "Sources/BrainMenu/Views/DashboardView.swift"
             ),
             encoding: .utf8
         )
-        #expect(overviewSource.contains("Back to setup choices"))
-        #expect(overviewSource.contains("store.returnToSetup()"))
+        #expect(dashboardSource.contains("Back to setup choices"))
+        #expect(dashboardSource.contains("store.returnToSetup()"))
+        #expect(dashboardSource.contains(".keyboardShortcut(.cancelAction)"))
     }
 
     @Test

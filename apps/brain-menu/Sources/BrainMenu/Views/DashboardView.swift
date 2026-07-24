@@ -331,53 +331,66 @@ private struct PairBrainView: View {
     }
 
     var body: some View {
-        VStack(spacing: 22) {
-            Image(systemName: "link.badge.plus")
-                .font(.system(size: 44))
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-
-            VStack(spacing: 7) {
-                Text("Pair Brain")
-                    .font(.largeTitle.bold())
-                Text("Connect this app to the gateway for your remote Brain runner.")
-                    .foregroundStyle(.secondary)
-            }
-
-            Form {
-                TextField("Instance address", text: $address, prompt: Text("https://brain.example.com"))
-                    .textContentType(.URL)
-                    .accessibilityLabel("Remote Brain instance address")
-                SecureField("One-time pairing code", text: $code)
-                    .accessibilityLabel("One-time Brain pairing code")
-            }
-            .formStyle(.grouped)
-            .frame(width: 460)
-
-            if let errorMessage = store.errorMessage {
-                Label(errorMessage, systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
+        ZStack(alignment: .topLeading) {
             Button {
-                Task { await store.pair(address: address, code: code) }
+                store.returnToSetup()
             } label: {
-                if store.isPairing {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityLabel("Pairing Brain")
-                } else {
-                    Text("Pair Brain")
-                }
+                Label("Back to setup choices", systemImage: "chevron.backward")
             }
-            .buttonStyle(.borderedProminent)
-            .keyboardShortcut(.defaultAction)
-            .disabled(!canPair)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .keyboardShortcut(.cancelAction)
+            .accessibilityHint("Returns to the This Mac or Remote Brain choice")
 
-            Text("Status and health are requested only from the paired HTTPS instance.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+            VStack(spacing: 22) {
+                Image(systemName: "link.badge.plus")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+
+                VStack(spacing: 7) {
+                    Text("Pair Brain")
+                        .font(.largeTitle.bold())
+                    Text("Connect this app to the gateway for your remote Brain runner.")
+                        .foregroundStyle(.secondary)
+                }
+
+                Form {
+                    TextField("Instance address", text: $address, prompt: Text("https://brain.example.com"))
+                        .textContentType(.URL)
+                        .accessibilityLabel("Remote Brain instance address")
+                    SecureField("One-time pairing code", text: $code)
+                        .accessibilityLabel("One-time Brain pairing code")
+                }
+                .formStyle(.grouped)
+                .frame(width: 460)
+
+                if let errorMessage = store.errorMessage {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Button {
+                    Task { await store.pair(address: address, code: code) }
+                } label: {
+                    if store.isPairing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityLabel("Pairing Brain")
+                    } else {
+                        Text("Pair Brain")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canPair)
+
+                Text("Status and health are requested only from the paired HTTPS instance.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

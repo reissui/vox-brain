@@ -17,27 +17,10 @@ struct OverviewView: View {
                 }
 
                 if !store.isReady {
-                    VStack(spacing: 14) {
-                        ContentUnavailableView {
-                            Label("Pair Brain", systemImage: "link.badge.plus")
-                        } description: {
-                            Text("Finish configuring Brain to see live status.")
-                        }
-
-                        if store.deploymentMode == .remote {
-                            Button {
-                                store.returnToSetup()
-                            } label: {
-                                Label(
-                                    "Back to setup choices",
-                                    systemImage: "chevron.backward"
-                                )
-                            }
-                            .buttonStyle(.bordered)
-                            .accessibilityHint(
-                                "Returns to the This Mac or Remote Brain choice"
-                            )
-                        }
+                    ContentUnavailableView {
+                        Label("Pair Brain", systemImage: "link.badge.plus")
+                    } description: {
+                        Text("Finish configuring Brain to see live status.")
                     }
                 } else if let snapshot = store.snapshot {
                     ForEach(BrainPresentation.checkGroups(for: snapshot.health.checks)) { group in
