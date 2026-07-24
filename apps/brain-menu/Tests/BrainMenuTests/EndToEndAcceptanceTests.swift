@@ -49,7 +49,7 @@ struct EndToEndAcceptanceTests {
         try CLIProviderTests().codexPresetPersistsModelButNoExecutableArgumentsOrCredential()
         let dashboard = DashboardPresentationTests()
         dashboard.workflowStatesHaveUniqueSpokenLabelsAndNonColorSymbols()
-        try dashboard.bothDashboardDestinationsUseOneSharedSafePrivateSiteControlWithoutOwnerHardcodes()
+        try dashboard.localActivityUsesObsidianAndDoesNotRenderRemoteSiteStatus()
     }
 
     @Test

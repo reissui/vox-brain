@@ -7,10 +7,8 @@ import Testing
 @MainActor
 struct AppIntegrationTests {
     @Test
-    func dashboardKeepsPrimaryWorkflowsAndSettingsOwnsIntegratedUtilities() {
+    func dashboardIsLocalFirstAndSettingsContainOnlyActiveUtilities() {
         #expect(DashboardSection.allCases == [
-            .overview,
-            .capture,
             .activity,
             .dictation,
             .meetings,
@@ -20,19 +18,13 @@ struct AppIntegrationTests {
         #expect(SettingsSection.allCases == [
             .storage,
             .general,
-            .captureShortcuts,
+            .shortcuts,
             .speech,
             .ai,
             .audioPrivacy,
+            .updates,
             .gmail,
-            .mcp,
-            .knowledge,
-            .chat,
-            .actions,
-            .macMini,
         ])
-        #expect(SettingsSection.gmail.isDeferred)
-        #expect(SettingsSection.allCases.filter(\.isDeferred) == [.gmail])
     }
 
     @Test
@@ -275,10 +267,10 @@ struct AppIntegrationTests {
         graph.start()
 
         #expect(graph.startCount == 1)
-        #expect(captureRegistrar.registerCalls == 1)
-        #expect(captureRegistrar.registeredHotkeys == [.controlOptionB])
-        #expect(regionRegistrar.registerCalls == 1)
-        #expect(regionRegistrar.registeredHotkeys == [.controlOptionZ])
+        #expect(captureRegistrar.registerCalls == 0)
+        #expect(captureRegistrar.registeredHotkeys.isEmpty)
+        #expect(regionRegistrar.registerCalls == 0)
+        #expect(regionRegistrar.registeredHotkeys.isEmpty)
     }
 
     @Test
@@ -388,36 +380,33 @@ struct AppIntegrationTests {
     }
 
     @Test
-    func settingsKeepsPairedKnowledgeAskActionsMacMiniAndGmailRoots() {
+    func settingsKeepsLocalUtilitiesAndHidesRemovedRemoteRoots() {
         let remote = AppRemoteStatusAPI()
         let store = BrainStore(client: remote)
         let graph = makeGraph(store: store)
         let roots: [AnyView] = [
             AnyView(MenuBarView(graph: graph)),
             AnyView(DashboardView(store: store, graph: graph)),
-            AnyView(KnowledgeView(store: RemoteKnowledgeStore())),
-            AnyView(ChatView()),
-            AnyView(ActionsView(store: store)),
-            AnyView(MacMiniView(store: store)),
             AnyView(SettingsView(
                 store: store,
                 launchAtLogin: graph.launchAtLogin,
                 gmail: graph.gmail,
-                captureHotkey: graph.captureHotkey,
+                meetingHotkey: graph.meetingHotkey,
                 speech: graph.speechSettings,
                 ai: graph.aiSettings,
+                updates: graph.updates,
                 audioRetention: graph.audioRetention,
                 onboarding: graph.onboarding
             )),
         ]
 
         #expect(store.isPaired)
-        #expect(roots.count == 7)
+        #expect(roots.count == 3)
         #expect(graph.store === store)
-        #expect(SettingsSection.knowledge.rawValue == "Knowledge")
-        #expect(SettingsSection.chat.rawValue == "Ask Brain")
-        #expect(SettingsSection.actions.rawValue == "Actions")
-        #expect(SettingsSection.macMini.rawValue == "Remote Runner")
+        #expect(!SettingsSection.allCases.contains { $0.rawValue == "Knowledge" })
+        #expect(!SettingsSection.allCases.contains { $0.rawValue == "Ask Brain" })
+        #expect(!SettingsSection.allCases.contains { $0.rawValue == "Actions" })
+        #expect(!SettingsSection.allCases.contains { $0.rawValue == "Remote Runner" })
         #expect(SettingsSection.gmail.rawValue == "Gmail")
     }
 
@@ -484,9 +473,10 @@ struct AppIntegrationTests {
             ),
             encoding: .utf8
         )
-        for action in ["Open Brain", "Quick Capture", "Start Meeting", "Stop Meeting", "Quit"] {
+        for action in ["Open Brain", "Start Meeting", "Stop Meeting", "Quit"] {
             #expect(menuSource.contains(action))
         }
+        #expect(!menuSource.contains("Quick Capture"))
         #expect(menuSource.contains(".onAppear"))
         #expect(menuSource.contains("openDashboard()"))
         #expect(menuSource.contains("dismiss()"))
@@ -499,7 +489,7 @@ struct AppIntegrationTests {
         )
         #expect(dashboardSource.contains("BrainBuildInfo.current"))
         #expect(!dashboardSource.contains("BrainAppBuildIdentity"))
-        #expect(dashboardSource.contains("CaptureActivityView"))
+        #expect(dashboardSource.contains("OverviewView(store: store, graph: graph)"))
         for audioStatusContract in [
             "audioSignalStates[source]",
             "Needs attention",

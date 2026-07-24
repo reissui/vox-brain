@@ -19,8 +19,6 @@ enum BrainRemoteKnowledgeNavigation {
 }
 
 enum DashboardSection: String, CaseIterable, Identifiable {
-    case overview = "Overview"
-    case capture = "Capture"
     case activity = "Activity"
     case dictation = "Dictation"
     case meetings = "Meetings"
@@ -30,9 +28,7 @@ enum DashboardSection: String, CaseIterable, Identifiable {
 
     var symbolName: String {
         switch self {
-        case .overview: "rectangle.grid.2x2"
-        case .capture: "square.and.pencil"
-        case .activity: "list.bullet.rectangle"
+        case .activity: "waveform.path.ecg"
         case .dictation: "waveform.and.mic"
         case .meetings: "person.2.wave.2"
         case .settings: "gearshape"
@@ -44,18 +40,15 @@ struct DashboardView: View {
     let store: BrainStore
     let graph: BrainAppControllerGraph?
 
-    @State private var knowledgeStore: RemoteKnowledgeStore
-    @State private var selection: DashboardSection? = .overview
+    @State private var selection: DashboardSection? = .activity
     @State private var settingsSelection: SettingsSection? = .general
 
     init(
         store: BrainStore,
-        knowledgeStore: RemoteKnowledgeStore = RemoteKnowledgeStore(),
         graph: BrainAppControllerGraph? = nil
     ) {
         self.store = store
         self.graph = graph
-        _knowledgeStore = State(initialValue: knowledgeStore)
     }
 
     var body: some View {
@@ -87,29 +80,9 @@ struct DashboardView: View {
                     .navigationTitle("Brain")
                     .navigationSplitViewColumnWidth(min: 180, ideal: 210)
                 } detail: {
-                    switch selection ?? .overview {
-                    case .overview:
-                        OverviewView(store: store)
-                    case .capture:
-                        if let graph {
-                            CaptureView(controller: graph.capture)
-                        } else {
-                            FeaturePlaceholderView(
-                                title: "Capture",
-                                symbolName: DashboardSection.capture.symbolName,
-                                detail: "Open Brain.app to capture a note, link, design, or transcript."
-                            )
-                        }
+                    switch selection ?? .activity {
                     case .activity:
-                        if let graph {
-                            CaptureActivityView(controller: graph.capture, store: store)
-                        } else {
-                            FeaturePlaceholderView(
-                                title: "Activity",
-                                symbolName: DashboardSection.activity.symbolName,
-                                detail: "Open Brain.app to inspect capture delivery activity."
-                            )
-                        }
+                        OverviewView(store: store, graph: graph)
                     case .dictation:
                         if let graph {
                             DictationHistoryView(
@@ -134,21 +107,19 @@ struct DashboardView: View {
                         if let graph {
                             SettingsView(
                                 store: store,
-                                knowledgeStore: knowledgeStore,
                                 selection: $settingsSelection,
                                 launchAtLogin: graph.launchAtLogin,
                                 gmail: graph.gmail,
-                                captureHotkey: graph.captureHotkey,
-                                regionCapture: graph.regionCapture,
+                                meetingHotkey: graph.meetingHotkey,
                                 speech: graph.speechSettings,
                                 ai: graph.aiSettings,
+                                updates: graph.updates,
                                 audioRetention: graph.audioRetention,
                                 onboarding: graph.onboarding
                             )
                         } else {
                             SettingsView(
                                 store: store,
-                                knowledgeStore: knowledgeStore,
                                 selection: $settingsSelection
                             )
                         }
@@ -160,10 +131,6 @@ struct DashboardView: View {
             } else {
                 BrainSetupView(store: store)
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .brainOpenMacMini)) { _ in
-            settingsSelection = .macMini
-            selection = .settings
         }
     }
 }
@@ -233,6 +200,15 @@ private struct MeetingsWorkspaceView: View {
                     .background(Color.green.opacity(0.08))
                     .accessibilityElement(children: .combine)
                     .accessibilityAddTraits(.updatesFrequently)
+                }
+
+                if graph.meeting.state == .finalizing {
+                    MeetingProcessingPlaceholder(
+                        title: "Preparing your meeting",
+                        detail: "Brain is saving the recording and completing the local transcript. The meeting will appear below when it is ready."
+                    )
+                    .padding(.horizontal)
+                    .padding(.bottom, 12)
                 }
                 Divider()
                 MeetingsView(controller: graph.meetings) { meetingID in
@@ -315,6 +291,32 @@ private struct MeetingsWorkspaceView: View {
         case .quiet: "Connected — waiting for sound…"
         case .active: "Live"
         }
+    }
+}
+
+private struct MeetingProcessingPlaceholder: View {
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            ProgressView()
+                .controlSize(.small)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.callout.weight(.semibold))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(14)
+        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.updatesFrequently)
     }
 }
 

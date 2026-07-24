@@ -110,6 +110,7 @@ install -m 0644 "$app_icon" "$staged_app/Contents/Resources/Brain.icns"
 /usr/libexec/PlistBuddy -c "Set :BrainBuildDate $build_date" "$staged_app/Contents/Info.plist"
 install -m 0755 "$binary_dir/BrainMenu" "$staged_app/Contents/MacOS/BrainMenu"
 install -m 0755 "$binary_dir/BrainDictationObserver" "$staged_app/Contents/Helpers/BrainDictationObserver"
+install -m 0755 "$binary_dir/BrainUpdater" "$staged_app/Contents/Helpers/BrainUpdater"
 
 runtime="$staged_app/Contents/Resources/BrainRuntime"
 mkdir -p "$runtime/scripts" "$runtime/prompts" "$runtime/system/templates"
@@ -127,6 +128,7 @@ done
 install -m 0644 "$source_root/scripts/requirements.txt" "$runtime/scripts/requirements.txt"
 
 codesign --force --sign "$sign_identity" --timestamp=none "$staged_app/Contents/Helpers/BrainDictationObserver"
+codesign --force --sign "$sign_identity" --timestamp=none "$staged_app/Contents/Helpers/BrainUpdater"
 codesign --force --sign "$sign_identity" --timestamp=none "$staged_app/Contents/MacOS/BrainMenu"
 codesign --force --sign "$sign_identity" --timestamp=none --entitlements "$entitlements" \
   --generate-entitlement-der "$staged_app"

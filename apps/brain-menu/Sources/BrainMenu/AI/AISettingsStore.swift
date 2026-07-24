@@ -24,6 +24,7 @@ final class AISettingsStore: @unchecked Sendable {
         let model: String?
         let timeout: TimeInterval
         let contextChoice: AIContextChoice
+        let validated: Bool?
     }
 
     private let defaults: UserDefaults
@@ -53,14 +54,15 @@ final class AISettingsStore: @unchecked Sendable {
             )
             if stale, let executableURL,
                let refreshed = try? Self.bookmark(for: executableURL),
-               let refreshedSettings = try? encoder.encode(PersistedSettings(
-                   provider: persisted.provider,
-                   executableBookmark: refreshed,
-                   arguments: persisted.arguments,
-                   model: persisted.model,
-                   timeout: AIProviderConfiguration.boundedTimeout(persisted.timeout),
-                   contextChoice: persisted.contextChoice
-               )) {
+                   let refreshedSettings = try? encoder.encode(PersistedSettings(
+                       provider: persisted.provider,
+                       executableBookmark: refreshed,
+                       arguments: persisted.arguments,
+                       model: persisted.model,
+                       timeout: AIProviderConfiguration.boundedTimeout(persisted.timeout),
+                       contextChoice: persisted.contextChoice,
+                       validated: persisted.validated
+                   )) {
                 defaults.set(refreshedSettings, forKey: Self.defaultsKey)
             }
         }
@@ -76,6 +78,26 @@ final class AISettingsStore: @unchecked Sendable {
     }
 
     func save(_ configuration: AIProviderConfiguration) throws {
+        try persist(configuration, validated: false)
+    }
+
+    func loadValidatedConfiguration() -> AIProviderConfiguration? {
+        guard let data = defaults.data(forKey: Self.defaultsKey),
+              let persisted = try? decoder.decode(PersistedSettings.self, from: data),
+              persisted.validated == true else {
+            return nil
+        }
+        return load()
+    }
+
+    func saveValidated(_ configuration: AIProviderConfiguration) throws {
+        try persist(configuration, validated: true)
+    }
+
+    private func persist(
+        _ configuration: AIProviderConfiguration,
+        validated: Bool
+    ) throws {
         let configuration = configuration.canonicalized()
         do {
             if configuration.provider == .advanced {
@@ -102,7 +124,8 @@ final class AISettingsStore: @unchecked Sendable {
             arguments: configuration.arguments,
             model: configuration.model,
             timeout: AIProviderConfiguration.boundedTimeout(configuration.timeout),
-            contextChoice: configuration.contextChoice
+            contextChoice: configuration.contextChoice,
+            validated: validated
         )
         defaults.set(try encoder.encode(persisted), forKey: Self.defaultsKey)
     }

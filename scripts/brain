@@ -34,6 +34,7 @@ GATEWAY_TOKEN_SERVICE="app.voxbrain.capture-token"
 GMAIL_CONNECTOR="$SOURCE_ROOT/apps/gmail-connector/gmail.py"
 DATA_ROOT_MARKER="$VAULT/.brain-data-root"
 LAST_RUN_FILE="$VAULT/system/last-run.json"
+PROCESS_PROGRESS_FILE="$VAULT/system/process-progress.json"
 SITE_PUBLISH_READY_FILE="$VAULT/system/site-publish-ready.json"
 
 # Older repository checks copied this script into throwaway Git fixtures. Keep
@@ -45,6 +46,7 @@ if [ -n "${BRAIN_LEGACY_SOURCE_DATA_ROOT_FOR_TESTS:-}" ] && [ -z "${BRAIN_DATA_R
   INBOX="$VAULT/inbox"
   DATA_ROOT_MARKER="$VAULT/.brain-data-root"
   LAST_RUN_FILE="$VAULT/system/last-run.json"
+  PROCESS_PROGRESS_FILE="$VAULT/system/process-progress.json"
   SITE_PUBLISH_READY_FILE="$VAULT/system/site-publish-ready.json"
   LEGACY_SOURCE_DATA_TEST=1
 fi
@@ -176,6 +178,28 @@ print(json.dumps({
 PY
   chmod 600 "$temporary"
   mv -f "$temporary" "$LAST_RUN_FILE"
+}
+
+record_process_progress() { # $1 item count
+  local count="$1" temporary
+  mkdir -p "$VAULT/system"
+  temporary="$(mktemp "$VAULT/system/.process-progress.XXXXXX")" || return 1
+  python3 - "$$" "$count" > "$temporary" <<'PY'
+import datetime as dt
+import json
+import sys
+print(json.dumps({
+    "pid": int(sys.argv[1]),
+    "item_count": int(sys.argv[2]),
+    "started_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+}, separators=(",", ":")))
+PY
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$PROCESS_PROGRESS_FILE"
+}
+
+clear_process_progress() {
+  rm -f "$PROCESS_PROGRESS_FILE"
 }
 
 record_site_publish_ready() {
@@ -1256,13 +1280,16 @@ cmd_process() {
   elif [ "$deferred" -gt 0 ]; then
     echo "$deferred retained recovery item(s) already retried today will be left unchanged"
   fi
+  record_process_progress "$n" || true
   echo "processing $n inbox item(s) — the Librarian is on it..."
   if ! BRAIN_PROCESS_RETRY_NOW="$retry_now" render_librarian_prompt process \
     | run_librarian workspace-write; then
+    clear_process_progress
     echo "processing failed — inbox left in place" >&2
     return 1
   fi
   if ! python3 "$SCRIPT_DIR/build-libraries.py" "$VAULT"; then
+    clear_process_progress
     echo "processing completed, but library-page generation failed — changes remain in the data folder" >&2
     return 1
   fi
@@ -1273,6 +1300,7 @@ cmd_process() {
       || echo "warning: site publisher was not notified; run it manually" >&2
     record_last_run "processed inbox ($TODAY)" || true
   fi
+  clear_process_progress
   echo; echo "done. inbox now: $(inbox_count) item(s)"
 }
 
@@ -1495,7 +1523,7 @@ PY
     if [ -n "${BRAIN_NO_LAUNCHCTL:-}" ] || launchctl print "gui/$(id -u)/app.voxbrain.telegram" >/dev/null 2>&1; then telegram_running=1; fi
   fi
 
-  python3 - "$VAULT" "$vault_state" "$dirty_count" "$inbox" "$sources" "$notes" "$people" "$projects" \
+  python3 - "$VAULT" "$PROCESS_PROGRESS_FILE" "$vault_state" "$dirty_count" "$inbox" "$sources" "$notes" "$people" "$projects" \
     "$last_at" "$last_commit" "$last_summary" \
     "$automation_configured" "$automation_running" "$automation_schedule" \
     "$sync_configured" "$sync_running" "$monitor_configured" "$monitor_running" \
@@ -1503,10 +1531,11 @@ PY
     "$telegram_configured" "$telegram_running" <<'PY'
 import datetime as dt
 import json
+import os
 import sys
 
 (
-    vault, vault_state, dirty_count, inbox, sources, notes, people, projects,
+    vault, process_progress_file, vault_state, dirty_count, inbox, sources, notes, people, projects,
     last_at, last_commit, last_summary,
     automation_configured, automation_running, automation_schedule,
     sync_configured, sync_running, monitor_configured, monitor_running,
@@ -1533,6 +1562,31 @@ if last_at:
         "summary": last_summary,
     }
 
+inbox_number = int(inbox)
+activity = {
+    "librarian_state": "queued" if inbox_number else "idle",
+    "label": (
+        f"{inbox_number} item{'s' if inbox_number != 1 else ''} ready to organize"
+        if inbox_number else "No organizing work in progress"
+    ),
+    "started_at": None,
+    "item_count": inbox_number,
+}
+try:
+    with open(process_progress_file, encoding="utf-8") as handle:
+        process_progress = json.load(handle)
+    process_pid = int(process_progress["pid"])
+    os.kill(process_pid, 0)
+    process_count = max(0, int(process_progress.get("item_count", inbox_number)))
+    activity = {
+        "librarian_state": "processing",
+        "label": f"Organizing {process_count} item{'s' if process_count != 1 else ''}",
+        "started_at": process_progress.get("started_at"),
+        "item_count": process_count,
+    }
+except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+    pass
+
 report = {
     "schema_version": 1,
     "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -1545,6 +1599,7 @@ report = {
         "projects": int(projects),
     },
     "last_run": last_run,
+    "activity": activity,
     "services": [
         service("automation", automation_configured, automation_running, automation_schedule),
         service("sync", sync_configured, sync_running, "every 5 minutes"),

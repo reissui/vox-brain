@@ -19,7 +19,7 @@ struct DashboardPresentationTests {
             "codex mcp add brain --url \"https://brain-gw.example.test/mcp\" --bearer-token-env-var BRAIN_MCP_PASSWORD",
         ])
         #expect(!instructions.codexOAuthCommands.joined().contains("test-mcp-password"))
-        #expect(SettingsSection.allCases.contains(.mcp))
+        #expect(!SettingsSection.allCases.contains { $0.rawValue == "MCP" })
         #expect(!DashboardSection.allCases.contains { $0.rawValue == "MCP" })
     }
 
@@ -188,7 +188,7 @@ struct DashboardPresentationTests {
     }
 
     @Test
-    func bothDashboardDestinationsUseOneSharedSafePrivateSiteControlWithoutOwnerHardcodes() throws {
+    func localActivityUsesObsidianAndDoesNotRenderRemoteSiteStatus() throws {
         let sourceRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -210,15 +210,12 @@ struct DashboardPresentationTests {
             .joined(separator: "\n") ?? ""
 
         #expect(macMini.contains("PrivateSiteAccessView(store: store)"))
-        #expect(overview.contains("PrivateSiteAccessView(store: store)"))
-        #expect(overview.components(separatedBy: "Label(\"Open private site\"").count - 1 == 1)
-        #expect(overview.contains("Private site unavailable"))
-        #expect(overview.contains("accessibilityLabel(\"Private site URL\")"))
-        #expect(overview.contains("accessibilityValue(siteURL.absoluteString)"))
-        #expect(overview.contains("Awaiting processing"))
-        #expect(overview.contains("Latest site publish"))
-        #expect(overview.contains("publish.latest"))
-        #expect(overview.contains("will not appear on the private site until the Librarian processes"))
+        #expect(!overview.contains("PrivateSiteAccessView(store: store)"))
+        #expect(overview.contains("Open in Obsidian"))
+        #expect(overview.contains("Librarian is organizing"))
+        #expect(overview.contains("Ready to organize"))
+        #expect(!overview.contains("Awaiting processing"))
+        #expect(!overview.contains("publish.latest"))
         #expect(!overview.contains(".truncationMode(.middle)"))
         #expect(macMini.contains("accessibilityFocused($accessibilityFocus, equals: .errorSummary)"))
         #expect(macMini.contains("fixedSize(horizontal: false, vertical: true)"))

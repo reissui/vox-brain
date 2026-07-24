@@ -4,15 +4,16 @@ Vox Brain turns links, transcripts, designs, images, meetings, and thoughts into
 connected plain-Markdown knowledge vault. The vault stays readable in Finder,
 Obsidian, a text editor, or any agent that can work with files.
 
-Brain supports two deployment modes. Remote infrastructure is optional.
+Brain is local-first. Remote infrastructure is optional and stays out of the
+app unless it has been configured.
 
 | Mode | Canonical vault | Processing | Network services |
 |---|---|---|---|
 | **This Mac** | `~/Library/Application Support/Brain/Vault` on the Mac running Brain.app | bundled Brain CLI on the same Mac | none required; MCP is unavailable |
 | **Remote Brain** | a folder on a separately operated Mac or server | Brain CLI and Brain Agent on that runner | paired HTTPS gateway; optional MCP and other server integrations |
 
-The mode changes where app capture, knowledge reads, Ask, Process, and Digest
-run. Switching modes never deletes the other vault.
+The mode changes where the Librarian processes the vault. Switching modes never
+deletes the other vault.
 
 ## Start locally
 
@@ -22,6 +23,8 @@ server, pairing, or MCP:
 1. Install and open Brain.app.
 2. Choose **This Mac**.
 3. Brain creates the local vault and stores all new knowledge there.
+4. Use **Activity** to follow meeting transcription and Librarian processing,
+   or open the vault directly in Finder or Obsidian.
 
 The release app contains the reusable Brain CLI, Librarian prompts, and note
 templates needed for local operation. Codex is required only for intelligent

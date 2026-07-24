@@ -388,8 +388,31 @@ struct MeetingsView: View {
         Group {
             switch controller.state {
             case .idle, .loading:
-                ProgressView("Loading local meetings…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(0..<3, id: \.self) { index in
+                        HStack(alignment: .top, spacing: 12) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .padding(.top, 2)
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(index == 0 ? "Loading meetings" : "Reading local details")
+                                    .font(.body.weight(.medium))
+                                Text(index == 0
+                                     ? "Brain is checking saved transcripts and processing states."
+                                     : "Titles, dates, and transcript status will appear here.")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+                        .padding(14)
+                        if index < 2 { Divider().padding(.leading, 46) }
+                    }
+                }
+                .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Loading local meetings and processing states")
             case .failed(let message):
                 ContentUnavailableView(
                     "Meetings unavailable",

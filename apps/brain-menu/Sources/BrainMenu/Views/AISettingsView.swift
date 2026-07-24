@@ -4,8 +4,17 @@ import SwiftUI
 
 protocol AISettingsPersisting: Sendable {
     func load() -> AIProviderConfiguration
+    func loadValidatedConfiguration() -> AIProviderConfiguration?
     func save(_ configuration: AIProviderConfiguration) throws
+    func saveValidated(_ configuration: AIProviderConfiguration) throws
     func clear()
+}
+
+extension AISettingsPersisting {
+    func loadValidatedConfiguration() -> AIProviderConfiguration? { nil }
+    func saveValidated(_ configuration: AIProviderConfiguration) throws {
+        try save(configuration)
+    }
 }
 
 extension AISettingsStore: AISettingsPersisting {}
@@ -121,7 +130,15 @@ final class AISettingsController {
         self.executableResolver = executableResolver
         let loaded = settings.load().canonicalized()
         configuration = loaded
-        testState = loaded.provider == .disabled ? .result(.disabled) : .untested
+        let validated = settings.loadValidatedConfiguration()?.canonicalized()
+        if loaded.provider == .disabled {
+            testState = .result(.disabled)
+        } else if validated == loaded {
+            testState = .result(.ready)
+            lastTestedConfiguration = loaded
+        } else {
+            testState = .untested
+        }
         var renderedArguments = loaded.arguments
         if loaded.provider == .advanced, let model = loaded.model {
             renderedArguments.append(contentsOf: ["--model", model])
@@ -262,8 +279,10 @@ final class AISettingsController {
     func save() {
         guard canSave else { return }
         do {
-            try settings.save(configuration)
-            savedMessage = "AI settings saved."
+            try settings.saveValidated(configuration)
+            lastTestedConfiguration = configuration
+            testState = .result(.ready)
+            savedMessage = "Post-processing settings saved and ready."
             errorMessage = nil
         } catch {
             savedMessage = nil

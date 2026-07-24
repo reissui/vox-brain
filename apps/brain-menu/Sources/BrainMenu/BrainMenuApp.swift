@@ -78,12 +78,14 @@ final class BrainAppControllerGraph {
     let regionCapture: RegionCaptureController
     let dictationHistory: DictationHistoryStore
     let meeting: MeetingController
+    let meetingHotkey: MeetingHotkeyController
     let recordingIsland: RecordingIslandController
     let meetings: MeetingsController
     let launchAtLogin: LaunchAtLoginController
     let gmail: GmailConnectionController
     let speechSettings: SpeechSettingsController
     let aiSettings: AISettingsController
+    let updates: UpdateController
     let audioRetention: AudioRetentionController
 
     private(set) var startCount = 0
@@ -130,6 +132,7 @@ final class BrainAppControllerGraph {
         frontmostApplications: any FrontmostApplicationProviding = WorkspaceFrontmostApplicationProvider(),
         speechSettings: SpeechSettingsController? = nil,
         aiSettings: AISettingsController = AISettingsController(settings: AISettingsStore()),
+        updates: UpdateController = UpdateController(),
         audioRetention: AudioRetentionController = AudioRetentionController(),
         meetingAnalysisFactory: @escaping @MainActor () -> (any MeetingDetailAnalysisControlling)? = {
             SavedMeetingAnalysisControllerFactory().make()
@@ -142,6 +145,7 @@ final class BrainAppControllerGraph {
         self.launchAtLogin = launchAtLogin
         self.gmail = gmail
         self.aiSettings = aiSettings
+        self.updates = updates
         self.audioRetention = audioRetention
         self.meetingAnalysisFactory = meetingAnalysisFactory
         self.dictationHistory = dictationHistory
@@ -164,6 +168,11 @@ final class BrainAppControllerGraph {
             )
         }
         self.meeting = nativeMeeting
+        meetingHotkey = MeetingHotkeyController(
+            registrar: SystemCaptureHotkeyRegistrar(identifier: 4)
+        ) {
+            router.toggleMeeting()
+        }
         let quickCapture = QuickCaptureController(
             captureController: capture,
             permissionGate: OnboardingQuickCapturePermissionGate(onboarding: onboarding)
@@ -209,8 +218,8 @@ final class BrainAppControllerGraph {
         isStarted = true
         startCount += 1
         store.start()
-        _ = captureHotkey.start()
-        _ = regionCapture.start()
+        _ = meetingHotkey.start()
+        updates.start()
         dictationHistory.startMonitoring()
         observeMeetingAudio()
         Task {
@@ -223,8 +232,7 @@ final class BrainAppControllerGraph {
         guard isStarted else { return }
         isStarted = false
         store.stop()
-        captureHotkey.stop()
-        regionCapture.stop()
+        meetingHotkey.stop()
         dictationHistory.stopMonitoring()
         automaticMeetingAnalysisTask?.cancel()
         automaticMeetingAnalysisTask = nil
@@ -440,6 +448,12 @@ private final class BrainAppActionRouter {
     func selectMicrophone(_ selection: MeetingMicrophoneSelection) {
         Task { [weak graph] in
             await graph?.meeting.selectMicrophone(selection)
+        }
+    }
+
+    func toggleMeeting() {
+        Task { [weak graph] in
+            await graph?.toggleMeeting()
         }
     }
 }
@@ -1218,7 +1232,6 @@ private final class BrainMeetingEventGate: @unchecked Sendable {
 @main
 struct BrainMenuApp: App {
     static let dashboardWindowID = "brain-dashboard"
-    static let captureWindowID = "brain-capture"
 
     @NSApplicationDelegateAdaptor(BrainApplicationDelegate.self)
     private var applicationDelegate
@@ -1236,12 +1249,10 @@ struct BrainMenuApp: App {
             BrainRootView(graph: graph)
                 .task { graph.start() }
         }
-        .defaultSize(width: 1_080, height: 760)
-
-        Window("Capture to Brain", id: Self.captureWindowID) {
-            CaptureView(controller: graph.capture)
-        }
-        .defaultSize(width: 600, height: 560)
+        .defaultSize(
+            width: BrainWindowSizeGuard.preferredSize.width,
+            height: BrainWindowSizeGuard.preferredSize.height
+        )
     }
 }
 
@@ -1280,12 +1291,15 @@ private struct BrainRootView: View {
     let graph: BrainAppControllerGraph
 
     var body: some View {
-        switch graph.launchDestination {
-        case .setup:
-            BrainSetupView(store: graph.store)
-        case .dashboard:
-            DashboardView(store: graph.store, graph: graph)
-                .id(graph.store.runtimeIdentity)
+        Group {
+            switch graph.launchDestination {
+            case .setup:
+                BrainSetupView(store: graph.store)
+            case .dashboard:
+                DashboardView(store: graph.store, graph: graph)
+                    .id(graph.store.runtimeIdentity)
+            }
         }
+        .background(BrainWindowSizeGuard())
     }
 }

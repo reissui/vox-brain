@@ -69,6 +69,7 @@ struct MeetingDetailViewModel: Equatable, Sendable {
     let followUp: MeetingFollowUpViewModel?
     let audioControls: [MeetingAudioControl]
     let transcriptionState: MeetingTranscriptionState?
+    let analysisState: MeetingAnalysisState?
     let transcriptionCanRetry: Bool
     let transcriptionMessage: String?
     let uploadCanRetry: Bool
@@ -332,6 +333,7 @@ final class MeetingDetailController {
             },
             audioControls: localAudioExists ? MeetingAudioControl.allCases : [],
             transcriptionState: effectiveTranscriptionState,
+            analysisState: effectiveMeeting?.analysisState,
             transcriptionCanRetry: meeting?.transcriptionState == .failed
                 && !isTranscriptionRetryInProgress
                 && !transcriptionController.isRunning(meetingID: meetingID),
@@ -736,8 +738,12 @@ struct MeetingDetailView: View {
         Group {
             switch controller.state {
             case .idle, .loading:
-                ProgressView("Loading local meeting…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                MeetingWorkPlaceholder(
+                    title: "Loading meeting",
+                    detail: "Reading the local transcript and analysis."
+                )
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             case .corrupt(let message):
                 unavailable(title: "Meeting data is corrupt", message: message)
             case .failed(let message):
@@ -957,6 +963,11 @@ struct MeetingDetailView: View {
                         .keyboardShortcut("c", modifiers: [.command, .shift])
                     }
                 }
+            } else if model.analysisState == .running {
+                MeetingWorkPlaceholder(
+                    title: "Analyzing transcript",
+                    detail: "Brain is creating the summary, topics, decisions, and follow-up draft."
+                )
             } else {
                 Text("No local analysis yet. The final transcript remains available and uploadable.")
                     .foregroundStyle(.secondary)
@@ -1078,18 +1089,29 @@ struct MeetingDetailView: View {
     @ViewBuilder
     private func transcript(_ model: MeetingDetailViewModel) -> some View {
         if !model.hasTranscript {
-            ContentUnavailableView(
-                model.transcriptionState == .failed ? "Transcript failed" : "No transcript yet",
-                systemImage: model.transcriptionState == .failed
-                    ? "exclamationmark.bubble"
-                    : "text.quote",
-                description: Text(
-                    model.transcriptionState == .processing
-                        ? "Brain is processing the saved recording."
-                        : (model.transcriptionMessage
-                            ?? "The meeting completed without visible utterances.")
+            if model.transcriptionState == .processing || model.transcriptionState == .pending {
+                MeetingWorkPlaceholder(
+                    title: model.transcriptionState == .processing
+                        ? "Transcribing meeting"
+                        : "Transcript queued",
+                    detail: model.transcriptionState == .processing
+                        ? "Brain is processing the saved recording locally. The transcript will appear here when it is ready."
+                        : "The saved recording is ready for local transcription."
                 )
-            )
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            } else {
+                ContentUnavailableView(
+                    model.transcriptionState == .failed ? "Transcript failed" : "No transcript yet",
+                    systemImage: model.transcriptionState == .failed
+                        ? "exclamationmark.bubble"
+                        : "text.quote",
+                    description: Text(
+                        model.transcriptionMessage
+                            ?? "The meeting completed without visible utterances."
+                    )
+                )
+            }
         } else {
             VStack(spacing: 0) {
                 HStack {
@@ -1150,6 +1172,32 @@ struct MeetingDetailView: View {
                     .accessibilityLabel((row.isSelected ? "Selected, " : "") + row.accessibilityLabel)
                 }
             }
+        }
+    }
+
+    private struct MeetingWorkPlaceholder: View {
+        let title: String
+        let detail: String
+
+        var body: some View {
+            HStack(alignment: .top, spacing: 12) {
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.body.weight(.semibold))
+                    Text(detail)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+            }
+            .padding(16)
+            .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.updatesFrequently)
         }
     }
 
