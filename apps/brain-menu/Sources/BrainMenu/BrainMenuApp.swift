@@ -24,23 +24,64 @@ enum BrainAppLaunchDestination: Equatable, Sendable {
 }
 
 enum BrainAppActivity: Equatable, Sendable {
-    case remote
-    case recording(String)
+    case idle
+    case meeting(label: String, startedAt: Date)
+    case dictation(label: String, startedAt: Date)
     case transcribing(String)
 
     var label: String {
         switch self {
-        case .remote: "Remote Brain"
-        case .recording(let label), .transcribing(let label): label
+        case .idle: "Brain"
+        case .meeting(let label, _), .dictation(let label, _), .transcribing(let label):
+            label
         }
     }
 
     var symbolName: String {
         switch self {
-        case .remote: "brain.head.profile"
-        case .recording: "record.circle.fill"
+        case .idle: "brain.head.profile"
+        case .meeting: "record.circle.fill"
+        case .dictation: "mic.fill"
         case .transcribing: "waveform"
         }
+    }
+
+    var startedAt: Date? {
+        switch self {
+        case .meeting(_, let startedAt), .dictation(_, let startedAt):
+            startedAt
+        case .idle, .transcribing:
+            nil
+        }
+    }
+}
+
+struct BrainMenuBarPresentation: Equatable, Sendable {
+    let symbolName: String
+    let accessibilityLabel: String
+    let elapsedText: String?
+
+    init(activity: BrainAppActivity, now: Date) {
+        symbolName = activity.symbolName
+        if let startedAt = activity.startedAt {
+            let elapsed = Self.elapsed(from: startedAt, to: now)
+            elapsedText = elapsed
+            accessibilityLabel = "\(activity.label), \(elapsed) elapsed"
+        } else {
+            elapsedText = nil
+            accessibilityLabel = activity.label
+        }
+    }
+
+    private static func elapsed(from start: Date, to end: Date) -> String {
+        let seconds = max(0, Int(end.timeIntervalSince(start)))
+        let hours = seconds / 3_600
+        let minutes = (seconds % 3_600) / 60
+        let remainingSeconds = seconds % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, remainingSeconds)
+        }
+        return String(format: "%d:%02d", minutes, remainingSeconds)
     }
 }
 
@@ -77,6 +118,7 @@ final class BrainAppControllerGraph {
     let captureHotkey: CaptureHotkeyController
     let regionCapture: RegionCaptureController
     let dictationHistory: DictationHistoryStore
+    let dictation: DictationController
     let meeting: MeetingController
     let meetingHotkey: MeetingHotkeyController
     let recordingIsland: RecordingIslandController
@@ -98,6 +140,8 @@ final class BrainAppControllerGraph {
     @ObservationIgnored private var automaticMeetingAnalysisTask: Task<Void, Never>?
     @ObservationIgnored private let meetingAnalysisFactory: @MainActor () -> (any MeetingDetailAnalysisControlling)?
     @ObservationIgnored private var lastNotifiedMeetingID: UUID?
+    @ObservationIgnored private var dictationStartedAt: Date?
+    @ObservationIgnored private let now: @MainActor () -> Date
 
     var launchDestination: BrainAppLaunchDestination {
         store.deploymentMode == nil && !store.isReady ? .setup : .dashboard
@@ -109,11 +153,26 @@ final class BrainAppControllerGraph {
         case .finalizing:
             return .transcribing("Finalizing meeting")
         case .starting, .recording, .paused, .stopSuggested:
-            return .recording(meeting.state == .paused ? "Meeting paused" : "Recording meeting")
+            if let startedAt = meeting.currentMeeting?.startedAt {
+                return .meeting(
+                    label: meeting.state == .paused ? "Meeting paused" : "Recording meeting",
+                    startedAt: startedAt
+                )
+            }
         case .idle, .startSuggested, .completed, .failed:
             break
         }
-        return .remote
+        switch dictation.state {
+        case .listening, .locked:
+            if let dictationStartedAt {
+                return .dictation(label: "Dictating", startedAt: dictationStartedAt)
+            }
+        case .transcribing:
+            return .transcribing("Transcribing dictation")
+        case .idle, .unavailable, .failed:
+            break
+        }
+        return .idle
     }
 
     init(
@@ -122,6 +181,7 @@ final class BrainAppControllerGraph {
         capture: CaptureController = CaptureController(),
         meeting: MeetingController? = nil,
         dictationHistory: DictationHistoryStore = DictationHistoryStore(),
+        dictation: DictationController? = nil,
         recordingIsland: RecordingIslandController? = nil,
         meetings: MeetingsController = MeetingsController(),
         launchAtLogin: LaunchAtLoginController = LaunchAtLoginController(),
@@ -134,6 +194,7 @@ final class BrainAppControllerGraph {
         aiSettings: AISettingsController = AISettingsController(settings: AISettingsStore()),
         updates: UpdateController = UpdateController(),
         audioRetention: AudioRetentionController = AudioRetentionController(),
+        now: @escaping @MainActor () -> Date = Date.init,
         meetingAnalysisFactory: @escaping @MainActor () -> (any MeetingDetailAnalysisControlling)? = {
             SavedMeetingAnalysisControllerFactory().make()
         }
@@ -147,6 +208,7 @@ final class BrainAppControllerGraph {
         self.aiSettings = aiSettings
         self.updates = updates
         self.audioRetention = audioRetention
+        self.now = now
         self.meetingAnalysisFactory = meetingAnalysisFactory
         self.dictationHistory = dictationHistory
         let router = BrainAppActionRouter()
@@ -154,6 +216,7 @@ final class BrainAppControllerGraph {
 
         let ownership = MeetingAudioOwnership()
         meetingAudioOwnership = ownership
+        self.dictation = dictation ?? DictationController(audioCapture: ownership)
         let microphoneSelections = MeetingMicrophoneSelectionStore()
         let microphoneInventory = CoreAudioMeetingMicrophoneInventory()
         let nativeMeeting: MeetingController
@@ -221,6 +284,8 @@ final class BrainAppControllerGraph {
         _ = meetingHotkey.start()
         updates.start()
         dictationHistory.startMonitoring()
+        observeDictation()
+        dictation.startMonitoring()
         observeMeetingAudio()
         Task {
             await onboarding.refresh()
@@ -234,6 +299,7 @@ final class BrainAppControllerGraph {
         store.stop()
         meetingHotkey.stop()
         dictationHistory.stopMonitoring()
+        dictation.stopMonitoring()
         automaticMeetingAnalysisTask?.cancel()
         automaticMeetingAnalysisTask = nil
         recordingIsland.hideImmediately()
@@ -293,6 +359,27 @@ final class BrainAppControllerGraph {
         }
     }
 
+    private func observeDictation() {
+        guard isStarted else { return }
+        withObservationTracking {
+            _ = dictation.state
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self, self.isStarted else { return }
+                switch self.dictation.state {
+                case .listening, .locked, .transcribing:
+                    if self.dictationStartedAt == nil {
+                        self.dictationStartedAt = self.now()
+                    }
+                case .idle, .unavailable, .failed:
+                    self.dictationStartedAt = nil
+                }
+                self.activityRevision &+= 1
+                self.observeDictation()
+            }
+        }
+    }
+
     private func syncRecordingIsland() {
         if meeting.isCapturingAudio {
             recordingIsland.updateMeeting(
@@ -311,6 +398,9 @@ final class BrainAppControllerGraph {
 
     private func meetingDidTransition() {
         activityRevision &+= 1
+        if meeting.isCapturingAudio {
+            dictationStartedAt = nil
+        }
         if meeting.state == .completed,
            let record = meeting.currentMeeting {
             let meetingID = record.id
@@ -1263,11 +1353,21 @@ private struct BrainMenuBarLabel: View {
     let graph: BrainAppControllerGraph
 
     var body: some View {
-        let state = graph.activity == .remote
-            ? BrainPresentation.state(for: graph.store.snapshot)
-            : nil
-        Image(systemName: state?.symbolName ?? graph.activity.symbolName)
-            .accessibilityLabel(state?.accessibilityLabel ?? graph.activity.label)
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let presentation = BrainMenuBarPresentation(
+                activity: graph.activity,
+                now: context.date
+            )
+            HStack(spacing: 4) {
+                Image(systemName: presentation.symbolName)
+                if let elapsed = presentation.elapsedText {
+                    Text(elapsed)
+                        .monospacedDigit()
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(presentation.accessibilityLabel)
+        }
             .task {
                 graph.start()
                 guard !didPresentInitialWindow else { return }

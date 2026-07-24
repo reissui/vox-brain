@@ -22,20 +22,20 @@ struct MenuBarView: View {
         BrainPresentation.state(for: store.snapshot, isPaired: store.isReady)
     }
 
-    private var activity: BrainAppActivity { graph?.activity ?? .remote }
+    private var activity: BrainAppActivity { graph?.activity ?? .idle }
 
     private var symbolName: String {
-        activity == .remote ? remoteState.symbolName : activity.symbolName
+        activity.symbolName
     }
 
     private var statusLabel: String {
-        activity == .remote ? remoteState.label : activity.label
+        activity == .idle ? remoteState.label : activity.label
     }
 
     private var statusColor: Color {
         switch activity {
-        case .remote: remoteState.tone.color
-        case .recording: .red
+        case .idle: remoteState.tone.color
+        case .meeting, .dictation: .red
         case .transcribing: .blue
         }
     }
@@ -64,7 +64,7 @@ struct MenuBarView: View {
                 }
             }
 
-            if activity == .remote {
+            if activity == .idle {
                 snapshotSummary
             } else {
                 Text(activityDetail)
@@ -139,8 +139,9 @@ struct MenuBarView: View {
 
     private var activityDetail: String {
         switch activity {
-        case .remote: ""
-        case .recording(let label): "\(label). Local audio is never uploaded."
+        case .idle: ""
+        case .meeting(let label, _), .dictation(let label, _):
+            "\(label). Local audio is never uploaded."
         case .transcribing(let label): "\(label) locally with VoxType."
         }
     }

@@ -315,9 +315,11 @@ private final class ContinuousStatusBroadcaster: VoxTypeStatusObserving, @unchec
     var streamCount: Int { lock.withLock { streams } }
 
     func statusEvents() -> AsyncStream<VoxTypeStatus> {
-        lock.withLock { streams += 1 }
         return AsyncStream { continuation in
-            lock.withLock { continuations.append(continuation) }
+            lock.withLock {
+                continuations.append(continuation)
+                streams += 1
+            }
         }
     }
 

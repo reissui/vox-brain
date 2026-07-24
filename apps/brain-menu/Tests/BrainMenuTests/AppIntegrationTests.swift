@@ -91,8 +91,36 @@ struct AppIntegrationTests {
     }
 
     @Test
-    func menuActivityIgnoresStandaloneDictationAndTracksOnlyBrainMeetings() async {
-        let voxType = AppVoxType()
+    func menuBarUsesBrainAtRestAndElapsedRecordingFeedbackForActiveAudio() {
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+
+        let idle = BrainMenuBarPresentation(
+            activity: .idle,
+            now: startedAt.addingTimeInterval(65)
+        )
+        #expect(idle.symbolName == "brain.head.profile")
+        #expect(idle.elapsedText == nil)
+
+        let meeting = BrainMenuBarPresentation(
+            activity: .meeting(label: "Recording meeting", startedAt: startedAt),
+            now: startedAt.addingTimeInterval(65)
+        )
+        #expect(meeting.symbolName == "record.circle.fill")
+        #expect(meeting.elapsedText == "1:05")
+        #expect(meeting.accessibilityLabel == "Recording meeting, 1:05 elapsed")
+
+        let dictation = BrainMenuBarPresentation(
+            activity: .dictation(label: "Dictating", startedAt: startedAt),
+            now: startedAt.addingTimeInterval(3_661)
+        )
+        #expect(dictation.symbolName == "mic.fill")
+        #expect(dictation.elapsedText == "1:01:01")
+        #expect(dictation.accessibilityLabel == "Dictating, 1:01:01 elapsed")
+    }
+
+    @Test
+    func menuActivityTracksStandaloneDictationAndBrainMeetings() async {
+        let voxType = AppStreamingVoxType()
         let dictation = DictationController(
             voxType: voxType,
             sleep: { _ in }
@@ -104,19 +132,32 @@ struct AppIntegrationTests {
             speechEngine: "parakeet",
             speechModel: "parakeet-tdt-0.6b-v3"
         )
-        let graph = makeGraph(meeting: meeting)
+        let dictationStart = Date(timeIntervalSince1970: 1_000)
+        let graph = makeGraph(
+            meeting: meeting,
+            dictation: dictation,
+            now: { dictationStart }
+        )
+        graph.start()
+        defer { graph.stop() }
 
-        #expect(graph.activity == .remote)
+        #expect(graph.activity == .idle)
+        await eventually { voxType.streamCount == 1 }
 
-        dictation.handle(.start)
-        #expect(graph.activity == .remote)
-        dictation.handle(.stop)
-        #expect(graph.activity == .remote)
-        await dictation.waitForPendingWork()
+        voxType.yield(appRuntimeStatus(.recording))
+        await eventually {
+            graph.activity == .dictation(label: "Dictating", startedAt: dictationStart)
+        }
+
+        voxType.yield(appRuntimeStatus(.idle))
+        await eventually { graph.activity == .idle }
 
         await graph.toggleMeeting()
         #expect(meeting.state == .recording)
-        #expect(graph.activity == .recording("Recording meeting"))
+        #expect(graph.activity == .meeting(
+            label: "Recording meeting",
+            startedAt: meeting.currentMeeting?.startedAt ?? .distantPast
+        ))
         guard case .meeting(let islandMeeting) = graph.recordingIsland.presentation else {
             Issue.record("Expected the shared island to present the active meeting")
             return
@@ -137,7 +178,7 @@ struct AppIntegrationTests {
         recorder.releaseStop()
         await stopping.value
         #expect(meeting.state == .completed)
-        #expect(graph.activity == .remote)
+        #expect(graph.activity == .idle)
         #expect(graph.recordingIsland.presentation == .hidden)
     }
 
@@ -318,27 +359,29 @@ struct AppIntegrationTests {
     }
 
     @Test
-    func standaloneVoxTypeStatusNeverDrivesBrainsRecordingIsland() async {
+    func voxTypeStatusDrivesMenuBarButNeverReplacesBrainsRecordingIsland() async {
         let voxType = AppStreamingVoxType()
-        _ = DictationController(voxType: voxType, sleep: { _ in })
+        let dictation = DictationController(voxType: voxType, sleep: { _ in })
         let meeting = MeetingController(
             detector: MeetingDetector(),
             recorder: AppMeetingRecorder(),
             speechEngine: "parakeet",
             speechModel: "parakeet-tdt-0.6b-v3"
         )
-        let graph = makeGraph(meeting: meeting)
+        let graph = makeGraph(meeting: meeting, dictation: dictation)
 
         graph.start()
         graph.start()
-        await Task.yield()
-        #expect(voxType.streamCount == 0)
+        await eventually { voxType.streamCount == 1 }
 
         voxType.yield(appRuntimeStatus(.recording))
-        await Task.yield()
+        await eventually {
+            if case .dictation = graph.activity { return true }
+            return false
+        }
         #expect(graph.recordingIsland.presentation == .hidden)
         voxType.yield(appRuntimeStatus(.transcribing))
-        await Task.yield()
+        await eventually { graph.activity == .transcribing("Transcribing dictation") }
         #expect(graph.recordingIsland.presentation == .hidden)
 
         await graph.toggleMeeting()
@@ -375,7 +418,8 @@ struct AppIntegrationTests {
         }
 
         graph.stop()
-        #expect(voxType.cancellationCount == 0)
+        await dictation.waitForMonitoringToStop()
+        #expect(voxType.cancellationCount == 1)
         #expect(graph.recordingIsland.presentation == .hidden)
     }
 
@@ -593,7 +637,9 @@ struct AppIntegrationTests {
         store: BrainStore = BrainStore(client: nil),
         onboarding: OnboardingController? = nil,
         meeting: MeetingController? = nil,
+        dictation: DictationController? = nil,
         meetings: MeetingsController? = nil,
+        now: @escaping @MainActor () -> Date = Date.init,
         meetingAnalysisFactory: @escaping @MainActor () -> (any MeetingDetailAnalysisControlling)? = { nil },
         captureRegistrar: AppCaptureHotkeyRegistrar = AppCaptureHotkeyRegistrar(),
         regionRegistrar: AppCaptureHotkeyRegistrar = AppCaptureHotkeyRegistrar()
@@ -609,6 +655,7 @@ struct AppIntegrationTests {
                     .appendingPathComponent("AppIntegrationDictation-\(UUID().uuidString)")
                     .appendingPathComponent("Dictation")
             ),
+            dictation: dictation ?? DictationController(voxType: nil),
             recordingIsland: appTestIsland(),
             meetings: meetings ?? MeetingsController(
                 store: AppEmptyMeetingStore(),
@@ -627,6 +674,7 @@ struct AppIntegrationTests {
             ),
             aiSettings: AISettingsController(settings: AppAISettings()),
             audioRetention: AudioRetentionController(),
+            now: now,
             meetingAnalysisFactory: meetingAnalysisFactory
         )
     }
