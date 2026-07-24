@@ -19,7 +19,7 @@ struct CaptureHotkeyModifiers: OptionSet, Codable, Equatable, Hashable, Sendable
 
 }
 
-struct CaptureHotkey: Codable, Equatable, Sendable {
+struct CaptureHotkey: Codable, Equatable, Hashable, Sendable {
     /// The hardware-independent macOS virtual key code.
     let keyCode: UInt16
     let modifiers: CaptureHotkeyModifiers
@@ -36,6 +36,11 @@ struct CaptureHotkey: Codable, Equatable, Sendable {
 
     static let controlOptionZ = Self(
         keyCode: 6, // kVK_ANSI_Z
+        modifiers: [.control, .option]
+    )
+
+    static let controlOptionM = Self(
+        keyCode: 46, // kVK_ANSI_M
         modifiers: [.control, .option]
     )
 

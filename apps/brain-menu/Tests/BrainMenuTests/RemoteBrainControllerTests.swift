@@ -255,9 +255,9 @@ struct RemoteBrainControllerTests {
             contentsOf: package.appending(path: "Sources/BrainMenu/Views/SettingsView.swift"),
             encoding: .utf8
         )
-        #expect(settings.contains("ActionsView(store: store)"))
-        #expect(settings.contains("MacMiniView(store: store)"))
-        #expect(settings.contains("Section(\"Remote\")"))
+        #expect(!settings.contains("ActionsView(store: store)"))
+        #expect(!settings.contains("MacMiniView(store: store)"))
+        #expect(!settings.contains("Section(\"Remote\")"))
     }
 }
 

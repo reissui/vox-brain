@@ -116,12 +116,17 @@ swift build --package-path "$app_dir" --configuration release >&2
 binary_dir="$(swift build --package-path "$app_dir" --configuration release --show-bin-path)"
 binary="$binary_dir/BrainMenu"
 observer_binary="$binary_dir/BrainDictationObserver"
+updater_binary="$binary_dir/BrainUpdater"
 if [ ! -x "$binary" ]; then
   echo "error: Swift release executable was not produced" >&2
   exit 70
 fi
 if [ ! -x "$observer_binary" ]; then
   echo "error: BrainDictationObserver release executable was not produced" >&2
+  exit 70
+fi
+if [ ! -x "$updater_binary" ]; then
+  echo "error: BrainUpdater release executable was not produced" >&2
   exit 70
 fi
 
@@ -131,6 +136,7 @@ install -m 0644 "$plist_source" "$staged_app/Contents/Info.plist"
 install -m 0644 "$app_icon" "$staged_app/Contents/Resources/Brain.icns"
 install -m 0755 "$binary" "$staged_app/Contents/MacOS/BrainMenu"
 install -m 0755 "$observer_binary" "$staged_app/Contents/Helpers/BrainDictationObserver"
+install -m 0755 "$updater_binary" "$staged_app/Contents/Helpers/BrainUpdater"
 
 runtime="$staged_app/Contents/Resources/BrainRuntime"
 mkdir -p "$runtime/scripts" "$runtime/prompts" "$runtime/system/templates"
@@ -159,6 +165,7 @@ plutil -lint "$staged_app/Contents/Info.plist" >/dev/null
 xattr -cr "$staged_app"
 strip -x "$staged_app/Contents/MacOS/BrainMenu"
 strip -x "$staged_app/Contents/Helpers/BrainDictationObserver"
+strip -x "$staged_app/Contents/Helpers/BrainUpdater"
 
 sign_args=(--force --sign "$sign_identity" --options runtime)
 if [ "$sign_identity" = "-" ]; then
@@ -169,6 +176,8 @@ fi
 
 echo "Signing helper executable: Contents/Helpers/BrainDictationObserver" >&2
 codesign "${sign_args[@]}" "$staged_app/Contents/Helpers/BrainDictationObserver"
+echo "Signing updater executable: Contents/Helpers/BrainUpdater" >&2
+codesign "${sign_args[@]}" "$staged_app/Contents/Helpers/BrainUpdater"
 echo "Signing main executable: Contents/MacOS/BrainMenu" >&2
 codesign "${sign_args[@]}" "$staged_app/Contents/MacOS/BrainMenu"
 echo "Signing outer application: Brain.app" >&2

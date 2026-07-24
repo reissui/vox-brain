@@ -13,9 +13,9 @@ Brain asks where the canonical vault should live:
 - **Remote Brain** opens the pairing flow for a separately operated Brain
   runner and HTTPS gateway.
 
-The choice controls capture, Activity, Knowledge, Ask Brain, Actions, and
-Overview. Change it later under **Settings → Storage & Mode**. Switching never
-deletes either vault.
+Activity is the local-first home screen. It shows current recording,
+transcription, analysis, and Librarian work using actual local process state,
+plus recent completed work. Remote services stay hidden unless configured.
 
 Speech and meeting setup no longer blocks first launch. VoxType is an optional
 separate installation used only for dictation and meeting transcription.
@@ -39,11 +39,10 @@ are used.
 
 Local mode provides:
 
-- atomic note, link, image, and transcript capture into the local inbox;
 - owner-only local attachment storage;
-- direct Markdown listing, search, and reading;
-- local status and health;
-- fixed `process`, `digest`, and `ask` CLI operations; and
+- direct vault access in Finder and Obsidian;
+- accurate local activity and Librarian progress;
+- fixed local Librarian processing; and
 - local meetings and optional VoxType speech.
 
 The app package contains `Contents/Resources/BrainRuntime` with the generic
@@ -51,8 +50,8 @@ Librarian charter, prompts, templates, and CLI helpers. It contains no personal
 vault content. Codex is needed for Librarian intelligence, but not for basic
 capture, storage, search, or reading.
 
-MCP, Cloudflare, pairing, remote device credentials, Gmail, and runner health
-are unavailable and hidden in local mode.
+MCP, Cloudflare, pairing, remote device credentials, Gmail, runner health, and
+private-site access are hidden in local mode.
 
 ## Remote mode
 
@@ -62,14 +61,12 @@ Remote mode preserves the existing paired-client boundary:
 - Brain.app communicates only with the public HTTPS gateway;
 - the opaque device token is stored under Keychain service
   `app.voxbrain.device`;
-- capture and jobs use stable identifiers and fixed API routes;
-- Knowledge reads the remote canonical vault;
-- Process, Digest, and Ask are fixed job kinds; and
+- jobs use stable identifiers and fixed API routes; and
 - no SSH key, runner path, Cloudflare credential, or arbitrary command reaches
   the client.
 
-Remote-only settings are grouped under **Remote**: runner health, MCP, and
-deferred Gmail status. See [the remote runbook](../../remote/README.md).
+Configured remote integrations appear only when their service is available.
+See [the remote runbook](../../remote/README.md).
 
 ## Build and install from source
 
@@ -103,6 +100,7 @@ contain:
 
 - `Contents/MacOS/BrainMenu`;
 - `Contents/Helpers/BrainDictationObserver`;
+- `Contents/Helpers/BrainUpdater`;
 - `Contents/Resources/BrainRuntime`; and
 - application metadata and signatures.
 

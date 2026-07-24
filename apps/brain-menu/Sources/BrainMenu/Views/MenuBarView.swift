@@ -85,18 +85,6 @@ struct MenuBarView: View {
             Divider()
 
             Button {
-                if let graph {
-                    graph.openQuickCapture()
-                } else {
-                    openWindow(id: BrainMenuApp.captureWindowID)
-                    NSApp.activate(ignoringOtherApps: true)
-                }
-            } label: {
-                Label("Quick Capture", systemImage: "square.and.pencil")
-            }
-            .keyboardShortcut("n", modifiers: [.command])
-
-            Button {
                 Task { await graph?.toggleMeeting() }
             } label: {
                 Label(meetingActionTitle, systemImage: meetingActionSymbol)
@@ -182,7 +170,7 @@ struct MenuBarView: View {
                     Text(snapshot.refreshedAt, style: .relative)
                 }
 
-                LabeledContent("Pending captures") {
+                LabeledContent("Ready to organize") {
                     Text(snapshot.status.counts.inbox, format: .number)
                         .monospacedDigit()
                 }

@@ -1,46 +1,44 @@
+import AppKit
 import SwiftUI
 
 struct OverviewView: View {
     let store: BrainStore
+    let graph: BrainAppControllerGraph?
+    @State private var vaultMessage: String?
 
-    private var state: BrainStatePresentation {
-        BrainPresentation.state(for: store.snapshot, isPaired: store.isReady)
+    init(store: BrainStore, graph: BrainAppControllerGraph? = nil) {
+        self.store = store
+        self.graph = graph
     }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 24) {
                 header
-
-                if store.deploymentMode == .remote && store.isPaired {
-                    PrivateSiteAccessView(store: store)
-                }
 
                 if !store.isReady {
                     ContentUnavailableView {
-                        Label("Pair Brain", systemImage: "link.badge.plus")
+                        Label("Set up Brain", systemImage: "brain.head.profile")
                     } description: {
-                        Text("Finish configuring Brain to see live status.")
-                    }
-                } else if let snapshot = store.snapshot {
-                    ForEach(BrainPresentation.checkGroups(for: snapshot.health.checks)) { group in
-                        CheckGroupView(group: group, snapshot: snapshot)
+                        Text("Finish configuring Brain to see local activity.")
                     }
                 } else {
-                    ContentUnavailableView {
-                        Label("Checking Brain", systemImage: "brain.head.profile")
-                    } description: {
-                        Text("The first Brain status refresh is in progress.")
+                    inProgress
+                    if store.deploymentMode == .local {
+                        localVault
                     }
+                    recentActivity
                 }
             }
             .padding(28)
+            .frame(maxWidth: 920, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .navigationTitle("Overview")
+        .navigationTitle("Activity")
         .toolbar {
             ToolbarItem {
                 Button {
+                    graph?.meetings.load()
                     Task { await store.refresh() }
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
@@ -48,243 +46,337 @@ struct OverviewView: View {
                 .disabled(store.isRefreshing)
             }
         }
+        .task {
+            graph?.meetings.load()
+            await store.refresh()
+        }
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Image(systemName: state.symbolName)
-                    .font(.title)
-                    .foregroundStyle(state.tone.color)
-                    .accessibilityLabel(state.accessibilityLabel)
-                Text(state.label)
-                    .font(.title.bold())
-                    .foregroundStyle(state.tone.color)
-                if store.isRefreshing {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityLabel("Refreshing Brain status")
-                }
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Activity")
+                    .font(.largeTitle.weight(.semibold))
+                Text("What Brain is recording, transcribing, and organizing on this Mac.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-
-            if let snapshot = store.snapshot {
-                let freshness = BrainPresentation.freshness(for: snapshot)
-                HStack(spacing: 6) {
-                    Text(freshness.label)
-                        .fontWeight(freshness.isStale ? .semibold : .regular)
-                    Text(freshness.isStale ? "· last successful update" : "· updated")
-                    Text(snapshot.refreshedAt, style: .relative)
+            Spacer()
+            if hasActiveWork {
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.small)
+                    Text("Working")
+                        .font(.callout.weight(.medium))
                 }
-                .font(.subheadline)
-                .foregroundStyle(freshness.isStale ? .orange : .secondary)
+                .foregroundStyle(.secondary)
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel(freshness.accessibilityLabel)
+            } else {
+                Label("Ready", systemImage: "checkmark.circle.fill")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.green)
+            }
+        }
+    }
+
+    private var inProgress: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("In progress")
+                .font(.title3.weight(.semibold))
+
+            if currentItems.isEmpty {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "checkmark.circle")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Nothing running right now")
+                            .font(.body.weight(.medium))
+                        Text("New meeting transcription and Librarian work will appear here as soon as it starts.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 14)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(currentItems) { item in
+                        activityRow(item)
+                        if item.id != currentItems.last?.id {
+                            Divider().padding(.leading, 32)
+                        }
+                    }
+                }
             }
 
             if let errorMessage = store.errorMessage {
-                Label(
-                    "Current connection error: \(errorMessage)",
-                    systemImage: "exclamationmark.triangle"
-                )
-                    .font(.subheadline)
+                Label(errorMessage, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
                     .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var localVault: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Divider()
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Explore your vault")
+                        .font(.title3.weight(.semibold))
+                    Text("Open the same local Markdown folder in Obsidian or Finder.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Show in Finder", systemImage: "folder") {
+                    guard let configuration = BrainRuntime.localConfiguration() else { return }
+                    NSWorkspace.shared.activateFileViewerSelecting([configuration.vaultURL])
+                }
+                .controlSize(.small)
+                Button("Open in Obsidian", systemImage: "arrow.up.right.square") {
+                    openVaultInObsidian()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+            if let vaultMessage {
+                Text(vaultMessage)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var recentActivity: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Divider()
+            Text("Recent")
+                .font(.title3.weight(.semibold))
+
+            if recentItems.isEmpty {
+                Text("Completed meetings and Librarian runs will appear here.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 10)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(recentItems) { item in
+                        activityRow(item)
+                        if item.id != recentItems.last?.id {
+                            Divider().padding(.leading, 32)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func activityRow(_ item: OverviewActivityItem) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Group {
+                if item.isActive {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: item.symbolName)
+                        .foregroundStyle(item.color)
+                }
+            }
+            .frame(width: 20, height: 20)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title)
+                    .font(.body.weight(.medium))
+                Text(item.detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let date = item.date {
+                    Text(date, style: .relative)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            Spacer(minLength: 12)
+        }
+        .padding(.vertical, 12)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var currentItems: [OverviewActivityItem] {
+        var items: [OverviewActivityItem] = []
+
+        if let graph {
+            switch graph.meeting.state {
+            case .starting:
+                items.append(.active("meeting-starting", "Starting meeting", "Connecting microphone and computer audio.", "mic"))
+            case .recording:
+                items.append(.active("meeting-recording", "Recording meeting", "Capturing microphone and computer audio locally.", "record.circle.fill", color: .red))
+            case .paused:
+                items.append(.active("meeting-paused", "Meeting paused", "Recording is paused until you resume or stop.", "pause.circle"))
+            case .stopSuggested:
+                items.append(.active("meeting-stop", "Recording meeting", "Brain thinks the meeting may be finished and is waiting for you to stop it.", "record.circle.fill", color: .red))
+            case .finalizing:
+                items.append(.active("meeting-finalizing", "Preparing transcript", "Saving the recording and completing the local transcript.", "waveform"))
+            case .idle, .startSuggested, .completed, .failed:
+                break
+            }
+
+            for row in graph.meetings.rows.prefix(6) {
+                if let transcription = row.badges.first(where: {
+                    $0.kind == .transcription && ["Transcribing", "Transcript pending"].contains($0.title)
+                }) {
+                    items.append(.active(
+                        "transcript-\(row.stableID)",
+                        transcription.title,
+                        row.title,
+                        transcription.systemImage
+                    ))
+                } else if let analysis = row.badges.first(where: {
+                    $0.kind == .analysis && $0.title == "Analyzing"
+                }) {
+                    items.append(.active(
+                        "analysis-\(row.stableID)",
+                        "Analyzing meeting",
+                        row.title,
+                        analysis.systemImage
+                    ))
+                }
+            }
+        }
+
+        if let activity = store.status?.activity {
+            switch activity.librarianState {
+            case .processing:
+                items.append(OverviewActivityItem(
+                    id: "librarian-processing",
+                    title: "Librarian is organizing",
+                    detail: activity.label,
+                    symbolName: "books.vertical",
+                    color: .blue,
+                    isActive: true,
+                    date: activity.startedAt
+                ))
+            case .queued:
+                items.append(OverviewActivityItem(
+                    id: "librarian-queued",
+                    title: "Ready to organize",
+                    detail: activity.label,
+                    symbolName: "tray.full",
+                    color: .secondary,
+                    isActive: false,
+                    date: nil
+                ))
+            case .idle:
+                break
+            }
+        }
+
+        return items
+    }
+
+    private var recentItems: [OverviewActivityItem] {
+        var items = (graph?.meetings.rows.prefix(5) ?? []).map { row in
+            let stage = row.badges.first(where: { $0.kind == .analysis })
+                ?? row.badges.first(where: { $0.kind == .transcription })
+            return OverviewActivityItem(
+                id: "meeting-\(row.stableID)",
+                title: row.title,
+                detail: stage?.title ?? "Meeting saved locally",
+                symbolName: stage?.systemImage ?? "person.2.wave.2",
+                color: .secondary,
+                isActive: false,
+                date: row.startedAt
+            )
+        }
+        if let lastRun = store.status?.lastRun {
+            items.append(OverviewActivityItem(
+                id: "last-librarian-run",
+                title: "Librarian finished organizing",
+                detail: lastRun.summary,
+                symbolName: "checkmark.circle",
+                color: .green,
+                isActive: false,
+                date: lastRun.at
+            ))
+        }
+        return Array(items.prefix(6))
+    }
+
+    private var hasActiveWork: Bool {
+        currentItems.contains(where: \.isActive)
+    }
+
+    private func openVaultInObsidian() {
+        guard let configuration = BrainRuntime.localConfiguration() else {
+            vaultMessage = "The local vault is not configured yet."
+            return
+        }
+        let workspace = NSWorkspace.shared
+        guard let obsidianURL = workspace.urlForApplication(withBundleIdentifier: "md.obsidian") else {
+            vaultMessage = "Obsidian is not installed. Install it, then try again."
+            if let downloadURL = URL(string: "https://obsidian.md/download") {
+                workspace.open(downloadURL)
+            }
+            return
+        }
+        let openConfiguration = NSWorkspace.OpenConfiguration()
+        openConfiguration.activates = true
+        workspace.open(
+            [configuration.vaultURL],
+            withApplicationAt: obsidianURL,
+            configuration: openConfiguration
+        ) { _, error in
+            Task { @MainActor in
+                vaultMessage = error == nil
+                    ? "Opened the local vault in Obsidian."
+                    : "Obsidian could not open the vault: \(error?.localizedDescription ?? "Unknown error")"
             }
         }
     }
 }
 
+private struct OverviewActivityItem: Identifiable {
+    let id: String
+    let title: String
+    let detail: String
+    let symbolName: String
+    let color: Color
+    let isActive: Bool
+    let date: Date?
+
+    static func active(
+        _ id: String,
+        _ title: String,
+        _ detail: String,
+        _ symbolName: String,
+        color: Color = .blue
+    ) -> Self {
+        Self(
+            id: id,
+            title: title,
+            detail: detail,
+            symbolName: symbolName,
+            color: color,
+            isActive: true,
+            date: nil
+        )
+    }
+}
+
+// Kept for paired installations, but never shown by the local-first dashboard.
 struct PrivateSiteAccessView: View {
     let store: BrainStore
 
-    private var publishCheck: BrainHealthCheck? {
-        store.health?.checks.first { $0.id == "publish.latest" }
-    }
-
     var body: some View {
-        GroupBox("Private site") {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    if let siteURL = store.privateSiteURL {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Your private Brain site")
-                                .font(.headline)
-                            Text(siteURL.absoluteString)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .textSelection(.enabled)
-                                .accessibilityLabel("Private site URL")
-                                .accessibilityValue(siteURL.absoluteString)
-                        }
-                        Spacer()
-                        Button {
-                            store.openPrivateSite()
-                        } label: {
-                            Label("Open private site", systemImage: "arrow.up.right.square")
-                        }
-                        .accessibilityHint("Opens the private site configured by the paired remote runner")
-                    } else {
-                        Label("Private site unavailable", systemImage: "lock.slash")
-                            .foregroundStyle(.secondary)
-                            .brainAccessibleStatus(
-                                .serviceUnavailable,
-                                detail: "The paired remote runner has not supplied a valid HTTPS destination"
-                            )
-                        Spacer()
-                        Text("The paired remote runner has not supplied a valid HTTPS destination.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+        if let siteURL = store.privateSiteURL {
+            LabeledContent("Private site") {
+                Button("Open private site", systemImage: "arrow.up.right.square") {
+                    store.openPrivateSite()
                 }
-
-                if let status = store.status {
-                    Divider()
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        LabeledContent("Awaiting processing") {
-                            Text(status.counts.inbox, format: .number)
-                                .monospacedDigit()
-                                .foregroundStyle(status.counts.inbox > 0 ? .blue : .secondary)
-                        }
-
-                        Text(processingSummary(count: status.counts.inbox))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        if let lastRun = status.lastRun {
-                            LabeledContent("Last Librarian activity") {
-                                Text(lastRun.at, style: .relative)
-                            }
-                        }
-
-                        if let publishCheck {
-                            LabeledContent("Latest site publish") {
-                                Text(publishLabel(for: publishCheck.state))
-                                    .foregroundStyle(publishColor(for: publishCheck.state))
-                            }
-                            Text(publishCheck.detail)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
-            }
-            .padding(.vertical, 8)
-        }
-    }
-
-    private func processingSummary(count: Int) -> String {
-        switch count {
-        case 0:
-            "The Brain inbox is clear. No delivered captures are currently waiting for Librarian processing."
-        case 1:
-            "1 capture is safely in the Brain inbox. It will not appear on the private site until the Librarian processes it."
-        default:
-            "\(count) captures are safely in the Brain inbox. They will not appear on the private site until the Librarian processes them."
-        }
-    }
-
-    private func publishLabel(for state: BrainCheckState) -> String {
-        switch state {
-        case .pass: "Published"
-        case .activity: "Publishing"
-        case .warning: "Needs attention"
-        case .failure: "Failed"
-        }
-    }
-
-    private func publishColor(for state: BrainCheckState) -> Color {
-        switch state {
-        case .pass: .green
-        case .activity: .blue
-        case .warning: .orange
-        case .failure: .red
-        }
-    }
-}
-
-private struct CheckGroupView: View {
-    let group: DashboardCheckGroup
-    let snapshot: BrainSnapshot
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label(group.scope.title, systemImage: group.scope.symbolName)
-                    .font(.headline)
-                Spacer()
-                let state = BrainPresentation.state(for: group, in: snapshot)
-                Label(state.label, systemImage: state.symbolName)
-                    .font(.subheadline)
-                    .foregroundStyle(state.tone.color)
-                    .accessibilityLabel("\(group.scope.title): \(state.accessibilityLabel)")
-            }
-
-            if group.checks.isEmpty {
-                Text("No checks reported.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 8)
-            } else {
-                ForEach(group.checks) { check in
-                    CheckRow(check: check, snapshot: snapshot)
-                }
+                .accessibilityLabel("Open private site")
+                .accessibilityValue(siteURL.absoluteString)
             }
         }
-    }
-}
-
-private struct CheckRow: View {
-    let check: BrainHealthCheck
-    let snapshot: BrainSnapshot
-
-    private var state: BrainStatePresentation {
-        BrainPresentation.state(for: check.state, in: snapshot)
-    }
-
-    private var freshness: BrainFreshnessPresentation {
-        BrainPresentation.freshness(for: snapshot)
-    }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: state.symbolName)
-                .font(.title3)
-                .foregroundStyle(state.tone.color)
-                .frame(width: 24)
-                .accessibilityLabel(state.accessibilityLabel)
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text(check.summary)
-                    .font(.body.weight(.semibold))
-                Text(check.detail)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                if let remediation = check.remediation, !remediation.isEmpty {
-                    Label(remediation, systemImage: "wrench.and.screwdriver")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 2)
-                }
-
-                HStack(spacing: 5) {
-                    Text(freshness.label)
-                        .fontWeight(freshness.isStale ? .semibold : .regular)
-                    Text("·")
-                    Text(snapshot.refreshedAt, style: .relative)
-                }
-                .font(.caption)
-                .foregroundStyle(freshness.isStale ? Color.orange : Color.secondary.opacity(0.75))
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel(freshness.accessibilityLabel)
-            }
-
-            Spacer(minLength: 8)
-        }
-        .padding(14)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
     }
 }

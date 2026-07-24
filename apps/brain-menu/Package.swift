@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .executable(name: "BrainMenu", targets: ["BrainMenu"]),
         .executable(name: "BrainDictationObserver", targets: ["BrainDictationObserver"]),
+        .executable(name: "BrainUpdater", targets: ["BrainUpdater"]),
     ],
     targets: [
         .executableTarget(name: "BrainMenu"),
@@ -18,6 +19,7 @@ let package = Package(
             name: "BrainDictationObserver",
             dependencies: ["BrainDictationObserverSupport"]
         ),
+        .executableTarget(name: "BrainUpdater"),
         .testTarget(
             name: "BrainMenuTests",
             dependencies: ["BrainMenu", "BrainDictationObserverSupport"],

@@ -218,6 +218,20 @@ struct BrainStoreTests {
         #expect(status.lastRun?.commit == nil)
         #expect(status.siteURL?.absoluteString == "https://brain-vault.example.pages.dev")
     }
+
+    @Test
+    func decodesExactLocalLibrarianProgress() throws {
+        let data = Data("""
+        {"schema_version":1,"generated_at":"2026-07-24T18:00:00Z","vault":{"path":"/tmp/brain","state":"activity","dirty_paths":5},"counts":{"inbox":5,"sources":9,"notes":18,"people":5,"projects":5},"last_run":null,"activity":{"librarian_state":"processing","label":"Organizing 5 items","started_at":"2026-07-24T17:59:00Z","item_count":5},"services":[]}
+        """.utf8)
+
+        let status = try JSONDecoder.brainDecoder().decode(BrainStatusReport.self, from: data)
+
+        #expect(status.activity?.librarianState == .processing)
+        #expect(status.activity?.label == "Organizing 5 items")
+        #expect(status.activity?.itemCount == 5)
+        #expect(status.activity?.startedAt != nil)
+    }
 }
 
 @MainActor

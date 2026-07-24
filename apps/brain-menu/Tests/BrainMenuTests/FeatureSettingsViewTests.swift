@@ -412,6 +412,27 @@ struct FeatureSettingsViewTests {
     }
 
     @Test
+    func successfullyTestedAndSavedAISettingsRemainReadyAfterReopening() async throws {
+        let suite = "FeatureSettings.ValidatedAI.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AISettingsStore(defaults: defaults)
+        let controller = AISettingsController(
+            settings: store,
+            providerFactory: FeatureAIProviderFactory(state: .ready)
+        )
+        controller.selectProvider(.codex)
+        await controller.testConnection()
+        controller.save()
+
+        let reopened = AISettingsController(settings: store)
+
+        #expect(reopened.configuration.provider == .codex)
+        #expect(reopened.testState == .result(.ready))
+        #expect(reopened.canSave)
+    }
+
+    @Test
     func settingsViewsContainNoDirectSubprocessBoundary() throws {
         let views = sourceRoot.appendingPathComponent("Views", isDirectory: true)
         for name in ["SpeechSettingsView.swift", "AISettingsView.swift"] {

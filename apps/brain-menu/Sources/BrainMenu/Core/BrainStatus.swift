@@ -44,6 +44,7 @@ struct BrainStatusReport: Codable, Equatable, Sendable {
     let vault: BrainVaultStatus
     let counts: BrainContentCounts
     let lastRun: BrainLastRun?
+    let activity: BrainLocalActivity?
     let services: [BrainServiceStatus]
     let siteURL: URL?
     let freshness: BrainReportFreshness
@@ -54,6 +55,7 @@ struct BrainStatusReport: Codable, Equatable, Sendable {
         case vault
         case counts
         case lastRun = "last_run"
+        case activity
         case services
         case siteURL = "site_url"
         case stale
@@ -67,6 +69,7 @@ struct BrainStatusReport: Codable, Equatable, Sendable {
         vault: BrainVaultStatus,
         counts: BrainContentCounts,
         lastRun: BrainLastRun?,
+        activity: BrainLocalActivity? = nil,
         services: [BrainServiceStatus],
         siteURL: URL? = nil,
         freshness: BrainReportFreshness = .fresh
@@ -76,6 +79,7 @@ struct BrainStatusReport: Codable, Equatable, Sendable {
         self.vault = vault
         self.counts = counts
         self.lastRun = lastRun
+        self.activity = activity
         self.services = services
         self.siteURL = siteURL.flatMap { BrainPrivateSiteURL.validated($0.absoluteString) }
         self.freshness = freshness
@@ -88,6 +92,7 @@ struct BrainStatusReport: Codable, Equatable, Sendable {
         vault = try container.decode(BrainVaultStatus.self, forKey: .vault)
         counts = try container.decode(BrainContentCounts.self, forKey: .counts)
         lastRun = try container.decodeIfPresent(BrainLastRun.self, forKey: .lastRun)
+        activity = try container.decodeIfPresent(BrainLocalActivity.self, forKey: .activity)
         services = try container.decode([BrainServiceStatus].self, forKey: .services)
         let rawSiteURL = try? container.decode(String.self, forKey: .siteURL)
         siteURL = rawSiteURL.flatMap(BrainPrivateSiteURL.validated)
@@ -105,6 +110,7 @@ struct BrainStatusReport: Codable, Equatable, Sendable {
         try container.encode(vault, forKey: .vault)
         try container.encode(counts, forKey: .counts)
         try container.encodeIfPresent(lastRun, forKey: .lastRun)
+        try container.encodeIfPresent(activity, forKey: .activity)
         try container.encode(services, forKey: .services)
         try container.encodeIfPresent(siteURL?.absoluteString, forKey: .siteURL)
         if freshness.isStale {
@@ -112,6 +118,26 @@ struct BrainStatusReport: Codable, Equatable, Sendable {
             try container.encodeIfPresent(freshness.ageSeconds, forKey: .ageSeconds)
             try container.encodeIfPresent(freshness.snapshotAt, forKey: .snapshotAt)
         }
+    }
+}
+
+enum BrainLibrarianActivityState: String, Codable, Equatable, Sendable {
+    case idle
+    case queued
+    case processing
+}
+
+struct BrainLocalActivity: Codable, Equatable, Sendable {
+    let librarianState: BrainLibrarianActivityState
+    let label: String
+    let startedAt: Date?
+    let itemCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case librarianState = "librarian_state"
+        case label
+        case startedAt = "started_at"
+        case itemCount = "item_count"
     }
 }
 
