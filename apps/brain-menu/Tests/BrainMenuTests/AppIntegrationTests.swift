@@ -119,6 +119,53 @@ struct AppIntegrationTests {
     }
 
     @Test
+    func menuBarExtraKeepsItsClockOutsideTheSwiftUIPlatformLabel() throws {
+        let source = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "Sources/BrainMenu/BrainMenuApp.swift"
+            ),
+            encoding: .utf8
+        )
+        let labelSection = try #require(
+            source.components(separatedBy: "private struct BrainMenuBarLabel").last?
+                .components(separatedBy: "private struct BrainRootView").first
+        )
+
+        #expect(!labelSection.contains("TimelineView"))
+        #expect(source.contains("activityClockTask"))
+        #expect(source.contains("syncActivityClock()"))
+    }
+
+    @Test
+    func menuBarClockTicksOnlyWhileLocalAudioIsActive() async throws {
+        let voxType = AppStreamingVoxType()
+        let graph = makeGraph(
+            dictation: DictationController(voxType: voxType, sleep: { _ in })
+        )
+        graph.start()
+        defer { graph.stop() }
+        await eventually { voxType.streamCount == 1 }
+
+        voxType.yield(appRuntimeStatus(.recording))
+        await eventually {
+            if case .dictation = graph.activity { return true }
+            return false
+        }
+        let activeRevision = graph.activityRevision
+        try await Task.sleep(for: .milliseconds(1_100))
+        #expect(graph.activityRevision > activeRevision)
+
+        let revisionBeforeIdle = graph.activityRevision
+        voxType.yield(appRuntimeStatus(.idle))
+        await eventually {
+            graph.activity == .idle && graph.activityRevision > revisionBeforeIdle
+        }
+        let idleRevision = graph.activityRevision
+        try await Task.sleep(for: .milliseconds(1_100))
+        #expect(graph.activityRevision == idleRevision)
+    }
+
+    @Test
     func menuActivityTracksStandaloneDictationAndBrainMeetings() async {
         let voxType = AppStreamingVoxType()
         let dictation = DictationController(

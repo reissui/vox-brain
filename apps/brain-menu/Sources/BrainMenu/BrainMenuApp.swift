@@ -141,6 +141,7 @@ final class BrainAppControllerGraph {
     @ObservationIgnored private let meetingAnalysisFactory: @MainActor () -> (any MeetingDetailAnalysisControlling)?
     @ObservationIgnored private var lastNotifiedMeetingID: UUID?
     @ObservationIgnored private var dictationStartedAt: Date?
+    @ObservationIgnored private var activityClockTask: Task<Void, Never>?
     @ObservationIgnored private let now: @MainActor () -> Date
 
     var launchDestination: BrainAppLaunchDestination {
@@ -287,6 +288,7 @@ final class BrainAppControllerGraph {
         observeDictation()
         dictation.startMonitoring()
         observeMeetingAudio()
+        syncActivityClock()
         Task {
             await onboarding.refresh()
             await speechSettings.refresh()
@@ -300,6 +302,8 @@ final class BrainAppControllerGraph {
         meetingHotkey.stop()
         dictationHistory.stopMonitoring()
         dictation.stopMonitoring()
+        activityClockTask?.cancel()
+        activityClockTask = nil
         automaticMeetingAnalysisTask?.cancel()
         automaticMeetingAnalysisTask = nil
         recordingIsland.hideImmediately()
@@ -375,7 +379,30 @@ final class BrainAppControllerGraph {
                     self.dictationStartedAt = nil
                 }
                 self.activityRevision &+= 1
+                self.syncActivityClock()
                 self.observeDictation()
+            }
+        }
+    }
+
+    private func syncActivityClock() {
+        guard isStarted, activity.startedAt != nil else {
+            activityClockTask?.cancel()
+            activityClockTask = nil
+            return
+        }
+        guard activityClockTask == nil else { return }
+        activityClockTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(1))
+                } catch {
+                    return
+                }
+                guard let self, self.isStarted, self.activity.startedAt != nil else {
+                    return
+                }
+                self.activityRevision &+= 1
             }
         }
     }
@@ -401,6 +428,7 @@ final class BrainAppControllerGraph {
         if meeting.isCapturingAudio {
             dictationStartedAt = nil
         }
+        syncActivityClock()
         if meeting.state == .completed,
            let record = meeting.currentMeeting {
             let meetingID = record.id
@@ -1353,21 +1381,19 @@ private struct BrainMenuBarLabel: View {
     let graph: BrainAppControllerGraph
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            let presentation = BrainMenuBarPresentation(
-                activity: graph.activity,
-                now: context.date
-            )
-            HStack(spacing: 4) {
-                Image(systemName: presentation.symbolName)
-                if let elapsed = presentation.elapsedText {
-                    Text(elapsed)
-                        .monospacedDigit()
-                }
+        let presentation = BrainMenuBarPresentation(
+            activity: graph.activity,
+            now: Date()
+        )
+        HStack(spacing: 4) {
+            Image(systemName: presentation.symbolName)
+            if let elapsed = presentation.elapsedText {
+                Text(elapsed)
+                    .monospacedDigit()
             }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(presentation.accessibilityLabel)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(presentation.accessibilityLabel)
             .task {
                 graph.start()
                 guard !didPresentInitialWindow else { return }
