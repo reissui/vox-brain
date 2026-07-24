@@ -7,6 +7,7 @@ destination="${BRAIN_MENU_APP_DEST:-$HOME/Applications/Brain.app}"
 destination_parent="$(dirname "$destination")"
 destination_name="$(basename "$destination")"
 entitlements="$app_dir/Resources/Brain.entitlements"
+app_icon="$app_dir/Resources/Brain.icns"
 canonical_destination="$HOME/Applications/Brain.app"
 manage_privacy="${BRAIN_MENU_MANAGE_PRIVACY:-}"
 requested_sign_identity="${BRAIN_SIGN_IDENTITY:-auto}"
@@ -99,8 +100,10 @@ swift build --package-path "$app_dir" --configuration release --product BrainMen
 swift build --package-path "$app_dir" --configuration release --product BrainDictationObserver
 binary_dir="$(swift build --package-path "$app_dir" --configuration release --show-bin-path)"
 
-mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Helpers"
+mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Helpers" \
+  "$staged_app/Contents/Resources"
 install -m 0644 "$app_dir/Resources/Info.plist" "$staged_app/Contents/Info.plist"
+install -m 0644 "$app_icon" "$staged_app/Contents/Resources/Brain.icns"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $app_version" "$staged_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$staged_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :BrainSourceSHA $source_sha" "$staged_app/Contents/Info.plist"

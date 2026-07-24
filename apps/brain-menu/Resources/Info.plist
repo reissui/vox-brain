@@ -8,6 +8,8 @@
 	<string>Brain</string>
 	<key>CFBundleExecutable</key>
 	<string>BrainMenu</string>
+	<key>CFBundleIconFile</key>
+	<string>Brain.icns</string>
 	<key>CFBundleIdentifier</key>
 	<string>app.voxbrain.menu</string>
 	<key>CFBundleInfoDictionaryVersion</key>

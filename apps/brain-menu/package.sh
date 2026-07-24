@@ -13,6 +13,7 @@ output_dir="${BRAIN_APP_OUTPUT_DIR:-$app_dir/dist}"
 sign_identity="${BRAIN_SIGN_IDENTITY:--}"
 plist_source="$app_dir/Resources/Info.plist"
 entitlements="$app_dir/Resources/Brain.entitlements"
+app_icon="$app_dir/Resources/Brain.icns"
 
 usage() {
   echo "usage: BRAIN_APP_VERSION=1.2.3 BRAIN_APP_BUILD=123 BRAIN_APP_SOURCE_SHA=<40 lowercase hex> BRAIN_APP_CHANNEL=development|test|release BRAIN_APP_BUILD_DATE=YYYY-MM-DDTHH:MM:SSZ [BRAIN_APP_OUTPUT_DIR=path] [BRAIN_SIGN_IDENTITY=identity] $0" >&2
@@ -49,7 +50,7 @@ if [ "$channel" = "release" ] && [ "$sign_identity" = "-" ]; then
   exit 64
 fi
 
-for required in "$plist_source" "$entitlements"; do
+for required in "$plist_source" "$entitlements" "$app_icon"; do
   if [ ! -f "$required" ]; then
     echo "error: required packaging input is missing: $required" >&2
     exit 66
@@ -126,8 +127,10 @@ if [ ! -x "$observer_binary" ]; then
   exit 70
 fi
 
-mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Helpers"
+mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Helpers" \
+  "$staged_app/Contents/Resources"
 install -m 0644 "$plist_source" "$staged_app/Contents/Info.plist"
+install -m 0644 "$app_icon" "$staged_app/Contents/Resources/Brain.icns"
 install -m 0755 "$binary" "$staged_app/Contents/MacOS/BrainMenu"
 install -m 0755 "$observer_binary" "$staged_app/Contents/Helpers/BrainDictationObserver"
 
