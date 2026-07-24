@@ -3,10 +3,6 @@ name: Brain.app release
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - ".github/workflows/brain-app-release.yml"
-      - "apps/brain-menu/**"
   push:
     tags:
       - "brain-v*"
@@ -14,38 +10,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: brain-app-release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  ad-hoc-test-artifact:
-    if: github.event_name == 'pull_request'
-    runs-on: macos-26
-    steps:
-      - name: Checkout Brain
-        uses: actions/checkout@v6
-
-      - name: Package ad-hoc signed Brain.app
-        id: package
-        env:
-          BRAIN_APP_VERSION: 0.0.${{ github.run_number }}
-          BRAIN_APP_BUILD: ${{ github.run_number }}
-          BRAIN_APP_SOURCE_SHA: ${{ github.sha }}
-          BRAIN_APP_CHANNEL: test
-          BRAIN_APP_OUTPUT_DIR: ${{ runner.temp }}/brain-app
-          BRAIN_SIGN_IDENTITY: "-"
-        run: |
-          export BRAIN_APP_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          archive="$(apps/brain-menu/package.sh)"
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
-
-      - name: Upload ad-hoc test artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: Brain-PR-${{ github.event.pull_request.number }}-ad-hoc
-          path: ${{ steps.package.outputs.archive }}
-          if-no-files-found: error
-
   notarized-build:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/brain-v'))
     runs-on: macos-26
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:

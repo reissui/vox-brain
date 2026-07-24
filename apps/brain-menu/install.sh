@@ -96,8 +96,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-swift build --package-path "$app_dir" --configuration release --product BrainMenu
-swift build --package-path "$app_dir" --configuration release --product BrainDictationObserver
+swift build --package-path "$app_dir" --configuration release
 binary_dir="$(swift build --package-path "$app_dir" --configuration release --show-bin-path)"
 
 mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Helpers" \

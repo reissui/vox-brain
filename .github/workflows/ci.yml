@@ -8,9 +8,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   portable:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -57,7 +62,14 @@ jobs:
 
   mac-app:
     runs-on: macos-26
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
-      - name: Swift tests
-        run: swift test --package-path apps/brain-menu
+      - name: Swift release build
+        run: swift build --package-path apps/brain-menu --configuration release
+      - name: Bundle input checks
+        run: |
+          plutil -lint apps/brain-menu/Resources/Info.plist
+          test -s apps/brain-menu/Resources/Brain.icns
+          bash -n apps/brain-menu/install.sh
+          bash -n apps/brain-menu/package.sh

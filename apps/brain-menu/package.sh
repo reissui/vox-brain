@@ -111,10 +111,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Building BrainMenu release executable" >&2
-swift build --package-path "$app_dir" --configuration release --product BrainMenu >&2
-echo "Building BrainDictationObserver release executable" >&2
-swift build --package-path "$app_dir" --configuration release --product BrainDictationObserver >&2
+echo "Building Brain release executables" >&2
+swift build --package-path "$app_dir" --configuration release >&2
 binary_dir="$(swift build --package-path "$app_dir" --configuration release --show-bin-path)"
 binary="$binary_dir/BrainMenu"
 observer_binary="$binary_dir/BrainDictationObserver"
