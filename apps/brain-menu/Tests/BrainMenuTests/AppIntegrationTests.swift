@@ -75,6 +75,29 @@ struct AppIntegrationTests {
     }
 
     @Test
+    func appLaunchAndReopenPresentDashboardAndRemoteSetupCanGoBack() throws {
+        let appSource = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "Sources/BrainMenu/BrainMenuApp.swift"
+            ),
+            encoding: .utf8
+        )
+        #expect(appSource.contains("@NSApplicationDelegateAdaptor"))
+        #expect(appSource.contains("applicationShouldHandleReopen"))
+        #expect(appSource.contains("openWindow(id: BrainMenuApp.dashboardWindowID)"))
+        #expect(appSource.contains("activate(ignoringOtherApps: true)"))
+
+        let overviewSource = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "Sources/BrainMenu/Views/OverviewView.swift"
+            ),
+            encoding: .utf8
+        )
+        #expect(overviewSource.contains("Back to setup choices"))
+        #expect(overviewSource.contains("store.returnToSetup()"))
+    }
+
+    @Test
     func menuActivityIgnoresStandaloneDictationAndTracksOnlyBrainMeetings() async {
         let voxType = AppVoxType()
         let dictation = DictationController(

@@ -122,6 +122,11 @@ enum BrainRuntime {
         clearJobContinuations(defaults: defaults)
     }
 
+    static func clearDeploymentModeSelection(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: deploymentModeDefaultsKey)
+        clearJobContinuations(defaults: defaults)
+    }
+
     static func statusClient(defaults: UserDefaults = .standard) -> (any BrainStatusAPI)? {
         switch deploymentMode(defaults: defaults) {
         case .local:

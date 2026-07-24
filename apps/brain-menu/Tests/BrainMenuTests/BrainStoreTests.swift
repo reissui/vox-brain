@@ -44,6 +44,27 @@ struct BrainStoreTests {
     }
 
     @Test
+    func unpairedRemoteRouteCanReturnToSetupWithoutDeletingPairingData() {
+        let suite = "BrainStoreTests.SetupRoute.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let pairingData = Data("preserve-pairing-metadata".utf8)
+        defaults.set(pairingData, forKey: BrainAPIClient.metadataDefaultsKey)
+        let store = BrainStore(client: nil, defaults: defaults)
+
+        store.selectRemote(defaults: defaults)
+        #expect(store.deploymentMode == .remote)
+
+        store.returnToSetup(defaults: defaults)
+
+        #expect(store.deploymentMode == nil)
+        #expect(BrainRuntime.deploymentMode(defaults: defaults) == nil)
+        #expect(defaults.data(forKey: BrainAPIClient.metadataDefaultsKey) == pairingData)
+        #expect(store.snapshot == nil)
+        #expect(store.errorMessage == nil)
+    }
+
+    @Test
     func overlappingRefreshIsIgnoredAndAPIRequestsRemainSequential() async {
         let client = StoreAPI(delay: .milliseconds(100))
         let store = BrainStore(client: client)

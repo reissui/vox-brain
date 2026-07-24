@@ -197,6 +197,14 @@ final class BrainStore {
         errorMessage = nil
     }
 
+    func returnToSetup(defaults: UserDefaults = .standard) {
+        BrainRuntime.clearDeploymentModeSelection(defaults: defaults)
+        deploymentMode = nil
+        client = nil
+        snapshot = nil
+        errorMessage = nil
+    }
+
     @discardableResult
     func openPrivateSite() -> Bool {
         guard let privateSiteURL else { return false }

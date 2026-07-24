@@ -1,6 +1,22 @@
+import AppKit
 import Foundation
 import Observation
 import SwiftUI
+
+extension Notification.Name {
+    static let brainOpenDashboardWindow = Notification.Name("BrainOpenDashboardWindow")
+}
+
+@MainActor
+final class BrainApplicationDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        NotificationCenter.default.post(name: .brainOpenDashboardWindow, object: nil)
+        return true
+    }
+}
 
 enum BrainAppLaunchDestination: Equatable, Sendable {
     case setup
@@ -1204,18 +1220,15 @@ struct BrainMenuApp: App {
     static let dashboardWindowID = "brain-dashboard"
     static let captureWindowID = "brain-capture"
 
+    @NSApplicationDelegateAdaptor(BrainApplicationDelegate.self)
+    private var applicationDelegate
     @State private var graph = BrainAppControllerGraph()
 
     var body: some Scene {
         MenuBarExtra {
             MenuBarView(graph: graph)
         } label: {
-            let state = graph.activity == .remote
-                ? BrainPresentation.state(for: graph.store.snapshot)
-                : nil
-            Image(systemName: state?.symbolName ?? graph.activity.symbolName)
-                .accessibilityLabel(state?.accessibilityLabel ?? graph.activity.label)
-                .task { graph.start() }
+            BrainMenuBarLabel(graph: graph)
         }
         .menuBarExtraStyle(.window)
 
@@ -1229,6 +1242,37 @@ struct BrainMenuApp: App {
             CaptureView(controller: graph.capture)
         }
         .defaultSize(width: 600, height: 560)
+    }
+}
+
+private struct BrainMenuBarLabel: View {
+    @Environment(\.openWindow) private var openWindow
+    @State private var didPresentInitialWindow = false
+
+    let graph: BrainAppControllerGraph
+
+    var body: some View {
+        let state = graph.activity == .remote
+            ? BrainPresentation.state(for: graph.store.snapshot)
+            : nil
+        Image(systemName: state?.symbolName ?? graph.activity.symbolName)
+            .accessibilityLabel(state?.accessibilityLabel ?? graph.activity.label)
+            .task {
+                graph.start()
+                guard !didPresentInitialWindow else { return }
+                didPresentInitialWindow = true
+                presentDashboard()
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .brainOpenDashboardWindow)
+            ) { _ in
+                presentDashboard()
+            }
+    }
+
+    private func presentDashboard() {
+        openWindow(id: BrainMenuApp.dashboardWindowID)
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }
 
