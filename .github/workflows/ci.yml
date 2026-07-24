@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            gateway/package-lock.json
+            site/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Public-data audit
+        run: scripts/public-audit
+      - name: Shell syntax
+        run: |
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(find scripts apps remote -type f \( -name '*.sh' -o -name 'brain' \) -print0)
+      - name: Python tests
+        run: |
+          python3 -m unittest discover -s apps/brain-agent/tests
+          python3 -m unittest discover -s apps/gmail-connector/tests
+          python3 -m unittest discover -s apps/telegram-bot/tests
+      - name: Browser extension tests
+        working-directory: apps/brain-clipper
+        run: npm test
+      - name: Gateway checks
+        working-directory: gateway
+        run: |
+          npm ci
+          npm audit --audit-level=high
+          npm run check
+          npm test
+      - name: Private-site build
+        working-directory: site
+        env:
+          BRAIN_SITE_CONTENT_ROOT: ${{ github.workspace }}
+        run: |
+          npm ci
+          npm audit --audit-level=high
+          npm run check
+          npm run build
+
+  mac-app:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - name: Swift tests
+        run: swift test --package-path apps/brain-menu

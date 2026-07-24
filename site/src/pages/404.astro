@@ -1,0 +1,25 @@
+---
+import BaseLayout from "@/layouts/BaseLayout.astro";
+---
+
+<BaseLayout title="Not found">
+  <main class="grid min-h-[70dvh] place-items-center px-4 text-center">
+    <div>
+      <p class="font-mono text-base text-muted-foreground sm:text-sm">404</p>
+      <h1 class="mt-3 font-serif text-5xl font-medium tracking-tight">This path hasn’t grown yet.</h1>
+      <p class="mx-auto mt-4 max-w-[50ch] text-base text-muted-foreground">
+        Search your Brain or return to the dashboard to find a connected route.
+      </p>
+      <div class="mt-8 flex justify-center gap-3">
+        <a href="/" class="rounded-lg bg-primary px-4 py-2 text-primary-foreground">Overview</a>
+        <button
+          class="rounded-lg border border-border px-4 py-2 text-muted-foreground"
+          type="button"
+          onclick="window.__openBrainSearch?.()"
+        >
+          Search
+        </button>
+      </div>
+    </div>
+  </main>
+</BaseLayout>

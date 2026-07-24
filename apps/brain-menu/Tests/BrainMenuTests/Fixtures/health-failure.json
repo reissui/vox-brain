@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-15T09:00:02Z",
+  "overall": "failure",
+  "counts": {
+    "pass": 1,
+    "activity": 0,
+    "warning": 0,
+    "failure": 1
+  },
+  "checks": [
+    {
+      "id": "vault.working_tree",
+      "scope": "vault",
+      "state": "pass",
+      "summary": "vault working tree is clean",
+      "detail": "No local changes are waiting.",
+      "remediation": null
+    },
+    {
+      "id": "inbox.stale",
+      "scope": "librarian",
+      "state": "failure",
+      "summary": "the Librarian has not cleared an inbox item within 2 hours",
+      "detail": "1 actionable inbox item is overdue; 0 known recovery items are retained separately.",
+      "remediation": "Run brain process and inspect any item that remains in inbox/."
+    }
+  ]
+}

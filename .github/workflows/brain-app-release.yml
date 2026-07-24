@@ -1,0 +1,223 @@
+---
+name: Brain.app release
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/brain-app-release.yml"
+      - "apps/brain-menu/**"
+  push:
+    tags:
+      - "brain-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  ad-hoc-test-artifact:
+    if: github.event_name == 'pull_request'
+    runs-on: macos-26
+    steps:
+      - name: Checkout Brain
+        uses: actions/checkout@v6
+
+      - name: Package ad-hoc signed Brain.app
+        id: package
+        env:
+          BRAIN_APP_VERSION: 0.0.${{ github.run_number }}
+          BRAIN_APP_BUILD: ${{ github.run_number }}
+          BRAIN_APP_SOURCE_SHA: ${{ github.sha }}
+          BRAIN_APP_CHANNEL: test
+          BRAIN_APP_OUTPUT_DIR: ${{ runner.temp }}/brain-app
+          BRAIN_SIGN_IDENTITY: "-"
+        run: |
+          export BRAIN_APP_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          archive="$(apps/brain-menu/package.sh)"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Upload ad-hoc test artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: Brain-PR-${{ github.event.pull_request.number }}-ad-hoc
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  notarized-build:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/brain-v'))
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - name: Require signing and notarization credentials
+        env:
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          required=(
+            APPLE_DEVELOPER_ID_APPLICATION
+            APPLE_CERTIFICATE_P12_BASE64
+            APPLE_CERTIFICATE_PASSWORD
+            APPLE_ID
+            APPLE_TEAM_ID
+            APPLE_APP_SPECIFIC_PASSWORD
+          )
+          missing=()
+          for secret_name in "${required[@]}"; do
+            [ -n "${!secret_name}" ] || missing+=("$secret_name")
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            printf '::error::Missing required GitHub Actions secret: %s\n' "${missing[@]}" >&2
+            echo "Configure each named encrypted secret in the repository Actions settings." >&2
+            echo "See apps/brain-menu/README.md#publish-a-notarized-release for owner-only setup." >&2
+            exit 1
+          fi
+
+      - name: Checkout Brain
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Verify release tag provenance
+        if: github.event_name == 'push'
+        run: |
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          tag_sha="$(git rev-list -n 1 "$tag_ref")"
+          head_sha="$(git rev-parse HEAD)"
+          if [ "$tag_sha" != "$GITHUB_SHA" ] || [ "$head_sha" != "$GITHUB_SHA" ]; then
+            echo "error: release tag, event SHA, and checked-out HEAD must identify the same commit" >&2
+            exit 1
+          fi
+
+      - name: Derive build version and channel
+        id: version
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            version="${GITHUB_REF_NAME#brain-v}"
+            channel=release
+            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "error: release tag must match brain-vMAJOR.MINOR.PATCH" >&2
+              exit 1
+            fi
+          else
+            version="0.0.${GITHUB_RUN_NUMBER}"
+            channel=test
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Import Developer ID Application certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          certificate="$RUNNER_TEMP/developer-id-application.p12"
+          keychain="$RUNNER_TEMP/brain-signing.keychain-db"
+          printf '%s' "$CERTIFICATE_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          rm -f "$certificate"
+
+      - name: Package Developer ID signed Brain.app
+        id: package
+        env:
+          BRAIN_APP_VERSION: ${{ steps.version.outputs.version }}
+          BRAIN_APP_BUILD: ${{ github.run_number }}
+          BRAIN_APP_SOURCE_SHA: ${{ github.sha }}
+          BRAIN_APP_CHANNEL: ${{ steps.version.outputs.channel }}
+          BRAIN_APP_OUTPUT_DIR: ${{ runner.temp }}/brain-app
+          BRAIN_SIGN_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+        run: |
+          export BRAIN_APP_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          archive="$(apps/brain-menu/package.sh)"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "app=$(dirname "$archive")/Brain-${BRAIN_APP_VERSION}/Brain.app" >> "$GITHUB_OUTPUT"
+
+      - name: Notarize and staple Brain.app
+        env:
+          APP: ${{ steps.package.outputs.app }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          xcrun notarytool submit "$ARCHIVE" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          spctl --assess --type execute --verbose=4 "$APP"
+          rm -f "$ARCHIVE"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ARCHIVE"
+
+      - name: Build, notarize, and staple installable DMG
+        id: dmg
+        env:
+          APP: ${{ steps.package.outputs.app }}
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          dmg="$RUNNER_TEMP/Brain-${VERSION}.dmg"
+          BRAIN_DMG_APP="$APP" \
+            BRAIN_DMG_OUTPUT="$dmg" \
+            BRAIN_DMG_SIGN_IDENTITY="$APPLE_DEVELOPER_ID_APPLICATION" \
+            apps/brain-menu/create-dmg.sh
+          xcrun notarytool submit "$dmg" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          codesign --verify --verbose=2 "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+          echo "dmg=$dmg" >> "$GITHUB_OUTPUT"
+
+      - name: Upload notarized build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ github.event_name == 'workflow_dispatch' && format('Brain-manual-{0}-notarized', github.run_number) || format('Brain-{0}-notarized', steps.version.outputs.version) }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.dmg.outputs.dmg }}
+          if-no-files-found: error
+
+      - name: Publish GitHub prerelease
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          DMG: ${{ steps.dmg.outputs.dmg }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          prerelease_tag="brain-test-${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          gh release create "$prerelease_tag" "$DMG" "$ARCHIVE" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --latest=false \
+            --title "Brain ${VERSION} owner test (run ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT})" \
+            --notes "Notarized owner-test build from ${GITHUB_SHA}. Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+      - name: Publish GitHub release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          DMG: ${{ steps.dmg.outputs.dmg }}
+        run: gh release create "$GITHUB_REF_NAME" "$DMG" "$ARCHIVE" --verify-tag --generate-notes --title "Brain ${{ steps.version.outputs.version }}"

@@ -1,0 +1,66 @@
+---
+import { entryHref, entryTitle, getBrainEntries } from "@/lib/content";
+
+const current = Astro.url.pathname.replace(/\/$/, "") || "/";
+const entries = (await getBrainEntries()).filter(
+  (entry) =>
+    entry.collection !== "rootPages" &&
+    entry.data.status !== "inbox",
+);
+
+const sections = [
+  {
+    title: "Notes",
+    entries: entries.filter((entry) => entry.collection === "notes"),
+  },
+  {
+    title: "Sources",
+    entries: entries.filter((entry) => entry.collection === "sources"),
+  },
+  {
+    title: "Maps",
+    entries: entries.filter((entry) => entry.collection === "maps"),
+  },
+  {
+    title: "Projects",
+    entries: entries.filter((entry) => entry.collection === "projectNotes"),
+  },
+];
+
+for (const section of sections) {
+  section.entries.sort((a, b) => entryTitle(a).localeCompare(entryTitle(b)));
+}
+---
+
+<nav class="wiki-nav" aria-label="Knowledge navigation">
+  <div class="wiki-nav-shortcuts">
+    <a href="/" aria-current={current === "/" ? "page" : undefined}>Overview</a>
+    <a href="/designs" aria-current={current === "/designs" ? "page" : undefined}>Design library</a>
+    <a href="/projects" aria-current={current === "/projects" ? "page" : undefined}>Projects</a>
+  </div>
+
+  {
+    sections.map((section) => (
+      <details open={section.title === "Notes" || section.title === "Projects"}>
+        <summary>
+          <span>{section.title}</span>
+          <span class="tabular-nums">{section.entries.length}</span>
+        </summary>
+        <div>
+          {section.entries.map((entry) => {
+            const href = entryHref(entry);
+            return (
+              <a
+                href={href}
+                aria-current={current === href ? "page" : undefined}
+                title={entryTitle(entry)}
+              >
+                {entryTitle(entry).replace(/\s+—\s+Project notes$/, "")}
+              </a>
+            );
+          })}
+        </div>
+      </details>
+    ))
+  }
+</nav>

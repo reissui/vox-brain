@@ -1,0 +1,4 @@
+interface:
+  display_name: "Learn the owner in Telegram"
+  short_description: "Safely turn chat corrections into memory"
+  default_prompt: "Use $telegram-learn-owner to judge whether this Telegram message should update the owner interaction memory."

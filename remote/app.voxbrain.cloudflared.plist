@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>app.voxbrain.cloudflared</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@CLOUDFLARED@</string>
+    <string>tunnel</string>
+    <string>run</string>
+    <string>--token-file</string>
+    <string>@TOKEN_FILE@</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@STDOUT@</string>
+  <key>StandardErrorPath</key>
+  <string>@STDERR@</string>
+</dict>
+</plist>

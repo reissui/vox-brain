@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# design-media <image-url> <out> — download one bounded design source image.
+set -euo pipefail
+
+url="${1:?usage: design-media <image-url> <out>}"
+out="${2:?usage: design-media <image-url> <out>}"
+
+python3 - "$url" "$out" <<'PY'
+import pathlib
+import sys
+import urllib.request
+
+MAX_BYTES = 4 * 1024 * 1024
+url, output = sys.argv[1:]
+request = urllib.request.Request(url, headers={"User-Agent": "BrainCapture/1.0"})
+with urllib.request.urlopen(request, timeout=15) as response:
+    declared = int(response.headers.get("Content-Length") or 0)
+    if declared > MAX_BYTES:
+        raise SystemExit("design image is larger than 4 MiB")
+    data = response.read(MAX_BYTES + 1)
+if len(data) > MAX_BYTES:
+    raise SystemExit("design image is larger than 4 MiB")
+valid = (
+    data.startswith(b"\xff\xd8")
+    or data.startswith(b"\x89PNG\r\n\x1a\n")
+    or (data.startswith(b"RIFF") and data[8:12] == b"WEBP")
+)
+if not valid:
+    raise SystemExit("design media is not a supported image")
+path = pathlib.Path(output)
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_bytes(data)
+PY

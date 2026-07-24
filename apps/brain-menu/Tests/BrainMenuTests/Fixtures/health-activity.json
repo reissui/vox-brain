@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-15T09:00:01Z",
+  "overall": "activity",
+  "counts": {
+    "pass": 2,
+    "activity": 1,
+    "warning": 0,
+    "failure": 0
+  },
+  "checks": [
+    {
+      "id": "vault.working_tree",
+      "scope": "vault",
+      "state": "activity",
+      "summary": "vault has pending capture activity",
+      "detail": "1 capture path is waiting for the Librarian.",
+      "remediation": null
+    },
+    {
+      "id": "inbox.stale",
+      "scope": "librarian",
+      "state": "pass",
+      "summary": "no overdue inbox work",
+      "detail": "Every pending inbox item is less than two hours old.",
+      "remediation": null
+    },
+    {
+      "id": "sync.agent",
+      "scope": "sync",
+      "state": "pass",
+      "summary": "pull-only sync is loaded",
+      "detail": "The five-minute pull-only sync launch agent is loaded.",
+      "remediation": null
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+---
+import { render } from "astro:content";
+import WikiLayout from "@/layouts/WikiLayout.astro";
+import {
+  entryDate,
+  entryHref,
+  entryKind,
+  entryTitle,
+  getBrainEntries,
+  publicImagePath,
+  summaryFromBody,
+  type BrainEntry,
+} from "@/lib/content";
+
+export async function getStaticPaths() {
+  const entries = (await getBrainEntries()).filter(
+    (entry) => entry.collection !== "rootPages",
+  );
+  return entries.map((entry) => ({
+    params: { slug: entryHref(entry).slice(1) },
+    props: { entry },
+  }));
+}
+
+const { entry } = Astro.props as { entry: BrainEntry };
+const { Content, headings } = await render(entry);
+const description = entry.data.description || summaryFromBody(entry.body);
+---
+
+<WikiLayout
+  title={entryTitle(entry)}
+  {description}
+  kind={entryKind(entry)}
+  date={entryDate(entry)}
+  headings={headings}
+  tags={entry.data.tags}
+  image={publicImagePath(entry.data.image)}
+>
+  <Content />
+</WikiLayout>
+
+<script>
+  const cards = [...document.querySelectorAll<HTMLElement>("[data-library-card]")];
+  const search = document.querySelector<HTMLInputElement>("[data-library-search]");
+  const buttons = [...document.querySelectorAll<HTMLButtonElement>("[data-library-filter]")];
+  const count = document.querySelector<HTMLElement>("[data-library-count]");
+  const empty = document.querySelector<HTMLElement>("[data-library-empty]");
+  let filterValue = "all";
+
+  function updateGeneratedLibrary() {
+    if (!cards.length) return;
+    const query = search?.value.trim().toLocaleLowerCase() || "";
+    let visible = 0;
+    for (const card of cards) {
+      const filterMatch =
+        filterValue === "all" || card.dataset.tags?.split(" ").includes(filterValue);
+      const queryMatch = !query || card.dataset.search?.includes(query);
+      card.hidden = !(filterMatch && queryMatch);
+      if (!card.hidden) visible += 1;
+    }
+    if (count) count.textContent = `${visible} linked ${visible === 1 ? "note" : "notes"}`;
+    if (empty) empty.style.display = visible ? "none" : "block";
+  }
+
+  search?.addEventListener("input", updateGeneratedLibrary);
+  for (const button of buttons) {
+    button.addEventListener("click", () => {
+      filterValue = button.dataset.libraryFilter || "all";
+      for (const candidate of buttons) {
+        const active = candidate === button;
+        candidate.classList.toggle("is-active", active);
+        candidate.setAttribute("aria-pressed", String(active));
+      }
+      updateGeneratedLibrary();
+    });
+  }
+</script>

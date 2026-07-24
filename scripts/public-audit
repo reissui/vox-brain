@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+failures=0
+fail() {
+  printf 'FAIL %s\n' "$*" >&2
+  failures=$((failures + 1))
+}
+
+private_roots=(daily inbox maps me notes people project-notes projects sources)
+for path in "${private_roots[@]}"; do
+  if [ -e "$path" ]; then
+    fail "private vault path is present: $path"
+  fi
+done
+
+credential_globs=(
+  '*.p12' '*.mobileprovision' '*.pem' '*.key'
+  '.dev.vars' '.dev.vars.*' '.env' '.env.*'
+  'credentials*.json' 'client_secret*.json' 'token*.json'
+)
+for pattern in "${credential_globs[@]}"; do
+  while IFS= read -r path; do
+    fail "credential-shaped file is present: ${path#./}"
+  done < <(
+    find . \
+      \( \
+        -path './.git' -o \
+        -path '*/node_modules' -o \
+        -path '*/.build' -o \
+        -path '*/dist' -o \
+        -path '*/build' -o \
+        -path '*/.astro' -o \
+        -path '*/.swiftpm' \
+      \) -prune -o \
+      -type f -name "$pattern" -print
+  )
+done
+
+operator_config_pattern='"(account_id|database_id|id)"[[:space:]]*:[[:space:]]*"[0-9a-f]{32}"'
+if rg -n --hidden \
+  --glob '!.git/**' \
+  --glob '!**/node_modules/**' \
+  --glob '!**/.build/**' \
+  --glob '!**/dist/**' \
+  --glob '!**/build/**' \
+  --glob '!**/.astro/**' \
+  --glob '!**/.swiftpm/**' \
+  --glob '!scripts/public-audit' \
+  --glob '!**/package-lock.json' \
+  "$operator_config_pattern" .; then
+  fail "operator-specific Cloudflare identifier found"
+fi
+
+secret_pattern='(-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{30,}|sk-[A-Za-z0-9]{20,})'
+if rg -n --hidden \
+  --glob '!.git/**' \
+  --glob '!**/node_modules/**' \
+  --glob '!**/.build/**' \
+  --glob '!**/dist/**' \
+  --glob '!**/build/**' \
+  --glob '!**/.astro/**' \
+  --glob '!**/.swiftpm/**' \
+  --glob '!scripts/public-audit' \
+  --glob '!**/package-lock.json' \
+  "$secret_pattern" .; then
+  fail "credential-like value found"
+fi
+
+if [ -d .git ]; then
+  tracked_private="$(git ls-files -- "${private_roots[@]}" || true)"
+  if [ -n "$tracked_private" ]; then
+    printf '%s\n' "$tracked_private" >&2
+    fail "private vault paths are tracked"
+  fi
+fi
+
+if [ "$failures" -ne 0 ]; then
+  printf 'Public audit failed with %d issue(s).\n' "$failures" >&2
+  exit 1
+fi
+
+echo "Public audit passed."

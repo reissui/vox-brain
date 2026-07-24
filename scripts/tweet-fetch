@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# tweet-fetch <x.com/twitter.com status url> — print tweet as markdown (via fxtwitter API).
+set -euo pipefail
+url="${1:?usage: tweet-fetch <tweet-url>}"
+
+python3 - "$url" <<'PY'
+import json, re, sys, urllib.request
+
+m = re.search(r"status/(\d+)", sys.argv[1])
+if not m:
+    sys.exit("not a tweet status url")
+req = urllib.request.Request("https://api.fxtwitter.com/status/" + m.group(1),
+                             headers={"User-Agent": "BrainCapture/1.0"})
+d = json.load(urllib.request.urlopen(req, timeout=15))
+t = d["tweet"]
+
+def emit(t, label="TWEET"):
+    a = t.get("author", {})
+    print(f"{label} by {a.get('name','?')} (@{a.get('screen_name','?')}) — {t.get('created_at','')}")
+    print(f"URL: {t.get('url','')}")
+    print()
+    print(t.get("text", ""))
+    media = (t.get("media") or {}).get("all") or []
+    if media:
+        print()
+        print("MEDIA:")
+        for mm in media:
+            print("-", mm.get("type", "?"), mm.get("url", ""))
+    print()
+
+emit(t)
+if t.get("quote"):
+    emit(t["quote"], label="QUOTED TWEET")
+PY

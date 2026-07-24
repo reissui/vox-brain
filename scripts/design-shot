@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# design-shot <url> <out.png> — screenshot a design capture.
+# Wraps: npx --yes playwright screenshot --browser=chromium
+#          --viewport-size=1440,900 --wait-for-timeout=4000 <url> <out.png>
+# Contract: exit 0 with the png written, or print
+#   design-shot: failed for <url>
+# to stderr and exit 1. Fail-soft by design — callers (brain add --design)
+# must never let a missing screenshot block a capture.
+set -uo pipefail
+
+url="${1:?usage: design-shot <url> <out.png>}"
+out="${2:?usage: design-shot <url> <out.png>}"
+
+fail() { echo "design-shot: failed for $url" >&2; exit 1; }
+
+mkdir -p "$(dirname "$out")" 2>/dev/null || fail
+
+npx --yes playwright screenshot \
+  --browser=chromium \
+  --viewport-size=1440,900 \
+  --wait-for-timeout=4000 \
+  "$url" "$out" >/dev/null 2>&1 || fail
+
+[ -s "$out" ] || fail

@@ -1,0 +1,2187 @@
+#!/usr/bin/env bash
+# brain — capture into and tend the owner's second brain.
+# Capture is instant and offline-safe; intelligence happens in `brain process`.
+# See README.md (usage) and CLAUDE.md (the Librarian's rules).
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_ROOT="$(dirname "$SCRIPT_DIR")"
+DEFAULT_DATA_ROOT="${HOME:?HOME must be set}/Library/Application Support/Brain/Vault"
+DATA_ROOT_INPUT="${BRAIN_DATA_ROOT:-$DEFAULT_DATA_ROOT}"
+case "$DATA_ROOT_INPUT" in
+  /*) ;;
+  *)
+    echo "error: BRAIN_DATA_ROOT must be an absolute directory: $DATA_ROOT_INPUT" >&2
+    exit 2
+    ;;
+esac
+VAULT="$(python3 - "$DATA_ROOT_INPUT" <<'PY'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).resolve(strict=False))
+PY
+)"
+INBOX="$VAULT/inbox"
+TODAY="$(date +%Y-%m-%d)"
+STAMP="$(date +%Y-%m-%d-%H%M%S)"
+PLIST="$HOME/Library/LaunchAgents/app.voxbrain.plist"
+SYNC_PLIST="$HOME/Library/LaunchAgents/app.voxbrain.sync.plist"
+MONITOR_PLIST="$HOME/Library/LaunchAgents/app.voxbrain.health.plist"
+TELEGRAM_PLIST="$HOME/Library/LaunchAgents/app.voxbrain.telegram.plist"
+SITE_PUBLISHER_PLIST="$HOME/Library/LaunchAgents/app.voxbrain.site-publisher.plist"
+GATEWAY_URL_SERVICE="app.voxbrain.gateway-url"
+GATEWAY_TOKEN_SERVICE="app.voxbrain.capture-token"
+GMAIL_CONNECTOR="$SOURCE_ROOT/apps/gmail-connector/gmail.py"
+DATA_ROOT_MARKER="$VAULT/.brain-data-root"
+LAST_RUN_FILE="$VAULT/system/last-run.json"
+SITE_PUBLISH_READY_FILE="$VAULT/system/site-publish-ready.json"
+
+# Older repository checks copied this script into throwaway Git fixtures. Keep
+# that compatibility behind a selftest-only flag; installed/runtime commands
+# never infer personal data from the source checkout.
+LEGACY_SOURCE_DATA_TEST=""
+if [ -n "${BRAIN_LEGACY_SOURCE_DATA_ROOT_FOR_TESTS:-}" ] && [ -z "${BRAIN_DATA_ROOT:-}" ]; then
+  VAULT="$SOURCE_ROOT"
+  INBOX="$VAULT/inbox"
+  DATA_ROOT_MARKER="$VAULT/.brain-data-root"
+  LAST_RUN_FILE="$VAULT/system/last-run.json"
+  SITE_PUBLISH_READY_FILE="$VAULT/system/site-publish-ready.json"
+  LEGACY_SOURCE_DATA_TEST=1
+fi
+
+usage() {
+  cat <<'EOF'
+brain — your second brain's front door
+
+  brain init-data                       create the canonical personal data folder
+  brain add [--design] <url> [why you saved it]
+  brain note <a thought...>            (or pipe: echo ... | brain note)
+  brain paste [context...]             clipboard -> inbox
+  brain meeting <file> [--title T] [--entity E]   transcript -> inbox, entity-aware
+  brain ingest --json                  atomically ingest one normalized capture from stdin
+  brain remote-note <thought...>        capture directly through the remote gateway
+  brain dictate                         Fn-dictate a thought directly into the Brain
+  brain journal <entry...>             journal; get a response grounded in your vault
+  brain process [--retry-now]          Librarian enriches & files the inbox
+  brain digest                         morning digest -> today's daily note
+  brain today                          show today's private command center
+  brain ask <question...>              answer from the vault, with citations
+  brain search <text...>               search Markdown in the canonical data folder
+  brain gmail connect <credentials.json>  connect live read-only Gmail search
+  brain gmail status [--check-api]     verify Gmail search authorization
+  brain gmail reconnect                renew Google consent (weekly in Testing)
+  brain gmail disconnect               remove local Gmail authorization
+  brain status [--json]                vault stats
+  brain doctor [--json] [--notify]     check capture, processing, and services
+  brain monitor on|status|off          run doctor every 15 minutes via launchd
+  brain clipper-token                  copy the gateway token for Chrome setup
+  brain automate on [hourly|daily]     process+digest via launchd (default: daily 07:30)
+  brain automate status                verify the installed schedule
+  brain automate off                   disable scheduled processing
+  brain source-sync [once|on|status|off]  update the application source checkout
+EOF
+}
+
+require_data_root() {
+  if [ ! -d "$VAULT" ] || { [ -z "$LEGACY_SOURCE_DATA_TEST" ] && [ ! -f "$DATA_ROOT_MARKER" ]; }; then
+    echo "error: Brain data folder is not initialized: $VAULT" >&2
+    printf 'Run: BRAIN_DATA_ROOT=%q %q init-data\n' "$VAULT" "$SCRIPT_DIR/brain" >&2
+    return 1
+  fi
+}
+
+create_if_absent() { # $1 destination; body on stdin
+  local destination="$1" temporary
+  if [ -e "$destination" ]; then
+    cat >/dev/null
+    return 0
+  fi
+  temporary="$(mktemp "${destination}.tmp.XXXXXX")" || return 1
+  cat > "$temporary"
+  chmod 600 "$temporary"
+  if ! mv -n "$temporary" "$destination" 2>/dev/null; then
+    rm -f "$temporary"
+  fi
+}
+
+cmd_init_data() {
+  if [ -e "$VAULT" ] && [ ! -d "$VAULT" ]; then
+    echo "error: Brain data root exists but is not a directory: $VAULT" >&2
+    return 1
+  fi
+  umask 077
+  local directory
+  for directory in \
+    inbox sources sources/articles sources/videos sources/tweets sources/designs sources/transcripts \
+    notes projects people me daily maps system system/attachments .trash; do
+    mkdir -p "$VAULT/$directory" || return 1
+    chmod u+rwx "$VAULT/$directory" || return 1
+  done
+  create_if_absent "$VAULT/inbox/README.md" <<'EOF'
+# Inbox
+
+Raw captures wait here for the Librarian. Run `brain process` to file them.
+EOF
+  create_if_absent "$VAULT/maps/INDEX.md" <<'EOF'
+---
+type: map
+tags: [map]
+---
+
+# Master index
+
+The Librarian keeps this index current.
+EOF
+  create_if_absent "$VAULT/maps/tags.md" <<'EOF'
+---
+type: map
+tags: [map]
+---
+
+# Tag registry
+
+| tag | meaning |
+|---|---|
+| `map` | maps of content |
+EOF
+  create_if_absent "$VAULT/maps/entities.md" <<'EOF'
+---
+type: map
+tags: [map]
+---
+
+# Entity registry
+
+| entity | kind | match keywords | destination |
+|---|---|---|---|
+EOF
+  create_if_absent "$DATA_ROOT_MARKER" <<'EOF'
+brain-data-root: 1
+EOF
+  echo "Brain data folder ready: $VAULT"
+}
+
+record_last_run() { # $1 summary
+  local summary="$1" temporary
+  mkdir -p "$VAULT/system"
+  temporary="$(mktemp "$VAULT/system/.last-run.XXXXXX")" || return 1
+  python3 - "$summary" > "$temporary" <<'PY'
+import datetime as dt
+import json
+import sys
+print(json.dumps({
+    "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    "summary": sys.argv[1],
+}, separators=(",", ":")))
+PY
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$LAST_RUN_FILE"
+}
+
+record_site_publish_ready() {
+  local temporary
+  mkdir -p "$VAULT/system"
+  temporary="$(mktemp "$VAULT/system/.site-publish-ready.XXXXXX")" || return 1
+  python3 - > "$temporary" <<'PY'
+import datetime as dt
+import json
+print(json.dumps({
+    "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+    "summary": "processed inbox (site generation complete)",
+}, separators=(",", ":")))
+PY
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$SITE_PUBLISH_READY_FILE"
+}
+
+xml_escape() {
+  python3 -c 'import html, sys; print(html.escape(sys.argv[1], quote=True))' "$1"
+}
+
+keychain_get() { # $1 service name
+  command -v security >/dev/null 2>&1 || return 1
+  security find-generic-password -a "${USER:-$(id -un)}" -s "$1" -w 2>/dev/null
+}
+
+gateway_url() {
+  if [ -n "${BRAIN_GATEWAY_URL:-}" ]; then
+    printf '%s\n' "${BRAIN_GATEWAY_URL%/}"
+  else
+    keychain_get "$GATEWAY_URL_SERVICE" | sed 's#/$##'
+  fi
+}
+
+gateway_token() {
+  if [ -n "${BRAIN_CAPTURE_TOKEN:-}" ]; then
+    printf '%s\n' "$BRAIN_CAPTURE_TOKEN"
+  else
+    keychain_get "$GATEWAY_TOKEN_SERVICE"
+  fi
+}
+
+detect_type() {
+  case "$1" in
+    *youtube.com/watch*|*youtu.be/*|*youtube.com/shorts*) echo video ;;
+    *x.com/*/status/*|*twitter.com/*/status/*) echo tweet ;;
+    *dribbble.com*|*behance.net*|*mobbin.com*|*land-book.com*|*godly.website*|*awwwards.com*|*pinterest.*) echo design ;;
+    *) echo article ;;
+  esac
+}
+
+new_item() { # $1 type $2 url -> prints file path
+  local f="$INBOX/$STAMP $1.md"
+  printf -- '---\ntype: %s\nurl: %s\ncaptured: %s\nstatus: inbox\n---\n\n' "$1" "$2" "$TODAY" > "$f"
+  echo "$f"
+}
+
+fetch_oembed() { # $1 url — prints TITLE/CHANNEL lines, fail-soft
+  python3 - "$1" 2>/dev/null <<'PY' || true
+import json, sys, urllib.request, urllib.parse
+u = "https://www.youtube.com/oembed?url=" + urllib.parse.quote(sys.argv[1], safe="") + "&format=json"
+d = json.load(urllib.request.urlopen(u, timeout=10))
+print("TITLE:", d.get("title", ""))
+print("CHANNEL:", d.get("author_name", ""))
+PY
+}
+
+fetch_article() { # $1 url — prints TITLE/DESC/IMAGE + readable text, fail-soft
+  python3 - "$1" 2>/dev/null <<'PY' || true
+import sys, urllib.request
+from html.parser import HTMLParser
+req = urllib.request.Request(sys.argv[1], headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) BrainCapture/1.0"})
+raw = urllib.request.urlopen(req, timeout=15).read()
+try:
+    txt = raw.decode("utf-8")
+except UnicodeDecodeError:
+    txt = raw.decode("latin-1", "ignore")
+
+class P(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.inp = False; self.intitle = False; self.skip = 0
+        self.buf = []; self.cur = []; self.title = ""; self.og = {}
+    def handle_starttag(self, t, attrs):
+        a = dict(attrs)
+        if t == "meta":
+            k = a.get("property") or a.get("name") or ""
+            if k in ("og:title", "og:description", "description", "og:image"):
+                self.og.setdefault(k, a.get("content", "") or "")
+        if t == "title": self.intitle = True
+        if t in ("script", "style", "nav", "header", "footer", "aside", "noscript", "form"): self.skip += 1
+        if t == "p" and not self.skip: self.inp = True; self.cur = []
+    def handle_endtag(self, t):
+        if t == "title": self.intitle = False
+        if t in ("script", "style", "nav", "header", "footer", "aside", "noscript", "form"): self.skip = max(0, self.skip - 1)
+        if t == "p" and self.inp:
+            s = " ".join("".join(self.cur).split())
+            if len(s) > 60: self.buf.append(s)
+            self.inp = False
+    def handle_data(self, d):
+        if self.intitle: self.title += d
+        if self.inp and not self.skip: self.cur.append(d)
+
+p = P(); p.feed(txt)
+print("TITLE:", (p.og.get("og:title") or p.title).strip()[:300])
+desc = (p.og.get("og:description") or p.og.get("description") or "").strip()
+if desc: print("DESC:", desc[:500])
+if p.og.get("og:image"): print("IMAGE:", p.og["og:image"])
+print("---")
+words = 0
+for s in p.buf:
+    print(s); print()
+    words += len(s.split())
+    if words > 3500:
+        print("*(extraction truncated ~3500 words — Librarian: WebFetch the url if more is needed)*")
+        break
+PY
+}
+
+cmd_add() {
+  local design=""
+  [ "${1:-}" = "--design" ] && { design=1; shift; }
+  local url="${1:?usage: brain add [--design] <url> [note]}"; shift || true
+  case "$url" in http*) ;; *) url="https://$url" ;; esac
+  local note="${*:-}"
+  local type; type="$(detect_type "$url")"
+  [ -n "$design" ] && type="design"
+
+  local f; f="$(new_item "$type" "$url")"
+  [ -n "$note" ] && printf '## Why saved\n%s\n\n' "$note" >> "$f"
+  printf '## Raw\n\n' >> "$f"
+
+  case "$type" in
+    video)
+      fetch_oembed "$url" >> "$f"
+      printf '\n### Transcript\n\n' >> "$f"
+      "$SCRIPT_DIR/yt-transcript" "$url" >> "$f" 2>/dev/null \
+        || printf '(transcript unavailable at capture time — Librarian: retry with scripts/yt-transcript)\n' >> "$f"
+      ;;
+    tweet)
+      "$SCRIPT_DIR/tweet-fetch" "$url" >> "$f" 2>/dev/null \
+        || printf '(tweet fetch failed at capture time — Librarian: retry with scripts/tweet-fetch)\n' >> "$f"
+      ;;
+    article|design)
+      local design_media=""
+      if [ "$type" = "design" ] && [[ "$url" =~ (x\.com|twitter\.com)/.*/status/ ]]; then
+        local tweet_raw
+        tweet_raw="$("$SCRIPT_DIR/tweet-fetch" "$url" 2>/dev/null || true)"
+        if [ -n "$tweet_raw" ]; then
+          printf '%s\n' "$tweet_raw" >> "$f"
+          design_media="$(printf '%s\n' "$tweet_raw" | sed -n 's/^- photo //p' | head -n1)"
+        else
+          printf '(tweet fetch failed at capture time — Librarian: retry with scripts/tweet-fetch)\n' >> "$f"
+        fi
+      else
+        fetch_article "$url" >> "$f" \
+          || printf '(fetch failed at capture time — Librarian: WebFetch the url)\n' >> "$f"
+      fi
+      if [ "$type" = "design" ]; then
+        local extension="png" shot=""
+        case "${design_media%%\?*}" in
+          *.jpg|*.jpeg) extension="jpg" ;;
+          *.webp) extension="webp" ;;
+          *.png) extension="png" ;;
+        esac
+        shot="system/attachments/design-$STAMP.$extension"
+        if [ -n "$design_media" ] && "$SCRIPT_DIR/design-media" "$design_media" "$VAULT/$shot" >/dev/null 2>&1; then
+          printf '\nIMAGE-LOCAL: %s\n![[%s]]\n' "$shot" "$(basename "$shot")" >> "$f"
+        elif { shot="system/attachments/design-$STAMP.png"; "$SCRIPT_DIR/design-shot" "$url" "$VAULT/$shot" >/dev/null 2>&1; }; then
+          printf '\nIMAGE-LOCAL: %s\n![[design-%s.png]]\n' "$shot" "$STAMP" >> "$f"
+        else
+          printf '\n(screenshot failed at capture time — Librarian: retry with scripts/design-shot) #needs/content\n' >> "$f"
+        fi
+      fi
+      ;;
+  esac
+  echo "captured -> ${f#"$VAULT"/}"
+}
+
+cmd_note() {
+  local text="${*:-}"
+  [ -z "$text" ] && [ ! -t 0 ] && text="$(cat)"
+  [ -z "$text" ] && { echo "usage: brain note <text>"; exit 1; }
+  local f="$INBOX/$STAMP note.md"
+  printf -- '---\ntype: note\ncaptured: %s\nstatus: inbox\n---\n\n## Note\n%s\n' "$TODAY" "$text" > "$f"
+  echo "captured -> ${f#"$VAULT"/}"
+}
+
+cmd_paste() {
+  local content; content="$(pbpaste)"
+  [ -z "$content" ] && { echo "clipboard is empty"; exit 1; }
+  local f="$INBOX/$STAMP paste.md"
+  printf -- '---\ntype: note\ncaptured: %s\nstatus: inbox\nvia: clipboard\n---\n\n' "$TODAY" > "$f"
+  [ -n "${*:-}" ] && printf '## Why saved\n%s\n\n' "$*" >> "$f"
+  printf '## Content\n\n%s\n' "$content" >> "$f"
+  echo "captured -> ${f#"$VAULT"/} ($(printf %s "$content" | wc -c | tr -d ' ') chars)"
+}
+
+guess_entity() { # $1 title $2 transcript-file — prints first entity from maps/entities.md
+  # whose keyword (case-insensitive substring) hits the title or first 50 lines.
+  local reg="$VAULT/maps/entities.md"
+  [ -f "$reg" ] || return 0
+  { printf '%s\n' "$1"; head -n 50 "$2"; } | awk -v reg="$reg" '
+    { hay = hay "\n" tolower($0) }
+    END {
+      while ((getline line < reg) > 0) {
+        if (split(line, col, "|") < 5) continue        # not a table row
+        name = trim(col[2])
+        if (name == "" || tolower(name) == "entity" || name ~ /^-/) continue
+        m = split(col[4], kws, ",")                    # match-keywords column
+        for (i = 1; i <= m; i++) {
+          kw = tolower(trim(kws[i]))
+          if (kw != "" && index(hay, kw) > 0) { print name; exit }
+        }
+      }
+    }
+    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }'
+}
+
+cmd_meeting() {
+  local src="" title="" entity=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --title)  title="${2:-}";  shift 2 || break ;;
+      --entity) entity="${2:-}"; shift 2 || break ;;
+      *) src="$1"; shift ;;
+    esac
+  done
+  if [ -z "$src" ] || [ ! -s "$src" ]; then
+    echo "usage: brain meeting <transcript-file> [--title T] [--entity E]   (transcript must exist and be non-empty)"
+    exit 1
+  fi
+  if [ -z "$title" ]; then
+    title="$(basename "$src")"; title="${title%.*}"
+  fi
+  [ -z "$entity" ] && entity="$(guess_entity "$title" "$src")"
+
+  local f="$INBOX/$STAMP transcript.md"
+  {
+    printf -- '---\ntype: transcript\ntitle: %s\n' "$title"
+    [ -n "$entity" ] && printf 'entity: %s\n' "$entity"
+    printf 'captured: %s\nvia: meeting\nstatus: inbox\n---\n\n## Raw\n\n' "$TODAY"
+    cat < "$src"
+  } > "$f"
+  echo "captured -> ${f#"$VAULT"/}"
+}
+
+cmd_ingest() {
+  [ "${1:-}" = "--json" ] && [ "$#" -eq 1 ] || {
+    echo "usage: brain ingest --json" >&2
+    return 2
+  }
+
+  # The program is supplied on fd 3 so stdin remains the byte stream carrying
+  # the capture envelope. User values never cross a shell evaluation boundary.
+  python3 -c 'import os; exec(os.fdopen(3).read())' "$VAULT" 3<<'PY'
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import tempfile
+import uuid
+
+
+class IngestError(Exception):
+    pass
+
+
+REQUIRED = {"id", "captured_at", "type", "source"}
+OPTIONAL_STRINGS = {
+    "url", "text", "note", "title", "entity", "object_path", "object_sha256",
+    "object_mime", "object_filename", "storage_mode",
+}
+OPTIONAL = OPTIONAL_STRINGS | {"object_size"}
+OBJECT_FIELDS = {
+    "object_path", "object_sha256", "object_mime", "object_size", "object_filename",
+}
+CAPTURE_TYPES = {"article", "video", "tweet", "design", "note", "transcript"}
+MAX_OBJECT_BYTES = 6 * 1024 * 1024
+UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+TIMESTAMP_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?"
+)
+CONTENT_TYPE_RE = re.compile(
+    r"[a-z0-9][a-z0-9!#$&^_.+-]{0,126}/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}"
+)
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise IngestError("duplicate JSON field: " + str(key))
+        result[key] = value
+    return result
+
+
+def read_payload():
+    raw = sys.stdin.buffer.read()
+    if not raw.strip():
+        raise IngestError("standard input must contain one JSON object")
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys)
+    except UnicodeDecodeError as exc:
+        raise IngestError("JSON input must be UTF-8") from exc
+    except json.JSONDecodeError as exc:
+        raise IngestError("malformed JSON input") from exc
+    if not isinstance(value, dict):
+        raise IngestError("JSON input must be one object")
+    missing = REQUIRED - value.keys()
+    unknown = value.keys() - REQUIRED - OPTIONAL
+    if missing:
+        raise IngestError("missing required field(s): " + ", ".join(sorted(missing)))
+    if unknown:
+        raise IngestError("unknown field(s): " + ", ".join(sorted(unknown)))
+    for key in REQUIRED | (OPTIONAL_STRINGS & value.keys()):
+        if not isinstance(value[key], str):
+            raise IngestError(key + " must be a string")
+    if "object_size" in value and (
+        isinstance(value["object_size"], bool) or not isinstance(value["object_size"], int)
+    ):
+        raise IngestError("object_size must be an integer")
+    if not value["source"]:
+        raise IngestError("source must not be empty")
+    if value.get("storage_mode", "remote") not in {"local", "remote"}:
+        raise IngestError("storage_mode must be local or remote")
+    present_object_fields = OBJECT_FIELDS & value.keys()
+    if present_object_fields and present_object_fields != OBJECT_FIELDS:
+        missing_object_fields = OBJECT_FIELDS - present_object_fields
+        raise IngestError(
+            "incomplete object reference; missing: " + ", ".join(sorted(missing_object_fields))
+        )
+    if present_object_fields and value["type"] == "transcript":
+        raise IngestError("transcripts store exact text locally and cannot reference a binary object")
+    return value
+
+
+def validate_identity(payload):
+    capture_id = payload["id"]
+    if not UUID_RE.fullmatch(capture_id):
+        raise IngestError("id must be an RFC 4122 UUID")
+    parsed_id = uuid.UUID(capture_id)
+    if parsed_id.variant != uuid.RFC_4122:
+        raise IngestError("id must be an RFC 4122 UUID")
+
+    captured_at = payload["captured_at"]
+    if not TIMESTAMP_RE.fullmatch(captured_at):
+        raise IngestError("captured_at must be an ISO-8601 timestamp")
+    try:
+        parsed_at = dt.datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise IngestError("captured_at must be an ISO-8601 timestamp") from exc
+
+    capture_type = payload["type"]
+    if capture_type not in CAPTURE_TYPES:
+        raise IngestError("type must be one of: " + ", ".join(sorted(CAPTURE_TYPES)))
+    return parsed_id, parsed_at
+
+
+def verify_object(payload, vault):
+    source_path = payload.get("object_path")
+    if source_path is None:
+        return None
+    if not source_path:
+        raise IngestError("object_path must not be empty")
+    candidate = Path(source_path)
+    if not candidate.is_absolute() or ".." in candidate.parts:
+        raise IngestError("object_path must be absolute without traversal components")
+    try:
+        candidate.relative_to(vault)
+    except ValueError:
+        pass
+    else:
+        raise IngestError("object_path must be outside the canonical data root")
+
+    expected_digest = payload["object_sha256"]
+    content_type = payload["object_mime"]
+    expected_size = payload["object_size"]
+    filename = payload["object_filename"]
+    if SHA256_RE.fullmatch(expected_digest) is None:
+        raise IngestError("object_sha256 must be a lowercase SHA-256 digest")
+    if CONTENT_TYPE_RE.fullmatch(content_type) is None or content_type.startswith("text/"):
+        raise IngestError("object_mime must be a safe binary media type")
+    if expected_size < 0 or expected_size > MAX_OBJECT_BYTES:
+        raise IngestError("object_size is outside the supported range")
+    if (
+        not filename
+        or len(filename) > 180
+        or filename in (".", "..")
+        or "/" in filename
+        or "\\" in filename
+        or any(ord(character) < 32 or ord(character) == 127 for character in filename)
+    ):
+        raise IngestError("object_filename must be a safe basename")
+    try:
+        before = os.lstat(source_path)
+    except OSError as exc:
+        raise IngestError("object_path must be an existing regular non-symlink file") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise IngestError("object_path must be an existing regular non-symlink file")
+    if stat.S_IMODE(before.st_mode) & 0o077:
+        raise IngestError("object_path must be owner-only")
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(source_path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise IngestError("object_path must be a regular file")
+            if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+                raise IngestError("object_path changed during validation")
+            digest = hashlib.sha256()
+            size = 0
+            chunks = []
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                digest.update(chunk)
+                chunks.append(chunk)
+            if size != expected_size:
+                raise IngestError("object_size does not match the verified file")
+            if digest.hexdigest() != expected_digest:
+                raise IngestError("object_sha256 does not match the verified file")
+            return {
+                "uri": "brain://capture/" + payload["id"],
+                "sha256": expected_digest,
+                "mime": content_type,
+                "size": expected_size,
+                "filename": filename,
+                "data": b"".join(chunks),
+            }
+    except IngestError:
+        raise
+    except OSError as exc:
+        raise IngestError("could not safely read object_path") from exc
+
+
+def materialize_local_object(vault, capture_id, object_reference):
+    if object_reference is None:
+        return None
+    attachments = vault / "system" / "attachments"
+    if not attachments.is_dir() or attachments.is_symlink():
+        raise IngestError("local attachment directory is unavailable")
+    safe_name = capture_id + "-" + object_reference["filename"]
+    destination = attachments / safe_name
+    data = object_reference["data"]
+    if destination.exists():
+        if destination.is_symlink() or not destination.is_file():
+            raise IngestError("local attachment destination is invalid")
+        if hashlib.sha256(destination.read_bytes()).hexdigest() != object_reference["sha256"]:
+            raise IngestError("local attachment destination already has different content")
+    else:
+        temporary = write_temp(attachments, data)
+        try:
+            os.chmod(temporary, 0o600)
+            os.link(temporary, destination)
+        except FileExistsError:
+            if hashlib.sha256(destination.read_bytes()).hexdigest() != object_reference["sha256"]:
+                raise IngestError("local attachment destination already has different content")
+        except OSError as exc:
+            raise IngestError("could not atomically store the local attachment") from exc
+        finally:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+    return {
+        "uri": "system/attachments/" + safe_name,
+        "sha256": object_reference["sha256"],
+        "mime": object_reference["mime"],
+        "size": object_reference["size"],
+        "filename": safe_name,
+    }
+
+
+def capture_digest(payload):
+    semantic = {key: value for key, value in payload.items() if key != "object_path"}
+    # Preserve the historical text-capture digest shape while making a binary
+    # replay independent of the random private verification path.
+    semantic["attachment_sha256"] = payload.get("object_sha256")
+    encoded = json.dumps(
+        semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def frontmatter_value(value):
+    # JSON string quoting is valid YAML and prevents frontmatter injection.
+    return json.dumps(value, ensure_ascii=False)
+
+
+def render_note(payload, capture_id, digest, object_reference):
+    storage_mode = payload.get("storage_mode", "remote")
+    lines = [
+        "---",
+        "type: " + payload["type"],
+    ]
+    for key in ("url", "title", "entity"):
+        if key in payload:
+            lines.append(key + ": " + frontmatter_value(payload[key]))
+    lines.extend(
+        [
+            "source: " + frontmatter_value(payload["source"]),
+            "capture_id: " + capture_id,
+            "capture_hash: " + digest,
+            "captured: " + payload["captured_at"],
+            "status: inbox",
+            "via: " + storage_mode,
+        ]
+    )
+    if object_reference is not None:
+        if storage_mode == "local":
+            lines.append("image: " + frontmatter_value(object_reference["uri"]))
+        else:
+            lines.append("brain_object: " + frontmatter_value(object_reference["uri"]))
+        lines.extend(
+            [
+                "object_sha256: " + object_reference["sha256"],
+                "object_mime: " + frontmatter_value(object_reference["mime"]),
+                "object_size: " + str(object_reference["size"]),
+                "object_filename: " + frontmatter_value(object_reference["filename"]),
+            ]
+        )
+    data = ("\n".join(lines) + "\n---\n").encode("utf-8")
+
+    # Put the stable object reference first, leaving the final user
+    # field as the exact tail of the file. This makes byte preservation
+    # observable even when the input deliberately has no trailing newline.
+    sections = []
+    if object_reference is not None:
+        if storage_mode == "local":
+            sections.append(("Original", "![[" + object_reference["filename"] + "]]"))
+        else:
+            sections.append(
+                ("Original", "[Open the permanent original](" + object_reference["uri"] + ")")
+            )
+    if "note" in payload:
+        sections.append(("Why saved", payload["note"]))
+    if "text" in payload:
+        heading = "Transcript" if payload["type"] == "transcript" else "Raw"
+        sections.append((heading, payload["text"]))
+    for index, (heading, value) in enumerate(sections):
+        data += ("\n## " + heading + "\n\n").encode("utf-8")
+        data += value.encode("utf-8")
+        if index + 1 < len(sections):
+            data += b"\n"
+    return data
+
+
+def existing_capture(vault, capture_id):
+    wanted_id = re.compile(
+        rb"^capture_id:[ \t]*[\"']?" + re.escape(capture_id.encode("ascii")) + rb"[\"']?[ \t]*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+    hash_line = re.compile(rb"^capture_hash:[ \t]*([0-9a-f]{64})[ \t]*$", re.MULTILINE)
+    for root, directories, filenames in os.walk(vault):
+        directories[:] = [name for name in directories if name != ".git"]
+        for filename in filenames:
+            if not filename.endswith(".md"):
+                continue
+            path = Path(root, filename)
+            if path.is_symlink():
+                continue
+            try:
+                with path.open("rb") as handle:
+                    if handle.readline().rstrip(b"\r\n") != b"---":
+                        continue
+                    frontmatter = bytearray()
+                    for line in handle:
+                        if line.rstrip(b"\r\n") == b"---":
+                            break
+                        frontmatter.extend(line)
+            except OSError:
+                continue
+            if not wanted_id.search(frontmatter):
+                continue
+            match = hash_line.search(frontmatter)
+            stored_hash = match.group(1).decode("ascii") if match else None
+            return path, stored_hash
+    return None, None
+
+
+def write_temp(directory, data):
+    descriptor, name = tempfile.mkstemp(prefix=".brain-ingest-", dir=directory)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
+        raise
+    return name
+
+
+def publish(note_path, note_data):
+    note_temp = None
+    try:
+        note_temp = write_temp(note_path.parent, note_data)
+        if note_path.exists():
+            raise IngestError("deterministic capture destination already exists")
+
+        # Hard-linking a completed same-directory temporary file is atomic and
+        # refuses to overwrite a concurrently-created destination.
+        os.link(note_temp, note_path)
+    except FileExistsError as exc:
+        raise IngestError("deterministic capture destination already exists") from exc
+    except IngestError:
+        raise
+    except OSError as exc:
+        raise IngestError("could not atomically materialize capture") from exc
+    finally:
+        for temporary in (note_temp,):
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+
+
+def main():
+    vault = Path(sys.argv[1]).resolve()
+    payload = read_payload()
+    parsed_id, parsed_at = validate_identity(payload)
+    capture_id = str(parsed_id)
+    object_reference = verify_object(payload, vault)
+    digest = capture_digest(payload)
+
+    previous_path, previous_hash = existing_capture(vault, capture_id)
+    if previous_path is not None:
+        if previous_hash == digest:
+            print("already captured -> " + str(previous_path.relative_to(vault)))
+            return
+        raise IngestError("capture UUID already exists with different content")
+
+    if payload.get("storage_mode", "remote") == "local":
+        object_reference = materialize_local_object(vault, capture_id, object_reference)
+    elif object_reference is not None:
+        object_reference.pop("data", None)
+
+    stamp = parsed_at.strftime("%Y-%m-%d-%H%M%S")
+    basename = stamp + " " + parsed_id.hex[:8] + " " + payload["type"]
+    note_path = vault / "inbox" / (basename + ".md")
+    if not note_path.parent.is_dir():
+        raise IngestError("canonical vault destination is missing")
+    note_data = render_note(payload, capture_id, digest, object_reference)
+    publish(note_path, note_data)
+    print("captured -> " + str(note_path.relative_to(vault)))
+
+
+try:
+    main()
+except IngestError as exc:
+    print("error: " + str(exc), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+cmd_remote_note() {
+  local text="${*:-}" url token result
+  [ -z "$text" ] && [ ! -t 0 ] && text="$(cat)"
+  [ -z "$text" ] && { echo "usage: brain remote-note <text>"; return 1; }
+  url="$(gateway_url 2>/dev/null || true)"
+  token="$(gateway_token 2>/dev/null || true)"
+  if [ -z "$url" ] || [ -z "$token" ]; then
+    echo "error: remote capture is not configured — run apps/brain-dictation/install.sh" >&2
+    return 1
+  fi
+
+  if ! result="$(printf '%s\0%s\0%s' "$url" "$token" "$text" | python3 -c '
+import json, sys, urllib.error, urllib.request
+
+parts = sys.stdin.buffer.read().split(b"\0", 2)
+if len(parts) != 3:
+    raise SystemExit("invalid capture input")
+url, token, text = (part.decode("utf-8") for part in parts)
+payload = json.dumps({
+    "type": "note",
+    "text": text,
+    "source": "mac-dictation",
+}).encode("utf-8")
+request = urllib.request.Request(
+    url.rstrip("/") + "/capture",
+    data=payload,
+    method="POST",
+    headers={
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+        "User-Agent": "BrainDictation/1.0",
+    },
+)
+try:
+    with urllib.request.urlopen(request, timeout=20) as response:
+        body = response.read().decode("utf-8", "replace")
+        status = response.status
+except urllib.error.HTTPError as exc:
+    body = exc.read().decode("utf-8", "replace")
+    status = exc.code
+except OSError as exc:
+    raise SystemExit("gateway request failed: " + str(exc))
+if status != 201:
+    raise SystemExit("gateway returned %s: %s" % (status, body[:300]))
+try:
+    print(json.loads(body)["path"])
+except (KeyError, ValueError, TypeError):
+    raise SystemExit("gateway returned an invalid success response")
+' 2>&1)"; then
+    echo "error: $result" >&2
+    return 1
+  fi
+  echo "captured remotely -> $result"
+}
+
+cmd_dictate() {
+  command -v osascript >/dev/null 2>&1 || {
+    echo "error: Brain dictation requires macOS" >&2
+    return 1
+  }
+  osascript "$SOURCE_ROOT/apps/brain-dictation/brain-dictate.applescript" "$SCRIPT_DIR/brain"
+}
+
+cmd_clipper_token() {
+  local token
+  token="$(gateway_token 2>/dev/null || true)"
+  [ -n "$token" ] || {
+    echo "error: capture token is not configured — run apps/brain-dictation/install.sh" >&2
+    return 1
+  }
+  command -v pbcopy >/dev/null 2>&1 || {
+    echo "error: clipboard is unavailable" >&2
+    return 1
+  }
+  printf '%s' "$token" | pbcopy
+  echo "capture token copied to the clipboard (it was not printed)"
+}
+
+inbox_count() { find "$INBOX" -name '*.md' ! -name 'README.md' | wc -l | tr -d ' '; }
+
+classify_legacy_source_tree() {
+  python3 - "$VAULT" <<'PY'
+import os
+import re
+import subprocess
+import sys
+
+vault = sys.argv[1]
+result = subprocess.run(
+    ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    cwd=vault,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+)
+if result.returncode:
+    print("warning\t0")
+    raise SystemExit
+
+items = result.stdout.split(b"\0")
+paths = []
+i = 0
+while i < len(items):
+    item = items[i]
+    i += 1
+    if not item:
+        continue
+    status = item[:2].decode("ascii", "replace")
+    paths.append(item[3:].decode("utf-8", "surrogateescape"))
+    if "R" in status or "C" in status:
+        if i < len(items) and items[i]:
+            paths.append(items[i].decode("utf-8", "surrogateescape"))
+            i += 1
+
+if not paths:
+    print("clean\t0")
+    raise SystemExit
+
+inbox_stamps = set()
+attachment_refs = set()
+inbox = os.path.join(vault, "inbox")
+try:
+    inbox_names = os.listdir(inbox)
+except OSError:
+    inbox_names = []
+for name in inbox_names:
+    match = re.match(r"^(\d{4}-\d{2}-\d{2}-\d{6})", name)
+    if match:
+        inbox_stamps.add(match.group(1))
+    path = os.path.join(inbox, name)
+    if not os.path.isfile(path) or not name.endswith(".md"):
+        continue
+    try:
+        content = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        continue
+    attachment_refs.update(
+        match.group(1).strip()
+        for match in re.finditer(r"(?:IMAGE-LOCAL:\s*|!\[\[)(system/attachments/[^\]\n]+)", content)
+    )
+
+def capture_path(path):
+    path = path.lstrip("./")
+    if path == "inbox" or path.startswith("inbox/"):
+        return True
+    if not path.startswith("system/attachments/"):
+        return False
+    if path in attachment_refs:
+        return True
+    base = os.path.basename(path)
+    return any(stamp in base for stamp in inbox_stamps)
+
+state = "activity" if all(capture_path(path) for path in paths) else "warning"
+print(f"{state}\t{len(paths)}")
+PY
+}
+
+classify_data_tree() {
+  local pending
+  pending="$(inbox_count)"
+  if [ "$pending" -gt 0 ]; then
+    printf 'activity\t%s\n' "$pending"
+  else
+    printf 'clean\t0\n'
+  fi
+}
+
+inbox_processing_counts() {
+  python3 - "$INBOX" "$TODAY" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+inbox = Path(sys.argv[1])
+today = sys.argv[2]
+total = due = deferred = 0
+try:
+    paths = list(inbox.glob("*.md"))
+except OSError:
+    paths = []
+for path in paths:
+    if path.name == "README.md" or not path.is_file():
+        continue
+    total += 1
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        due += 1
+        continue
+    needs_recovery = bool(re.search(r"(?m)^tags:\s*\[[^\]]*needs/", text))
+    already_retried = bool(re.search(r"(?m)^RETRY:\s*" + re.escape(today) + r"\b", text))
+    if needs_recovery and already_retried:
+        deferred += 1
+    else:
+        due += 1
+print(f"{total}\t{due}\t{deferred}")
+PY
+}
+
+stale_inbox_counts() {
+  python3 - "$INBOX" <<'PY'
+import datetime as dt
+import os
+import re
+import sys
+
+inbox = sys.argv[1]
+now = dt.datetime.now().astimezone()
+stale = []
+retained = []
+try:
+    entries = os.scandir(inbox)
+except OSError:
+    print("0\t0")
+    raise SystemExit
+
+for entry in entries:
+    if not entry.is_file() or entry.name == "README.md" or not entry.name.endswith(".md"):
+        continue
+    captured = None
+    text = ""
+    try:
+        with open(entry.path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        pass
+    match = re.match(r"^(\d{4}-\d{2}-\d{2}-\d{6})", entry.name)
+    if match:
+        try:
+            captured = dt.datetime.strptime(match.group(1), "%Y-%m-%d-%H%M%S").replace(tzinfo=now.tzinfo)
+        except ValueError:
+            pass
+    if captured is None:
+        lines = text.splitlines()
+        if lines and lines[0].strip() == "---":
+            for line in lines[1:]:
+                line = line.strip()
+                if line == "---":
+                    break
+                match = re.match(r"captured:\s*['\"]?([^'\"\s]+)", line)
+                if not match:
+                    continue
+                value = match.group(1)
+                try:
+                    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                        captured = dt.datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=now.tzinfo)
+                    else:
+                        captured = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+                        if captured.tzinfo is None:
+                            captured = captured.replace(tzinfo=now.tzinfo)
+                except ValueError:
+                    captured = None
+                break
+    if captured is None:
+        captured = dt.datetime.fromtimestamp(entry.stat().st_mtime, tz=now.tzinfo)
+    if (now - captured.astimezone(now.tzinfo)).total_seconds() > 7200:
+        stale.append(entry.name)
+        if re.search(r"(?m)^tags:\s*\[[^\]]*needs/", text) and re.search(r"(?m)^RETRY:", text):
+            retained.append(entry.name)
+
+print(f"{len(stale)}\t{len(retained)}")
+PY
+}
+
+telegram_runtime_state_dir() {
+  local override="${BRAIN_TELEGRAM_STATE_DIR:-}" plist_state="" data_state=""
+  local fallback="$HOME/Library/Application Support/Brain" candidate
+  if [ -x /usr/libexec/PlistBuddy ] && [ -f "$TELEGRAM_PLIST" ]; then
+    plist_state="$(/usr/libexec/PlistBuddy \
+      -c 'Print :EnvironmentVariables:BRAIN_STATE_DIR' "$TELEGRAM_PLIST" 2>/dev/null || true)"
+  fi
+  case "$DATA_ROOT_INPUT" in
+    */Vault) data_state="${DATA_ROOT_INPUT%/Vault}" ;;
+  esac
+  for candidate in "$override" "$plist_state" "$data_state" "$fallback"; do
+    [ -n "$candidate" ] || continue
+    if [ -f "$candidate/telegram-heartbeat" ] || [ -f "$candidate/telegram-secrets.json" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  for candidate in "$override" "$plist_state" "$data_state" "$fallback"; do
+    if [ -n "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+codex_subscription_ready() {
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "error: Codex CLI is required — install it, then run: codex login --device-auth" >&2
+    return 1
+  fi
+
+  # Brain intentionally uses the owner's ChatGPT subscription, never usage-based API
+  # credentials inherited from a shell or launchd environment.
+  local auth
+  if ! auth="$(env -u OPENAI_API_KEY -u CODEX_API_KEY codex login status 2>&1)" \
+    || ! printf '%s' "$auth" | grep -qF 'Logged in using ChatGPT'; then
+    echo "error: Brain requires Codex signed in with ChatGPT — run: codex login --device-auth" >&2
+    return 1
+  fi
+}
+
+run_librarian() { # $1 sandbox; optional $2=gmail; prompt arrives on stdin
+  local sandbox="$1"
+  local capability="${2:-}" log rc command_toml
+  local -a gmail_config=()
+  local -a sandbox_config=()
+  codex_subscription_ready || return 1
+  if [ "$capability" = "gmail" ] && [ -x "$GMAIL_CONNECTOR" ] \
+    && "$GMAIL_CONNECTOR" status >/dev/null 2>&1; then
+    command_toml="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$GMAIL_CONNECTOR")"
+    gmail_config=(
+      -c "mcp_servers.gmail.command=$command_toml"
+      -c 'mcp_servers.gmail.args=["mcp"]'
+      -c 'mcp_servers.gmail.startup_timeout_sec=10'
+      -c 'mcp_servers.gmail.tool_timeout_sec=45'
+    )
+  fi
+  if [ "$sandbox" = "workspace-write" ]; then
+    # Retrieval helpers need outbound access, while the workspace-write sandbox
+    # continues to confine persistent writes to the canonical Brain data root.
+    sandbox_config=(-c 'sandbox_workspace_write.network_access=true')
+  fi
+  log="$(mktemp "${TMPDIR:-/tmp}/brain-codex.XXXXXX")" || return 1
+  env -u OPENAI_API_KEY -u CODEX_API_KEY \
+    BRAIN_DATA_ROOT="$VAULT" \
+    BRAIN_SOURCE_ROOT="$SOURCE_ROOT" \
+    codex \
+      ${gmail_config[@]+"${gmail_config[@]}"} \
+      ${sandbox_config[@]+"${sandbox_config[@]}"} \
+      --disable plugins \
+      --disable apps \
+      --disable browser_use \
+      --disable computer_use \
+      --disable image_generation \
+      --disable multi_agent \
+      --disable workspace_dependencies \
+      --search \
+      exec \
+      --skip-git-repo-check \
+      --ignore-user-config \
+      --ephemeral \
+      --color never \
+      --sandbox "$sandbox" \
+      - 2>"$log"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "Codex Librarian failed (last log lines):" >&2
+    tail -n 40 "$log" >&2
+  fi
+  rm -f "$log"
+  return "$rc"
+}
+
+render_librarian_prompt() { # $1 prompt basename
+  cat <<EOF
+Runtime layout (this overrides older path or Git wording in the task below):
+- The current working directory and canonical writable vault are $VAULT.
+- The read-only application/source assets are $SOURCE_ROOT.
+- Read the charter from $SOURCE_ROOT/CLAUDE.md; its complete text follows.
+- Read templates from $SOURCE_ROOT/system/templates and helpers from $SOURCE_ROOT/scripts.
+- Write personal content only below $VAULT.
+- Do not invoke git. Personal Brain data is deliberately independent of Git.
+
+EOF
+  cat "$SOURCE_ROOT/CLAUDE.md"
+  printf '\n\n--- Current Librarian task ---\n\n'
+  cat "$SOURCE_ROOT/prompts/$1.md"
+  if [ "$1" = "process" ] && [ -n "${BRAIN_PROCESS_RETRY_NOW:-}" ]; then
+    cat <<EOF
+
+
+--- Owner-requested recovery override ---
+
+The owner explicitly requested one immediate recovery attempt now. For this run only,
+retry retained needs/* items even when they already have a RETRY: $TODAY line.
+Do not delete or duplicate existing retry history. If evidence is still
+unavailable, leave the item retained and update today's line only when the
+failure reason became more precise.
+EOF
+  fi
+}
+
+cmd_process() {
+  cd "$VAULT"
+  local n due deferred retry_now=""
+  case "${1:-}" in
+    "") ;;
+    --retry-now) retry_now=1 ;;
+    *) echo "usage: brain process [--retry-now]" >&2; return 2 ;;
+  esac
+  IFS=$'\t' read -r n due deferred <<< "$(inbox_processing_counts)"
+  if [ "$n" = "0" ]; then echo "inbox is empty — nothing to process"; return 0; fi
+  if [ "$due" = "0" ] && [ -z "$retry_now" ]; then
+    echo "$deferred retained recovery item(s) already retried today — next automatic retry is tomorrow"
+    return 0
+  fi
+  if [ -n "$retry_now" ]; then
+    echo "owner-requested recovery retry for $deferred retained item(s)"
+  elif [ "$deferred" -gt 0 ]; then
+    echo "$deferred retained recovery item(s) already retried today will be left unchanged"
+  fi
+  echo "processing $n inbox item(s) — the Librarian is on it..."
+  if ! BRAIN_PROCESS_RETRY_NOW="$retry_now" render_librarian_prompt process \
+    | run_librarian workspace-write; then
+    echo "processing failed — inbox left in place" >&2
+    return 1
+  fi
+  if ! python3 "$SCRIPT_DIR/build-libraries.py" "$VAULT"; then
+    echo "processing completed, but library-page generation failed — changes remain in the data folder" >&2
+    return 1
+  fi
+  if [ -n "$LEGACY_SOURCE_DATA_TEST" ]; then
+    git add -A && git commit -qm "librarian: process inbox ($TODAY)" 2>/dev/null || true
+  else
+    record_site_publish_ready \
+      || echo "warning: site publisher was not notified; run it manually" >&2
+    record_last_run "processed inbox ($TODAY)" || true
+  fi
+  echo; echo "done. inbox now: $(inbox_count) item(s)"
+}
+
+cmd_journal() {
+  local text="${*:-}"
+  [ -z "$text" ] && [ ! -t 0 ] && text="$(cat)"
+  [ -z "$text" ] && { echo "usage: brain journal <entry>  (or pipe text in)"; exit 1; }
+  cd "$VAULT"
+  local daily="daily/$TODAY.md"
+  [ -f "$daily" ] || cp "$SOURCE_ROOT/system/templates/daily.md" "$daily"
+  printf '\n## Journal (%s)\n\n%s\n' "$(date +%H:%M)" "$text" >> "$daily"
+  if ! {
+    render_librarian_prompt journal
+    printf "\n\nOwner's entry (already appended to %s):\n\n%s\n" "$daily" "$text"
+  } | run_librarian workspace-write; then
+    # The owner's words are sacred: keep the entry even if the response fails.
+    if [ -n "$LEGACY_SOURCE_DATA_TEST" ]; then
+      git add "$daily" && git commit -qm "journal: $TODAY (entry only)" 2>/dev/null || true
+    else
+      record_last_run "journal entry saved ($TODAY)" || true
+    fi
+    echo "journal entry saved, but the Librarian response failed" >&2
+    return 1
+  fi
+  if [ -n "$LEGACY_SOURCE_DATA_TEST" ]; then
+    git add -A && git commit -qm "journal: $TODAY" 2>/dev/null || true
+  else
+    record_last_run "journal updated ($TODAY)" || true
+  fi
+}
+
+cmd_digest() {
+  cd "$VAULT"
+  if ! render_librarian_prompt digest | run_librarian workspace-write; then
+    echo "digest failed — data folder left unchanged by the wrapper" >&2
+    return 1
+  fi
+  if [ -n "$LEGACY_SOURCE_DATA_TEST" ]; then
+    git add -A && git commit -qm "librarian: daily digest ($TODAY)" 2>/dev/null || true
+  else
+    record_last_run "daily digest ($TODAY)" || true
+  fi
+}
+
+cmd_today() {
+  cd "$VAULT"
+  local daily="daily/$TODAY.md"
+  if [ ! -f "$daily" ]; then
+    echo "No command center for $TODAY yet — run: brain digest" >&2
+    return 1
+  fi
+  awk '
+    /^## (Command center|Digest)[[:space:]]*$/ { show = 1; print; next }
+    show && /^## / { exit }
+    show { print }
+  ' "$daily"
+}
+
+cmd_ask() {
+  [ -z "${*:-}" ] && { echo "usage: brain ask <question>"; exit 1; }
+  cd "$VAULT"
+  {
+    render_librarian_prompt ask
+    printf '\n\nQuestion: %s\n' "$*"
+  } | run_librarian read-only gmail
+}
+
+cmd_search() {
+  [ -n "${*:-}" ] || { echo "usage: brain search <text>" >&2; return 2; }
+  python3 - "$VAULT" "$*" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+needle = sys.argv[2].casefold()
+for path in sorted(root.rglob("*.md")):
+    if path.is_symlink() or ".trash" in path.parts:
+        continue
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        continue
+    for number, line in enumerate(lines, 1):
+        if needle in line.casefold():
+            print(f"{path.relative_to(root)}:{number}:{line}")
+PY
+}
+
+cmd_gmail() {
+  [ -x "$GMAIL_CONNECTOR" ] || {
+    echo "error: Gmail connector is missing: $GMAIL_CONNECTOR" >&2
+    return 1
+  }
+  case "${1:-}" in
+    connect)
+      [ -n "${2:-}" ] || { echo "usage: brain gmail connect <credentials.json>"; return 1; }
+      "$GMAIL_CONNECTOR" connect "$2" ;;
+    reconnect) "$GMAIL_CONNECTOR" reconnect ;;
+    disconnect) "$GMAIL_CONNECTOR" disconnect ;;
+    status) shift || true; "$GMAIL_CONNECTOR" status "$@" ;;
+    search)
+      shift || true
+      [ -n "${1:-}" ] || { echo "usage: brain gmail search <gmail-query>"; return 1; }
+      "$GMAIL_CONNECTOR" search "$@" ;;
+    *) echo "usage: brain gmail connect <credentials.json>|reconnect|disconnect|status [--check-api]|search <gmail-query>"; return 1 ;;
+  esac
+}
+
+cmd_status() {
+  local json="" vault_state dirty_count status_result
+  local inbox sources notes people projects last_at last_commit last_summary last_human
+  local automation_configured=0 automation_running=0 automation_schedule="off"
+  local sync_configured=0 sync_running=0 monitor_configured=0 monitor_running=0
+  local gmail_configured=0 gmail_running=0
+  local telegram_configured=0 telegram_running=0
+  case "${1:-}" in
+    --json) json=1 ;;
+    "") ;;
+    *) echo "usage: brain status [--json]" >&2; return 2 ;;
+  esac
+  cd "$VAULT"
+  if [ -z "$json" ]; then
+  echo "data:     $VAULT"
+  echo "inbox:    $(inbox_count) item(s) waiting"
+  echo "sources:  $(find sources -name '*.md' | wc -l | tr -d ' ')  notes: $(find notes -name '*.md' | wc -l | tr -d ' ')  people: $(find people -name '*.md' | wc -l | tr -d ' ')  projects: $(find projects -name '*.md' | wc -l | tr -d ' ')"
+  if [ -n "$LEGACY_SOURCE_DATA_TEST" ]; then
+    echo "vault:    $VAULT"
+    echo "last run: $(git log -1 --format='%ar — %s' 2>/dev/null || echo 'no runs yet')"
+  elif [ -f "$LAST_RUN_FILE" ]; then
+    last_human="$(python3 - "$LAST_RUN_FILE" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))
+    print(f'{value.get("at", "unknown")} — {value.get("summary", "Brain activity")}')
+except (OSError, ValueError, TypeError):
+    print("unavailable")
+PY
+)"
+    echo "last run: $last_human"
+  else
+    echo "last run: no Librarian run recorded yet"
+  fi
+  if [ -f "$PLIST" ]; then
+    if grep -qF '<key>StartInterval</key>' "$PLIST"; then
+      echo "automate: on (hourly)"
+    else
+      echo "automate: on (daily 07:30)"
+    fi
+  else
+    echo "automate: off  (enable: brain automate on)"
+  fi
+  if [ -x "$GMAIL_CONNECTOR" ] && result="$($GMAIL_CONNECTOR status 2>/dev/null)"; then
+    echo "gmail:    $result"
+  else
+    echo "gmail:    not connected"
+  fi
+  if [ -f "$TELEGRAM_PLIST" ]; then
+    echo "telegram: configured (verify live state: brain doctor)"
+  else
+    echo "telegram: off  (install: apps/telegram-bot/install.sh)"
+  fi
+    return 0
+  fi
+
+  inbox="$(inbox_count)"
+  sources="$(find sources -name '*.md' | wc -l | tr -d ' ')"
+  notes="$(find notes -name '*.md' | wc -l | tr -d ' ')"
+  people="$(find people -name '*.md' | wc -l | tr -d ' ')"
+  projects="$(find projects -name '*.md' | wc -l | tr -d ' ')"
+  if [ -n "$LEGACY_SOURCE_DATA_TEST" ]; then
+    status_result="$(classify_legacy_source_tree)"
+  else
+    status_result="$(classify_data_tree)"
+  fi
+  IFS=$'\t' read -r vault_state dirty_count <<< "$status_result"
+  last_at=""; last_commit=""; last_summary=""
+  if [ -n "$LEGACY_SOURCE_DATA_TEST" ]; then
+    local last_epoch
+    last_epoch="$(git log -1 --format='%ct' 2>/dev/null || true)"
+    last_commit="$(git log -1 --format='%H' 2>/dev/null || true)"
+    last_summary="$(git log -1 --format='%s' 2>/dev/null || true)"
+    if [ -n "$last_epoch" ]; then
+      last_at="$(python3 - "$last_epoch" <<'PY'
+import datetime as dt, sys
+print(dt.datetime.fromtimestamp(int(sys.argv[1]), dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"))
+PY
+)"
+    fi
+  elif [ -f "$LAST_RUN_FILE" ]; then
+    IFS=$'\t' read -r last_at last_summary < <(python3 - "$LAST_RUN_FILE" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))
+    print(str(value.get("at", "")) + "\t" + str(value.get("summary", "")))
+except (OSError, ValueError, TypeError):
+    print("\t")
+PY
+)
+  fi
+
+  if [ -f "$PLIST" ]; then
+    automation_configured=1
+    if grep -qF '<key>StartInterval</key>' "$PLIST"; then automation_schedule="hourly"; else automation_schedule="daily"; fi
+    if [ -n "${BRAIN_NO_LAUNCHCTL:-}" ] || launchctl print "gui/$(id -u)/app.voxbrain" >/dev/null 2>&1; then automation_running=1; fi
+  fi
+  if [ -f "$SYNC_PLIST" ]; then
+    sync_configured=1
+    if [ -n "${BRAIN_NO_LAUNCHCTL:-}" ] || launchctl print "gui/$(id -u)/app.voxbrain.sync" >/dev/null 2>&1; then sync_running=1; fi
+  fi
+  if [ -f "$MONITOR_PLIST" ]; then
+    monitor_configured=1
+    if [ -n "${BRAIN_NO_LAUNCHCTL:-}" ] || launchctl print "gui/$(id -u)/app.voxbrain.health" >/dev/null 2>&1; then monitor_running=1; fi
+  fi
+  if [ -x "$GMAIL_CONNECTOR" ] && "$GMAIL_CONNECTOR" status >/dev/null 2>&1; then
+    gmail_configured=1
+    gmail_running=1
+  fi
+  if [ -f "$TELEGRAM_PLIST" ]; then
+    telegram_configured=1
+    if [ -n "${BRAIN_NO_LAUNCHCTL:-}" ] || launchctl print "gui/$(id -u)/app.voxbrain.telegram" >/dev/null 2>&1; then telegram_running=1; fi
+  fi
+
+  python3 - "$VAULT" "$vault_state" "$dirty_count" "$inbox" "$sources" "$notes" "$people" "$projects" \
+    "$last_at" "$last_commit" "$last_summary" \
+    "$automation_configured" "$automation_running" "$automation_schedule" \
+    "$sync_configured" "$sync_running" "$monitor_configured" "$monitor_running" \
+    "$gmail_configured" "$gmail_running" \
+    "$telegram_configured" "$telegram_running" <<'PY'
+import datetime as dt
+import json
+import sys
+
+(
+    vault, vault_state, dirty_count, inbox, sources, notes, people, projects,
+    last_at, last_commit, last_summary,
+    automation_configured, automation_running, automation_schedule,
+    sync_configured, sync_running, monitor_configured, monitor_running,
+    gmail_configured, gmail_running,
+    telegram_configured, telegram_running,
+) = sys.argv[1:]
+
+def boolean(value):
+    return value == "1"
+
+def service(identifier, configured, running, detail):
+    return {
+        "id": identifier,
+        "configured": boolean(configured),
+        "running": boolean(running),
+        "detail": detail,
+    }
+
+last_run = None
+if last_at:
+    last_run = {
+        "at": last_at,
+        "commit": last_commit or None,
+        "summary": last_summary,
+    }
+
+report = {
+    "schema_version": 1,
+    "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    "vault": {"path": vault, "state": vault_state, "dirty_paths": int(dirty_count)},
+    "counts": {
+        "inbox": int(inbox),
+        "sources": int(sources),
+        "notes": int(notes),
+        "people": int(people),
+        "projects": int(projects),
+    },
+    "last_run": last_run,
+    "services": [
+        service("automation", automation_configured, automation_running, automation_schedule),
+        service("sync", sync_configured, sync_running, "every 5 minutes"),
+        service("monitor", monitor_configured, monitor_running, "every 15 minutes"),
+        service("gmail", gmail_configured, gmail_running, "read-only live search"),
+        service("telegram", telegram_configured, telegram_running, "Brain bot"),
+    ],
+}
+print(json.dumps(report, separators=(",", ":")))
+PY
+}
+
+cmd_source_sync_once() {
+  local quiet="" lock_dir="$SOURCE_ROOT/.git/brain-source-git.lock" ahead behind counts
+  [ "${1:-}" = "--quiet" ] && quiet=1
+  cd "$SOURCE_ROOT"
+  git rev-parse --git-dir >/dev/null 2>&1 || {
+    echo "source-sync: source checkout is not a git repository" >&2
+    return 1
+  }
+  git remote get-url origin >/dev/null 2>&1 || {
+    [ -n "$quiet" ] || echo "source-sync: no origin remote — nothing to pull"
+    return 0
+  }
+  if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+    echo "source-sync: skipped — source working tree has local changes" >&2
+    return 2
+  fi
+
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    echo "source-sync: skipped — another source Git operation is active" >&2
+    return 2
+  fi
+  (
+    trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT HUP INT TERM
+    if ! git fetch -q origin main; then
+      echo "source-sync: fetch failed — application source left unchanged" >&2
+      exit 1
+    fi
+    counts="$(git rev-list --left-right --count HEAD...origin/main 2>/dev/null)" || {
+      echo "source-sync: could not compare HEAD with origin/main" >&2
+      exit 1
+    }
+    ahead="$(printf '%s' "$counts" | awk '{print $1}')"
+    behind="$(printf '%s' "$counts" | awk '{print $2}')"
+    if [ "${ahead:-0}" -gt 0 ]; then
+      echo "source-sync: refused — source branch is ahead or diverged" >&2
+      exit 2
+    fi
+    if [ "${behind:-0}" -eq 0 ]; then
+      [ -n "$quiet" ] || echo "source-sync: already current"
+      exit 0
+    fi
+    if ! git merge -q --ff-only origin/main; then
+      echo "source-sync: fast-forward failed — source checkout left for manual review" >&2
+      exit 1
+    fi
+    [ -n "$quiet" ] || echo "source-sync: pulled $behind source commit(s)"
+  )
+}
+
+cmd_source_sync() {
+  case "${1:-once}" in
+    once) shift || true; cmd_source_sync_once "$@" ;;
+    --quiet) cmd_source_sync_once --quiet ;;
+    on)
+      mkdir -p "$(dirname "$SYNC_PLIST")"
+      cat > "$SYNC_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>app.voxbrain.sync</string>
+  <key>ProgramArguments</key><array>
+    <string>$SCRIPT_DIR/brain</string><string>source-sync</string><string>once</string><string>--quiet</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+  <key>StandardOutPath</key><string>/tmp/app.voxbrain.sync.log</string>
+  <key>StandardErrorPath</key><string>/tmp/app.voxbrain.sync.log</string>
+</dict></plist>
+EOF
+      if [ -z "${BRAIN_NO_LAUNCHCTL:-}" ]; then
+        launchctl unload "$SYNC_PLIST" 2>/dev/null || true
+        launchctl load "$SYNC_PLIST" || return 1
+      fi
+      echo "source sync on — every 5 minutes (log: /tmp/app.voxbrain.sync.log)" ;;
+    status)
+      if [ ! -f "$SYNC_PLIST" ]; then
+        echo "source sync: off"
+      elif [ -n "${BRAIN_NO_LAUNCHCTL:-}" ] || launchctl print "gui/$(id -u)/app.voxbrain.sync" >/dev/null 2>&1; then
+        echo "source sync: on (every 5 minutes)"
+      else
+        echo "source sync: configured but not loaded"; return 1
+      fi ;;
+    off)
+      if [ -z "${BRAIN_NO_LAUNCHCTL:-}" ]; then launchctl unload "$SYNC_PLIST" 2>/dev/null || true; fi
+      rm -f "$SYNC_PLIST"
+      echo "source sync off" ;;
+    *) echo "usage: brain source-sync [once|on|status|off]"; return 1 ;;
+  esac
+}
+
+publisher_health_state() { # $1 status JSON, $2 latest process marker
+  python3 - "$1" "$2" <<'PY'
+import datetime as dt
+import json
+from pathlib import Path
+import sys
+
+status_path, marker_path = map(Path, sys.argv[1:])
+if not status_path.is_file():
+    print("missing")
+    raise SystemExit
+try:
+    if status_path.stat().st_size > 64 * 1024:
+        raise ValueError
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    if not isinstance(status, dict) or status.get("schema_version") != 1:
+        raise ValueError
+except (OSError, ValueError):
+    print("invalid")
+    raise SystemExit
+
+state = status.get("state")
+if state == "failure":
+    code = status.get("error_code")
+    if not isinstance(code, str) or not code.replace("_", "").isalnum():
+        code = "unknown"
+    print("failure\t" + code[:64])
+    raise SystemExit
+if state == "running":
+    try:
+        started = dt.datetime.fromisoformat(str(status["started_at"]).replace("Z", "+00:00"))
+        age = (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        print("invalid")
+        raise SystemExit
+    print("running_stale" if age > 20 * 60 else "running")
+    raise SystemExit
+if state != "success":
+    print("invalid")
+    raise SystemExit
+
+try:
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    print("marker_missing")
+    raise SystemExit
+expected = {
+    "at": marker.get("at") if isinstance(marker, dict) else None,
+    "summary": marker.get("summary") if isinstance(marker, dict) else None,
+}
+if not all(isinstance(value, str) and value for value in expected.values()):
+    print("marker_missing")
+elif status.get("process_marker") == expected:
+    print("success")
+else:
+    print("pending")
+PY
+}
+
+cmd_doctor() {
+  local notify="" json="" failures=0 warnings=0 activities=0 passes=0 overall="healthy"
+  local previous="" state_dir state_file checks_file tree_result tree_state dirty_count stale_count
+  local retained_stale_count actionable_stale_count
+  local meetings_dir="${BRAIN_MEETINGS_DIR:-$HOME/Meetings}" result code url
+  local publisher_status_file publisher_state publisher_error
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --notify) notify=1 ;;
+      --json) json=1 ;;
+      *) echo "usage: brain doctor [--json] [--notify]" >&2; return 2 ;;
+    esac
+    shift
+  done
+  cd "$VAULT"
+  checks_file="$(mktemp "${TMPDIR:-/tmp}/brain-doctor.XXXXXX")" || return 1
+
+  doctor_record() { # id scope state summary detail remediation
+    local id="$1" scope="$2" check_state="$3" summary="$4" detail="$5" remediation="${6:-}"
+    case "$check_state" in
+      pass) passes=$((passes + 1)); [ -n "$json" ] || echo "PASS  $summary" ;;
+      activity) activities=$((activities + 1)); [ -n "$json" ] || echo "ACTIVITY  $summary" ;;
+      warning) warnings=$((warnings + 1)); [ -n "$json" ] || echo "WARN  $summary" ;;
+      failure) failures=$((failures + 1)); [ -n "$json" ] || echo "FAIL  $summary" ;;
+    esac
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$scope" "$check_state" "$summary" "$detail" "$remediation" >> "$checks_file"
+  }
+
+  if [ -n "$LEGACY_SOURCE_DATA_TEST" ]; then
+    tree_result="$(classify_legacy_source_tree)"
+  else
+    tree_result="$(classify_data_tree)"
+  fi
+  IFS=$'\t' read -r tree_state dirty_count <<< "$tree_result"
+  if [ -n "$LEGACY_SOURCE_DATA_TEST" ]; then
+    case "$tree_state" in
+      clean)
+        doctor_record "vault.working_tree" "vault" "pass" \
+          "vault working tree is clean" "No local changes are waiting." ;;
+      activity)
+        doctor_record "vault.working_tree" "vault" "activity" \
+          "vault has pending capture activity" "$dirty_count capture path(s) are waiting for the Librarian." ;;
+      *)
+        doctor_record "vault.working_tree" "vault" "warning" \
+          "vault has local changes; pull-only sync will wait" "$dirty_count dirty path(s) include changes outside capture storage." \
+          "Commit, move, or revert the non-capture changes before syncing." ;;
+    esac
+  elif [ "$tree_state" = "activity" ]; then
+    doctor_record "data.root" "data" "activity" \
+      "Brain data folder is ready with pending captures" "$dirty_count capture(s) are waiting for the Librarian."
+  else
+    doctor_record "data.root" "data" "pass" \
+      "Brain data folder is ready" "The canonical folder is writable and independent of source control."
+  fi
+
+  IFS=$'\t' read -r stale_count retained_stale_count <<< "$(stale_inbox_counts)"
+  actionable_stale_count=$((stale_count - retained_stale_count))
+  if [ "$actionable_stale_count" -gt 0 ]; then
+    doctor_record "inbox.stale" "librarian" "failure" \
+      "the Librarian has not cleared an inbox item within 2 hours" \
+      "$actionable_stale_count actionable inbox item(s) are overdue; $retained_stale_count known recovery item(s) are retained separately." \
+      "Run brain process and inspect any item that remains in inbox/."
+  elif [ "$retained_stale_count" -gt 0 ]; then
+    doctor_record "inbox.stale" "librarian" "warning" \
+      "inbox source recovery needs attention" \
+      "$retained_stale_count delivered capture(s) remain safely retained because source content or visuals could not yet be recovered." \
+      "Restore source access or review the needs/* items; Brain retries each retained item at most once per day."
+  else
+    doctor_record "inbox.stale" "librarian" "pass" \
+      "no overdue inbox work" "Every pending inbox item is less than two hours old."
+  fi
+
+  if [ -f "$HOME/Library/LaunchAgents/app.voxbrain.meetings.plist" ]; then
+    if [ -n "${BRAIN_NO_LAUNCHCTL:-}" ] || launchctl print "gui/$(id -u)/app.voxbrain.meetings" >/dev/null 2>&1; then
+      doctor_record "meetings.watcher" "meetings" "pass" \
+        "meeting watcher is running" "The meeting launch agent is loaded."
+    else
+      doctor_record "meetings.watcher" "meetings" "failure" \
+        "meeting watcher is configured but not running" "The meeting plist exists but its launch agent is not loaded." \
+        "Reload the meeting watcher launch agent."
+    fi
+    if find "$meetings_dir" -maxdepth 1 -type f \( -name '*.md' -o -name '*.txt' \) -mmin +5 -print -quit 2>/dev/null | grep -q .; then
+      doctor_record "meetings.queue" "meetings" "failure" \
+        "a finished meeting has been queued for more than 5 minutes" "The meeting queue contains an overdue transcript." \
+        "Inspect the meeting watcher log and ingest the queued transcript."
+    else
+      doctor_record "meetings.queue" "meetings" "pass" \
+        "meeting queue is clear" "No finished meeting has waited longer than five minutes."
+    fi
+  fi
+
+  if [ -f "$PLIST" ]; then
+    if [ -n "${BRAIN_NO_LAUNCHCTL:-}" ] || launchctl print "gui/$(id -u)/app.voxbrain" >/dev/null 2>&1; then
+      doctor_record "automation.schedule" "automation" "pass" \
+        "remote runner Librarian schedule is loaded" "The Librarian launch agent is loaded."
+    else
+      doctor_record "automation.schedule" "automation" "failure" \
+        "Librarian schedule is configured but not loaded" "The Librarian plist exists but its launch agent is not loaded." \
+        "Reload the Librarian launch agent."
+    fi
+    if codex_subscription_ready >/dev/null 2>&1; then
+      doctor_record "automation.authentication" "automation" "pass" \
+        "Codex is signed in with ChatGPT" "The Librarian can use the ChatGPT subscription."
+    else
+      doctor_record "automation.authentication" "automation" "failure" \
+        "Codex ChatGPT login is unavailable" "The Librarian cannot verify a ChatGPT subscription login." \
+        "Run codex login --device-auth on the Librarian machine."
+    fi
+  fi
+
+  if [ -n "$LEGACY_SOURCE_DATA_TEST" ] && [ -f "$SYNC_PLIST" ]; then
+    if [ -n "${BRAIN_NO_LAUNCHCTL:-}" ] || launchctl print "gui/$(id -u)/app.voxbrain.sync" >/dev/null 2>&1; then
+      doctor_record "sync.agent" "sync" "pass" \
+        "pull-only sync is loaded" "The five-minute pull-only sync launch agent is loaded."
+    else
+      doctor_record "sync.agent" "sync" "failure" \
+        "pull-only sync is configured but not loaded" "The sync plist exists but its launch agent is not loaded." \
+        "Run brain sync on to reload pull-only sync."
+    fi
+  elif [ -n "$LEGACY_SOURCE_DATA_TEST" ]; then
+    doctor_record "sync.agent" "sync" "warning" \
+      "pull-only sync is not installed on this Mac" "No pull-only sync plist is installed for this user." \
+      "Run brain sync on."
+  fi
+
+  if [ -f "$TELEGRAM_PLIST" ]; then
+    local telegram_state_dir telegram_state_label telegram_heartbeat telegram_secrets_file
+    telegram_state_dir="$(telegram_runtime_state_dir)"
+    telegram_state_label="$(basename "$telegram_state_dir")"
+    telegram_heartbeat="$telegram_state_dir/telegram-heartbeat"
+    telegram_secrets_file="$telegram_state_dir/telegram-secrets.json"
+    if [ -n "${BRAIN_NO_LAUNCHCTL:-}" ] || launchctl print "gui/$(id -u)/app.voxbrain.telegram" >/dev/null 2>&1; then
+      doctor_record "telegram.agent" "telegram" "pass" \
+        "Telegram Brain bot is running" "The Telegram launch agent is loaded."
+    else
+      doctor_record "telegram.agent" "telegram" "failure" \
+        "Telegram Brain bot is configured but not running" "The Telegram plist exists but its launch agent is not loaded." \
+        "Reload the Telegram Brain bot launch agent."
+    fi
+    if [ -f "$telegram_heartbeat" ] && ! find "$telegram_heartbeat" -mmin +5 -print -quit 2>/dev/null | grep -q .; then
+      doctor_record "telegram.heartbeat" "telegram" "pass" \
+        "Telegram bot heartbeat is current" "The Telegram heartbeat is less than five minutes old."
+    else
+      doctor_record "telegram.heartbeat" "telegram" "failure" \
+        "Telegram bot heartbeat is missing or stale" \
+        "No current Telegram heartbeat was found in the resolved $telegram_state_label state directory." \
+        "Inspect the Telegram bot log and restart its launch agent."
+    fi
+    if { keychain_get "app.voxbrain.telegram-token" >/dev/null 2>&1 \
+      && keychain_get "app.voxbrain.telegram-user-id" >/dev/null 2>&1; } \
+      || { [ -f "$telegram_secrets_file" ] \
+        && python3 - "$telegram_secrets_file" >/dev/null 2>&1 <<'PY'
+import json, os, stat, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+assert all(str(data.get(key, "")).strip() for key in ("token", "user_id", "chat_id"))
+assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+PY
+      }; then
+      doctor_record "telegram.credentials" "telegram" "pass" \
+        "Telegram credentials and account allowlist are stored privately" "Required Telegram credentials are present in private storage."
+    else
+      doctor_record "telegram.credentials" "telegram" "failure" \
+        "Telegram token or account allowlist is missing from private credential storage" \
+        "Required Telegram credentials could not be validated in the resolved $telegram_state_label state directory." \
+        "Reinstall the Telegram integration with its private credentials."
+    fi
+    if codex_subscription_ready >/dev/null 2>&1; then
+      doctor_record "telegram.authentication" "telegram" "pass" \
+        "Telegram assistant can use the ChatGPT subscription" "Codex reports a ChatGPT subscription login."
+    else
+      doctor_record "telegram.authentication" "telegram" "failure" \
+        "Telegram assistant cannot access the Codex ChatGPT login" "Codex could not verify a ChatGPT subscription login." \
+        "Run codex login --device-auth for the Telegram bot user."
+    fi
+  fi
+
+  if [ -z "${BRAIN_DOCTOR_OFFLINE:-}" ] \
+    && [ -x "$GMAIL_CONNECTOR" ] && "$GMAIL_CONNECTOR" status >/dev/null 2>&1; then
+    if result="$($GMAIL_CONNECTOR status --check-api 2>&1)"; then
+      doctor_record "gmail.authorization" "gmail" "pass" \
+        "Gmail live search is connected" "$result. Email search is read-only and transient."
+    else
+      doctor_record "gmail.authorization" "gmail" "failure" \
+        "Gmail live search authorization failed" "$result" \
+        "Open Brain → Settings → Google Gmail and choose Reconnect."
+    fi
+  fi
+
+  if [ -n "${BRAIN_SITE_PUBLISHER_STATUS_FILE:-}" ]; then
+    publisher_status_file="$BRAIN_SITE_PUBLISHER_STATUS_FILE"
+  elif [ -n "${BRAIN_STATE_DIR:-}" ]; then
+    publisher_status_file="$BRAIN_STATE_DIR/site-publisher-status.json"
+  else
+    publisher_status_file="$HOME/Library/Application Support/Brain/Agent/site-publisher-status.json"
+  fi
+  if [ -f "$SITE_PUBLISHER_PLIST" ] || [ -f "$publisher_status_file" ] \
+    || [ -n "${BRAIN_SITE_PUBLISHER_STATUS_FILE:-}" ]; then
+    IFS=$'\t' read -r publisher_state publisher_error \
+      <<< "$(publisher_health_state "$publisher_status_file" "$SITE_PUBLISH_READY_FILE")"
+    case "$publisher_state" in
+      success)
+        doctor_record "publish.latest" "publishing" "pass" \
+          "latest private-site publish succeeded" \
+          "The local publisher completed the latest successful Librarian output." ;;
+      pending)
+        doctor_record "publish.latest" "publishing" "activity" \
+          "latest Librarian output is waiting to publish" \
+          "The publisher has a successful older deployment and has not yet recorded the latest process marker." ;;
+      running)
+        doctor_record "publish.latest" "publishing" "activity" \
+          "private-site publish is running" \
+          "The local publisher is within its twenty-minute execution bound." ;;
+      running_stale)
+        doctor_record "publish.latest" "publishing" "failure" \
+          "private-site publish exceeded its execution bound" \
+          "The local publisher has reported running for more than twenty minutes." \
+          "Inspect the site publisher log and restart its launch agent." ;;
+      failure)
+        doctor_record "publish.latest" "publishing" "failure" \
+          "latest private-site publish failed" \
+          "The local publisher recorded failure code ${publisher_error:-unknown}." \
+          "Inspect the site publisher log, fix the bounded failure, and rerun the publisher." ;;
+      marker_missing)
+        doctor_record "publish.latest" "publishing" "warning" \
+          "private-site publisher has no valid process marker" \
+          "A successful publish exists, but the latest successful Librarian marker is unavailable." \
+          "Run brain process after restoring the canonical data folder." ;;
+      invalid)
+        doctor_record "publish.latest" "publishing" "failure" \
+          "private-site publisher status is invalid" \
+          "The local publisher status file is malformed or uses an unsupported schema." \
+          "Inspect and restart the site publisher launch agent." ;;
+      *)
+        doctor_record "publish.latest" "publishing" "warning" \
+          "private-site publisher has not reported yet" \
+          "The publisher is configured but no local status document is available." \
+          "Run the publisher once and inspect its launchd log if status remains absent." ;;
+    esac
+  fi
+
+  if [ -z "${BRAIN_DOCTOR_OFFLINE:-}" ]; then
+    url="$(gateway_url 2>/dev/null || true)"
+    if [ -n "$url" ] && command -v curl >/dev/null 2>&1; then
+      if curl -fsS --max-time 15 "$url/health" 2>/dev/null | grep -q '"ok":true'; then
+        doctor_record "gateway.health" "gateway" "pass" \
+          "capture gateway is healthy" "The configured gateway returned an OK health response."
+      else
+        doctor_record "gateway.health" "gateway" "failure" \
+          "capture gateway health check failed" "The configured gateway did not return an OK health response." \
+          "Inspect the capture gateway deployment and credentials."
+      fi
+    else
+      doctor_record "gateway.health" "gateway" "warning" \
+        "capture gateway is not configured locally" "No local capture gateway URL is available." \
+        "Configure the Brain capture gateway URL in Keychain."
+    fi
+
+    result="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code} %{redirect_url}' https://brain-vault.example.pages.dev/notes 2>/dev/null || true)"
+    code="${result%% *}"
+    case "$code" in
+      301|302|303|307|308)
+        if printf '%s' "$result" | grep -q 'cloudflareaccess.com'; then
+          doctor_record "site.access" "publishing" "pass" \
+            "private site is gated by Cloudflare Access" "The private notes route redirects to Cloudflare Access."
+        else
+          doctor_record "site.access" "publishing" "failure" \
+            "site redirects outside the Access gate" "The private notes route redirected somewhere other than Cloudflare Access." \
+            "Restore the Cloudflare Access policy before publishing private content."
+        fi ;;
+      *)
+        doctor_record "site.access" "publishing" "failure" \
+          "private site Access check returned ${code:-no response}" "The private notes route did not return the expected Access redirect." \
+          "Inspect the private site and Cloudflare Access configuration." ;;
+    esac
+
+  fi
+
+  if [ "$failures" -gt 0 ]; then
+    overall="failure"
+  elif [ "$warnings" -gt 0 ]; then
+    overall="warning"
+  elif [ "$activities" -gt 0 ]; then
+    overall="activity"
+  fi
+
+  if [ -n "$notify" ]; then
+    state_dir="${BRAIN_STATE_DIR:-$HOME/Library/Application Support/Brain}"
+    state_file="$state_dir/health-state"
+    mkdir -p "$state_dir"
+    [ -f "$state_file" ] && previous="$(cat "$state_file" 2>/dev/null || true)"
+    if [ "$overall" != "$previous" ] && command -v osascript >/dev/null 2>&1; then
+      case "$overall" in
+        failure) osascript -e 'display notification "A Brain health check failed. Run: brain doctor" with title "Brain needs attention" sound name "Basso"' >/dev/null ;;
+        warning) osascript -e 'display notification "Brain has a warning. Run: brain doctor" with title "Brain health warning"' >/dev/null ;;
+        healthy)
+          case "$previous" in
+            failure|warning|fail|warn) osascript -e 'display notification "All monitored Brain systems are healthy again." with title "Brain recovered"' >/dev/null ;;
+          esac ;;
+      esac
+    fi
+    printf '%s\n' "$overall" > "$state_file"
+  fi
+
+  if [ -n "$json" ]; then
+    python3 - "$checks_file" "$overall" "$passes" "$activities" "$warnings" "$failures" <<'PY'
+import datetime as dt
+import json
+import sys
+
+path, overall, passes, activities, warnings, failures = sys.argv[1:]
+checks = []
+with open(path, encoding="utf-8") as handle:
+    for line in handle:
+        identifier, scope, state, summary, detail, remediation = line.rstrip("\n").split("\t", 5)
+        checks.append({
+            "id": identifier,
+            "scope": scope,
+            "state": state,
+            "summary": summary,
+            "detail": detail,
+            "remediation": remediation or None,
+        })
+report = {
+    "schema_version": 1,
+    "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    "overall": overall,
+    "counts": {
+        "pass": int(passes),
+        "activity": int(activities),
+        "warning": int(warnings),
+        "failure": int(failures),
+    },
+    "checks": checks,
+}
+print(json.dumps(report, separators=(",", ":")))
+PY
+  else
+    echo "doctor: $failures failure(s), $warnings warning(s)"
+  fi
+  rm -f "$checks_file"
+  [ "$failures" -eq 0 ]
+}
+
+cmd_monitor() {
+  case "${1:-}" in
+    on)
+      local data_root_xml
+      data_root_xml="$(xml_escape "$VAULT")"
+      mkdir -p "$(dirname "$MONITOR_PLIST")"
+      cat > "$MONITOR_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>app.voxbrain.health</string>
+  <key>ProgramArguments</key><array>
+    <string>$SCRIPT_DIR/brain</string><string>doctor</string><string>--notify</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>900</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>BRAIN_DATA_ROOT</key><string>$data_root_xml</string>
+  </dict>
+  <key>StandardOutPath</key><string>/tmp/app.voxbrain.health.log</string>
+  <key>StandardErrorPath</key><string>/tmp/app.voxbrain.health.log</string>
+</dict></plist>
+EOF
+      if [ -z "${BRAIN_NO_LAUNCHCTL:-}" ]; then
+        launchctl unload "$MONITOR_PLIST" 2>/dev/null || true
+        launchctl load "$MONITOR_PLIST" || return 1
+      fi
+      echo "health monitoring on — every 15 minutes (log: /tmp/app.voxbrain.health.log)" ;;
+    status)
+      if [ ! -f "$MONITOR_PLIST" ]; then
+        echo "health monitoring: off"
+      elif [ -n "${BRAIN_NO_LAUNCHCTL:-}" ] || launchctl print "gui/$(id -u)/app.voxbrain.health" >/dev/null 2>&1; then
+        echo "health monitoring: on (every 15 minutes)"
+      else
+        echo "health monitoring: configured but not loaded"; return 1
+      fi ;;
+    off)
+      if [ -z "${BRAIN_NO_LAUNCHCTL:-}" ]; then launchctl unload "$MONITOR_PLIST" 2>/dev/null || true; fi
+      rm -f "$MONITOR_PLIST"
+      echo "health monitoring off" ;;
+    *) echo "usage: brain monitor on|status|off"; return 1 ;;
+  esac
+}
+
+cmd_automate() {
+  case "${1:-}" in
+    on)
+      local schedule="${2:-daily}" schedule_xml schedule_desc data_root_xml
+      data_root_xml="$(xml_escape "$VAULT")"
+      case "$schedule" in
+        hourly)
+          schedule_xml='<key>StartInterval</key><integer>3600</integer>'
+          schedule_desc="hourly" ;;
+        daily)
+          schedule_xml='<key>StartCalendarInterval</key><dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>30</integer></dict>'
+          schedule_desc="daily at 07:30" ;;
+        *) echo "usage: brain automate on [hourly|daily]"; exit 1 ;;
+      esac
+      mkdir -p "$(dirname "$PLIST")"
+      cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>app.voxbrain</string>
+  <key>ProgramArguments</key><array>
+    <string>$SCRIPT_DIR/brain</string><string>cron</string>
+  </array>
+  $schedule_xml
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>BRAIN_DATA_ROOT</key><string>$data_root_xml</string>
+  </dict>
+  <key>StandardOutPath</key><string>/tmp/app.voxbrain.log</string>
+  <key>StandardErrorPath</key><string>/tmp/app.voxbrain.log</string>
+</dict></plist>
+EOF
+      if [ -z "${BRAIN_NO_LAUNCHCTL:-}" ]; then
+        launchctl unload "$PLIST" 2>/dev/null
+        if ! launchctl load "$PLIST"; then
+          echo "error: launchd failed to load $PLIST" >&2
+          return 1
+        fi
+      fi
+      echo "automation on — process + digest $schedule_desc (log: /tmp/app.voxbrain.log)" ;;
+    status)
+      cmd_status ;;
+    off)
+      if [ -z "${BRAIN_NO_LAUNCHCTL:-}" ]; then
+        launchctl unload "$PLIST" 2>/dev/null
+      fi
+      rm -f "$PLIST"; echo "automation off" ;;
+    *) echo "usage: brain automate on [hourly|daily]|status|off"; exit 1 ;;
+  esac
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  init-data|help|--help|-h|source-sync|remote-note|dictate|clipper-token|gmail) ;;
+  sync)
+    [ -n "$LEGACY_SOURCE_DATA_TEST" ] || {
+      echo "unknown command: sync (application updates use: brain source-sync)" >&2
+      exit 1
+    }
+    ;;
+  *) require_data_root || exit 1 ;;
+esac
+case "$cmd" in
+  init-data) cmd_init_data ;;
+  add) cmd_add "$@" ;;
+  note) cmd_note "$@" ;;
+  paste) cmd_paste "$@" ;;
+  meeting) cmd_meeting "$@" ;;
+  ingest) cmd_ingest "$@" ;;
+  remote-note) cmd_remote_note "$@" ;;
+  dictate) cmd_dictate ;;
+  journal) cmd_journal "$@" ;;
+  process) cmd_process "$@" ;;
+  digest) cmd_digest ;;
+  today) cmd_today ;;
+  cron) cmd_process; cmd_digest ;;
+  ask) cmd_ask "$@" ;;
+  search) cmd_search "$@" ;;
+  gmail) cmd_gmail "$@" ;;
+  status) cmd_status "$@" ;;
+  source-sync) cmd_source_sync "$@" ;;
+  sync) cmd_source_sync "$@" ;; # selftest-only legacy alias; guarded above
+  doctor) cmd_doctor "$@" ;;
+  monitor) cmd_monitor "$@" ;;
+  clipper-token) cmd_clipper_token ;;
+  automate) cmd_automate "$@" ;;
+  help|--help|-h) usage ;;
+  *) echo "unknown command: $cmd"; usage; exit 1 ;;
+esac

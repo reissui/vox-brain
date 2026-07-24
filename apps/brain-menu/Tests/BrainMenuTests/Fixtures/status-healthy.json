@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-15T09:00:00Z",
+  "vault": {
+    "path": "/tmp/vox-brain-example",
+    "state": "clean",
+    "dirty_paths": 0
+  },
+  "counts": {
+    "inbox": 0,
+    "sources": 42,
+    "notes": 17,
+    "people": 8,
+    "projects": 5
+  },
+  "last_run": {
+    "at": "2026-07-15T08:55:00Z",
+    "commit": "0123456789abcdef",
+    "summary": "librarian: process inbox"
+  },
+  "services": [
+    {
+      "id": "automation",
+      "configured": true,
+      "running": true,
+      "detail": "hourly"
+    },
+    {
+      "id": "sync",
+      "configured": true,
+      "running": true,
+      "detail": "every 5 minutes"
+    },
+    {
+      "id": "monitor",
+      "configured": true,
+      "running": true,
+      "detail": "every 15 minutes"
+    },
+    {
+      "id": "gmail",
+      "configured": false,
+      "running": false,
+      "detail": "read-only live search"
+    },
+    {
+      "id": "telegram",
+      "configured": false,
+      "running": false,
+      "detail": "Brain bot"
+    }
+  ]
+}

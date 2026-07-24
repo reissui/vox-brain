@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# yt-transcript <youtube-url> — print a cleaned English transcript to stdout.
+# Exits 1 (empty output) if no subtitles are available.
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+url="${1:?usage: yt-transcript <youtube-url>}"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+
+yt-dlp --skip-download --write-subs --write-auto-subs --sub-langs "en.*,en" \
+  --sub-format vtt --socket-timeout 20 -o "$tmp/t" "$url" >/dev/null 2>&1 || true
+
+f=""
+for cand in "$tmp/t.en.vtt" "$tmp"/t.en-orig.vtt "$tmp"/t.en*.vtt "$tmp"/t.*.vtt; do
+  if [ -f "$cand" ]; then f="$cand"; break; fi
+done
+[ -z "$f" ] && exit 1
+
+python3 "$SCRIPT_DIR/clean_vtt.py" "$f"

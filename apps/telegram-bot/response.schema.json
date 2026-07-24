@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "reply": { "type": "string" },
+    "captures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": { "type": "string", "enum": ["note", "bookmark"] },
+          "text": { "type": "string" },
+          "url": { "type": "string" },
+          "comment": { "type": "string" }
+        },
+        "required": ["kind", "text", "url", "comment"],
+        "additionalProperties": false
+      }
+    },
+    "answers_pending_question": { "type": "boolean" },
+    "learning_candidate": { "type": "string" }
+  },
+  "required": ["reply", "captures", "answers_pending_question", "learning_candidate"],
+  "additionalProperties": false
+}
