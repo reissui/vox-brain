@@ -70,6 +70,9 @@ struct UpdateControllerTests {
     @MainActor
     @Test
     func automaticChecksContinueWhileTheAppRemainsOpen() async throws {
+        let suite = "UpdateControllerTests.Automatic.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
         let release = BrainRelease(
             version: "1.2.3",
             pageURL: try #require(URL(string: "https://example.test/brain-v1.2.3")),
@@ -80,7 +83,7 @@ struct UpdateControllerTests {
         let sleeper = RecurringUpdateSleeper()
         let controller = UpdateController(
             service: service,
-            defaults: UserDefaults.standard,
+            defaults: defaults,
             sleep: { duration in
                 try await sleeper.sleep(duration)
             },

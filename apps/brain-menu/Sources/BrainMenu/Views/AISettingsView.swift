@@ -90,8 +90,6 @@ enum AISettingsTestState: Equatable, Sendable {
 @MainActor
 @Observable
 final class AISettingsController {
-    static let cliTools: [AIProvider] = [.codex, .claude, .advanced]
-
     var configuration: AIProviderConfiguration {
         didSet {
             guard configuration != oldValue else { return }
@@ -117,8 +115,8 @@ final class AISettingsController {
 
     @ObservationIgnored private let settings: any AISettingsPersisting
     @ObservationIgnored private let providerFactory: any AIProviderMaking
-    @ObservationIgnored private let executableResolver: any AIExecutableResolving
     @ObservationIgnored private var lastTestedConfiguration: AIProviderConfiguration?
+    @ObservationIgnored private var suppressCommandApplication = true
 
     init(
         settings: any AISettingsPersisting,
@@ -127,7 +125,7 @@ final class AISettingsController {
     ) {
         self.settings = settings
         self.providerFactory = providerFactory
-        self.executableResolver = executableResolver
+        _ = executableResolver
         let loaded = settings.load().canonicalized()
         configuration = loaded
         let validated = settings.loadValidatedConfiguration()?.canonicalized()
@@ -139,47 +137,21 @@ final class AISettingsController {
         } else {
             testState = .untested
         }
-        var renderedArguments = loaded.arguments
-        if loaded.provider == .advanced, let model = loaded.model {
-            renderedArguments.append(contentsOf: ["--model", model])
-        }
-        customCommand = AICommandLine.render(
-            executable: loaded.executableURL,
-            arguments: renderedArguments
-        )
+        customCommand = AILocalCLICommandTemplate.render(configuration: loaded)
+        suppressCommandApplication = false
     }
 
     var canTestConnection: Bool {
         configuration.provider != .disabled
             && testState != .testing
             && commandErrorMessage == nil
-            && (!exposesManualConfiguration || configuration.executableURL != nil)
+            && !customCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var canSave: Bool {
         testState == .result(.ready)
             && lastTestedConfiguration == configuration
             && commandErrorMessage == nil
-    }
-
-    var usesPreset: Bool {
-        configuration.provider == .codex || configuration.provider == .claude
-    }
-
-    var exposesManualConfiguration: Bool {
-        configuration.provider == .advanced
-    }
-
-    var resolvedExecutablePath: String? {
-        guard usesPreset else { return nil }
-        return executableResolver.resolveExecutable(for: configuration.provider)?.path
-    }
-
-    var commandPreview: String? {
-        configuration.provider.commandPreview(
-            executablePath: resolvedExecutablePath,
-            model: configuration.model
-        )
     }
 
     var testDetail: String {
@@ -196,64 +168,29 @@ final class AISettingsController {
         "AI provider test state: \(testState.title). \(testDetail)"
     }
 
-    var providerHelp: String {
-        switch configuration.provider {
-        case .disabled:
-            "Meeting AI is off. Existing raw transcripts can still be completed and uploaded."
-        case .codex:
-            "Uses your existing Codex CLI sign-in with Brain's fixed, read-only command and your optional model choice."
-        case .claude:
-            "Uses your existing Claude CLI sign-in with your optional model choice. Brain never reads or stores Claude credentials."
-        case .advanced:
-            "Parses this command into literal arguments and runs the executable directly—never through a shell."
-        }
-    }
-
-    var executablePath: String {
-        get { configuration.executableURL?.path ?? "" }
-        set {
-            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            configuration.executableURL = trimmed.isEmpty
-                ? nil
-                : URL(fileURLWithPath: trimmed, isDirectory: false)
-        }
-    }
-
-    var model: String {
-        get { configuration.model ?? "" }
-        set {
-            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            configuration.model = trimmed.isEmpty ? nil : trimmed
-        }
-    }
-
-    var timeout: TimeInterval {
-        get { configuration.timeout }
-        set { configuration.timeout = AIProviderConfiguration.boundedTimeout(newValue) }
-    }
-
-    func chooseExecutable(_ url: URL) {
-        guard configuration.provider == .advanced else { return }
-        configuration.executableURL = url.standardizedFileURL
-        customCommand = AICommandLine.render(
-            executable: configuration.executableURL,
-            arguments: configuration.arguments
-        )
-    }
-
     func selectProvider(_ provider: AIProvider) {
         let previous = configuration
-        if provider == .advanced {
+        switch provider {
+        case .disabled:
+            configuration = AIProviderConfiguration()
+            customCommand = ""
+        case .codex, .claude:
+            configuration = AIProviderConfiguration(
+                provider: provider,
+                timeout: previous.timeout,
+                contextChoice: previous.contextChoice
+            )
+            customCommand = AILocalCLICommandTemplate.render(
+                provider: provider,
+                model: nil
+            )
+        case .advanced:
             configuration = AIProviderConfiguration(
                 provider: .advanced,
                 timeout: previous.timeout,
                 contextChoice: previous.contextChoice
             )
             customCommand = ""
-        } else {
-            var selected = previous
-            selected.provider = provider
-            configuration = selected.canonicalized()
         }
         commandErrorMessage = nil
     }
@@ -302,47 +239,28 @@ final class AISettingsController {
     }
 
     private func applyCustomCommand() {
-        guard configuration.provider == .advanced else { return }
+        guard !suppressCommandApplication else { return }
+        guard configuration.provider != .disabled else { return }
         lastTestedConfiguration = nil
         testState = .untested
         savedMessage = nil
         errorMessage = nil
 
-        let tokens: [String]
+        let template: AILocalCLICommandTemplate
         do {
-            tokens = try AICommandLine.parse(customCommand)
-        } catch AICommandLineError.empty {
-            commandErrorMessage = nil
-            configuration.executableURL = nil
-            configuration.arguments = []
-            configuration.model = nil
-            return
+            template = try AILocalCLICommandTemplate.parse(customCommand)
         } catch {
             commandErrorMessage = error.localizedDescription
             return
         }
 
-        let executableToken = tokens[0]
-        let executableURL: URL?
-        if executableToken.hasPrefix("/") {
-            executableURL = URL(fileURLWithPath: executableToken, isDirectory: false)
-                .standardizedFileURL
-        } else {
-            executableURL = executableResolver.resolveExecutable(named: executableToken)
-        }
-
-        guard let executableURL else {
-            commandErrorMessage = "The command executable “\(executableToken)” was not found."
-            configuration.executableURL = nil
-            configuration.arguments = Array(tokens.dropFirst())
-            configuration.model = nil
-            return
-        }
-
         commandErrorMessage = nil
-        configuration.executableURL = executableURL
-        configuration.arguments = Array(tokens.dropFirst())
-        configuration.model = nil
+        configuration = AIProviderConfiguration(
+            provider: template.provider,
+            model: template.model,
+            timeout: configuration.timeout,
+            contextChoice: configuration.contextChoice
+        )
     }
 }
 
@@ -394,83 +312,22 @@ struct AISettingsView: View {
                     )
                 }
 
-                if controller.configuration.provider != .disabled {
-                    LabeledContent {
-                        Picker("CLI Tool", selection: Binding(
-                            get: { controller.configuration.provider },
-                            set: { controller.selectProvider($0) }
-                        )) {
-                            ForEach(AISettingsController.cliTools, id: \.self) { provider in
-                                Text(provider.displayName).tag(provider)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 180)
-                        .accessibilityLabel("CLI tool")
-                    } label: {
-                        settingLabel(
-                            "CLI Tool",
-                            detail: "Choose a preset or enter a custom command."
-                        )
-                    }
-
-                    Text(controller.providerHelp)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
 
             if controller.configuration.provider != .disabled {
-                Section {
-                    if controller.usesPreset {
-                        LabeledContent {
-                            TextField(
-                                "Provider default",
-                                text: Binding(
-                                    get: { controller.model },
-                                    set: { controller.model = $0 }
-                                )
-                            )
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 240)
-                            .accessibilityLabel("Optional provider model")
-                        } label: {
-                            settingLabel(
-                                "Model",
-                                detail: "Leave blank to use the CLI provider default."
-                            )
-                        }
-                    }
-
+                Section("CLI Template") {
                     LabeledContent {
-                        if controller.usesPreset {
-                            Text(controller.commandPreview ?? "Executable not found")
-                                .font(.system(.body, design: .monospaced))
-                                .foregroundStyle(
-                                    controller.resolvedExecutablePath == nil ? .secondary : .primary
-                                )
-                                .textSelection(.enabled)
-                                .accessibilityLabel(
-                                    controller.commandPreview.map {
-                                        "Post-processing command: \($0)"
-                                    } ?? "Post-processing command: executable not found"
-                                )
-                        } else {
-                            TextField(
-                                "codex exec --skip-git-repo-check --model gpt-5.4-mini -",
-                                text: $controller.customCommand
-                            )
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(.body, design: .monospaced))
-                            .accessibilityLabel("Custom CLI command")
-                        }
+                        TextField(
+                            AILocalCLICommandTemplate.exampleCommand,
+                            text: $controller.customCommand
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                        .accessibilityLabel("Meeting AI CLI template")
                     } label: {
                         settingLabel(
                             "Command",
-                            detail: controller.usesPreset
-                                ? "Brain supplies its response schema and sends the prompt on stdin."
-                                : "The command is parsed into literal arguments; the prompt is sent on stdin."
+                            detail: "Enter a Codex or Claude CLI template, including an optional model."
                         )
                     }
 
@@ -480,38 +337,11 @@ struct AISettingsView: View {
                             .foregroundStyle(.red)
                     }
 
-                    LabeledContent {
-                        HStack {
-                            TextField(
-                                "Seconds",
-                                value: Binding(
-                                    get: { controller.timeout },
-                                    set: { controller.timeout = $0 }
-                                ),
-                                format: .number.precision(.fractionLength(0))
-                            )
-                            .frame(width: 90)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityLabel("Provider timeout in seconds")
-                            Text("seconds")
-                                .foregroundStyle(.secondary)
-                        }
-                    } label: {
-                        settingLabel(
-                            "Timeout",
-                            detail: "Maximum time to wait for a response, up to 900 seconds."
-                        )
-                    }
-
                     Label(
-                        "Runs a command on this Mac. The command may contact its own service.",
-                        systemImage: "arrow.up.right.circle"
+                        "Brain adds its read-only safety and response-schema arguments. It never invokes a shell.",
+                        systemImage: "lock.shield"
                     )
                     .font(.caption)
-                    .foregroundStyle(.orange)
-
-                    Label(AIProvider.providerNote, systemImage: "exclamationmark.bubble")
-                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -546,12 +376,12 @@ struct AISettingsView: View {
                         controller.clear()
                     }
                     .help("Removes only Brain's AI settings. It does not log out or delete CLI credentials.")
-                    .accessibilityHint("Removes Brain's provider settings but keeps CLI credentials")
+                    .accessibilityHint("Removes Brain's AI command setting but keeps CLI credentials")
 
                     Spacer()
                 }
 
-                Text("Clear removes only Brain's provider, command, model, timeout, and context settings. It never logs out of Codex or Claude and never deletes CLI credentials.")
+                Text("Clear removes only Brain's AI command setting. It never logs out of Codex or Claude and never deletes CLI credentials.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -568,20 +398,6 @@ struct AISettingsView: View {
                 }
             }
 
-            if controller.configuration.provider != .disabled {
-                Section("Transcript Context") {
-                    Picker("Context sent to AI", selection: $controller.configuration.contextChoice) {
-                        Text("Rich transcript").tag(AIContextChoice.rich)
-                        Text("Plain transcript").tag(AIContextChoice.plain)
-                    }
-                    .pickerStyle(.segmented)
-                    .accessibilityLabel("Transcript context sent to the provider")
-
-                    Text("Rich transcripts include timestamps and available speaker labels. Plain transcripts send only the spoken text.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
         }
         .formStyle(.grouped)
         .navigationTitle("AI Setup")

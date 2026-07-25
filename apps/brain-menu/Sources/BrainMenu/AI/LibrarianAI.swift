@@ -3,14 +3,43 @@ import Observation
 
 struct LibrarianAIConfiguration: Codable, Equatable, Sendable {
     var automaticProcessingEnabled: Bool
-    var model: String?
+    var command: String
 
     init(
         automaticProcessingEnabled: Bool = true,
-        model: String? = nil
+        command: String = AILocalCLICommandTemplate.defaultCommand
     ) {
         self.automaticProcessingEnabled = automaticProcessingEnabled
-        self.model = model
+        self.command = command
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case automaticProcessingEnabled
+        case command
+        case model
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        automaticProcessingEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .automaticProcessingEnabled
+        ) ?? true
+        if let command = try container.decodeIfPresent(String.self, forKey: .command) {
+            self.command = command
+        } else {
+            let legacyModel = try container.decodeIfPresent(String.self, forKey: .model)
+            command = AILocalCLICommandTemplate.render(
+                provider: .codex,
+                model: legacyModel
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(automaticProcessingEnabled, forKey: .automaticProcessingEnabled)
+        try container.encode(command, forKey: .command)
     }
 }
 
@@ -45,18 +74,22 @@ final class LibrarianAISettingsStore: LibrarianAISettingsPersisting, @unchecked 
 }
 
 protocol LibrarianProcessing: Sendable {
-    func process(model: String?) async throws -> BrainJobCreated
+    func process(command: String) async throws -> BrainJobCreated
 }
 
 struct LocalLibrarianProcessor: LibrarianProcessing {
-    func process(model: String?) async throws -> BrainJobCreated {
+    func process(command: String) async throws -> BrainJobCreated {
         guard BrainRuntime.deploymentMode() == .local,
               let configuration = BrainRuntime.localConfiguration() else {
             throw LocalBrainError.invalidConfiguration
         }
+        let template = try AILocalCLICommandTemplate.parse(command)
+        guard template.provider == .codex else {
+            throw AILocalCLICommandTemplateError.librarianRequiresCodex
+        }
         let client = try LocalBrainClient(
             configuration: configuration,
-            librarianModel: model
+            librarianModel: template.model
         )
         return try await client.createJob(kind: .process, question: nil)
     }
@@ -97,7 +130,7 @@ final class LibrarianAIController {
     static let captureDebounce: Duration = .seconds(3)
 
     var automaticProcessingEnabled: Bool
-    var model: String
+    var command: String
 
     private(set) var state: LibrarianAIRunState = .idle
     private(set) var savedMessage: String?
@@ -130,7 +163,7 @@ final class LibrarianAIController {
         let loaded = settings.load()
         savedConfiguration = loaded
         automaticProcessingEnabled = loaded.automaticProcessingEnabled
-        model = loaded.model ?? ""
+        command = loaded.command
     }
 
     var isWorking: Bool {
@@ -171,19 +204,23 @@ final class LibrarianAIController {
 
     func save() {
         do {
-            let validatedModel = try AIProviderValidation.validatedModel(model)
+            let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+            let template = try AILocalCLICommandTemplate.parse(trimmedCommand)
+            guard template.provider == .codex else {
+                throw AILocalCLICommandTemplateError.librarianRequiresCodex
+            }
             let configuration = LibrarianAIConfiguration(
                 automaticProcessingEnabled: automaticProcessingEnabled,
-                model: validatedModel
+                command: trimmedCommand
             )
             try settings.save(configuration)
             savedConfiguration = configuration
-            model = validatedModel ?? ""
+            command = trimmedCommand
             savedMessage = "Librarian AI settings saved."
             errorMessage = nil
         } catch {
             savedMessage = nil
-            errorMessage = "Enter a valid Codex model identifier, or leave the model blank."
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -232,7 +269,7 @@ final class LibrarianAIController {
         state = .running
         errorMessage = nil
         let task = Task { [processor] in
-            try await processor.process(model: configuration.model)
+            try await processor.process(command: configuration.command)
         }
         processingTask = Task { @MainActor [weak self] in
             guard let self else { return }

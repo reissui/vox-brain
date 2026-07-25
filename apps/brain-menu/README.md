@@ -56,7 +56,7 @@ Local mode provides:
 - direct vault access in Finder and Obsidian;
 - accurate local activity and Librarian progress;
 - automatic local Librarian processing after capture and every 15 minutes;
-- separate selectable Codex models for Librarian work and meeting
+- separate, single-line CLI command templates for Librarian work and meeting
   post-processing under **AI Setup**; and
 - local meetings and optional VoxType speech.
 
@@ -69,6 +69,17 @@ The Librarian preserves captured words while enriching sources, filing notes,
 building links and maps, and updating project, person, and owner-profile
 material from evidence in the vault. Automatic processing can be disabled or
 run immediately from **AI Setup**.
+
+Each AI workflow uses one command-template field instead of an application or
+executable picker. For example:
+
+```sh
+codex exec --skip-git-repo-check --model gpt-5.6-sol
+```
+
+Brain validates the template, selects the requested model, and adds its fixed
+sandbox and structured-output arguments internally. It never invokes a shell
+with the entered text.
 
 MCP, Cloudflare, pairing, remote device credentials, Gmail, runner health, and
 private-site access are hidden in local mode.

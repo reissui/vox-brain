@@ -25,8 +25,10 @@ server, pairing, or MCP:
 3. Brain creates the local vault and stores all new knowledge there.
 4. Brain automatically runs the Librarian after new captures so inbox items are
    enriched, filed, linked, and reflected in maps and evidence-backed profiles.
-5. Use **AI Setup** to choose a separate Codex model for the Librarian and for
-   meeting post-processing, or use **Activity** to follow current work.
+5. Use **AI Setup** to give the Librarian and meeting post-processing their own
+   CLI command templates, for example
+   `codex exec --skip-git-repo-check --model gpt-5.6-sol`, or use **Activity**
+   to follow current work.
 
 The release app contains the reusable Brain CLI, Librarian prompts, and note
 templates needed for local operation. Codex is required only for intelligent

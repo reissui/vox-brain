@@ -92,24 +92,25 @@ private struct LibrarianAISettingsView: View {
             }
 
             Section("Local AI") {
-                LabeledContent("Provider", value: "Codex CLI")
-
                 LabeledContent {
-                    TextField("Provider default", text: $controller.model)
+                    TextField(
+                        AILocalCLICommandTemplate.exampleCommand,
+                        text: $controller.command
+                    )
                         .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 260)
-                        .accessibilityLabel("Optional Librarian Codex model")
+                        .font(.system(.body, design: .monospaced))
+                        .accessibilityLabel("Librarian AI CLI template")
                 } label: {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Model")
-                        Text("This choice is separate from meeting post-processing.")
+                        Text("Command")
+                        Text("Enter a Codex CLI template, including an optional model.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
 
                 Label(
-                    "Uses your existing Codex CLI ChatGPT sign-in. Brain confines persistent writes to your local vault.",
+                    "Brain adds its Librarian sandbox and safety arguments. It never invokes a shell.",
                     systemImage: "lock.shield"
                 )
                 .font(.caption)
