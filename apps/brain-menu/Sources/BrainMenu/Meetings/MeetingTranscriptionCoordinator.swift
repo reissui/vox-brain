@@ -43,6 +43,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     typealias ClientFactory = @Sendable () throws -> any LiveTranscriptionClient
     typealias UploadScheduler = @MainActor (UUID) -> Void
 
+    private nonisolated static let accidentalMeetingDuration: TimeInterval = 30
     private static let registry = MeetingTranscriptionJobRegistry.shared
     private let store: MeetingStore
     private let retention: AudioRetentionController
@@ -427,6 +428,28 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         var currentMeeting = currentStored.meeting
         currentMeeting.speechEngine = meeting.speechEngine
         currentMeeting.speechModel = meeting.speechModel
+        if shouldDiscardAccidentalMeeting(
+            currentMeeting,
+            utterances: utterances
+        ) {
+            do {
+                try store.delete(currentMeeting.id, confirmed: true)
+                return MeetingTranscriptionPersistenceOutcome(
+                    meeting: currentMeeting,
+                    shouldScheduleUpload: false
+                )
+            } catch {
+                return MeetingTranscriptionPersistenceOutcome(
+                    meeting: persistFailureIfCurrent(
+                        meeting: currentMeeting,
+                        utterances: utterances,
+                        message: "Brain could not remove the short empty meeting: \(bounded(error))",
+                        store: store
+                    ),
+                    shouldScheduleUpload: false
+                )
+            }
+        }
         guard failures.isEmpty else {
             let message = failures.prefix(3).map(Self.failureDescription).joined(separator: " ")
             return MeetingTranscriptionPersistenceOutcome(
@@ -486,6 +509,18 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 ),
                 shouldScheduleUpload: false
             )
+        }
+    }
+
+    private nonisolated static func shouldDiscardAccidentalMeeting(
+        _ meeting: MeetingRecord,
+        utterances: [MeetingUtterance]
+    ) -> Bool {
+        guard let endedAt = meeting.endedAt else { return false }
+        let duration = endedAt.timeIntervalSince(meeting.startedAt)
+        guard duration >= 0, duration < accidentalMeetingDuration else { return false }
+        return !utterances.contains {
+            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
 
