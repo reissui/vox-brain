@@ -545,6 +545,54 @@ struct AppIntegrationTests {
             #expect(entitlements[prohibited] == nil)
         }
 
+        let voxTypeInfoData = try Data(
+            contentsOf: resources.appendingPathComponent("VoxTypeInfo.plist")
+        )
+        let voxTypeInfo = try #require(
+            PropertyListSerialization.propertyList(from: voxTypeInfoData, format: nil)
+                as? [String: Any]
+        )
+        #expect(voxTypeInfo["CFBundleIdentifier"] as? String == "app.voxbrain.voxtype")
+        #expect(voxTypeInfo["CFBundleExecutable"] as? String == "voxtype")
+        #expect(voxTypeInfo["CFBundleShortVersionString"] as? String == "0.7.5")
+        #expect(voxTypeInfo["LSUIElement"] as? Bool == true)
+        #expect(
+            voxTypeInfo["VoxTypeSourceSHA256"] as? String
+                == "12e794655f0e0efadceb92e6313cec2c618c571892490368d0b90194cc27cc6e"
+        )
+        for requiredPurpose in [
+            "NSMicrophoneUsageDescription",
+            "NSAppleEventsUsageDescription",
+            "NSInputMonitoringUsageDescription",
+        ] {
+            #expect(!(voxTypeInfo[requiredPurpose] as? String ?? "").isEmpty)
+        }
+
+        let voxTypeLicense = try String(
+            contentsOf: resources.appendingPathComponent("VoxType-LICENSE.txt"),
+            encoding: .utf8
+        )
+        #expect(voxTypeLicense.contains("MIT License"))
+        #expect(voxTypeLicense.contains("Copyright (c) 2025 Peter Jackson"))
+
+        let voxTypeFetcher = try String(
+            contentsOf: packageRoot.appendingPathComponent("fetch-voxtype.sh"),
+            encoding: .utf8
+        )
+        #expect(voxTypeFetcher.contains("voxtype-${version}-macos-universal"))
+        #expect(voxTypeFetcher.contains("expected_sha256="))
+        #expect(voxTypeFetcher.contains("lipo \"$source_binary\" -verify_arch arm64 x86_64"))
+
+        for scriptName in ["install.sh", "package.sh"] {
+            let packaging = try String(
+                contentsOf: packageRoot.appendingPathComponent(scriptName),
+                encoding: .utf8
+            )
+            #expect(packaging.contains("Contents/Library/LoginItems/VoxType.app"))
+            #expect(packaging.contains("\"$voxtype_fetcher\" \"$voxtype_binary\""))
+            #expect(packaging.contains("codesign"))
+        }
+
         let manifest = try String(
             contentsOf: packageRoot.appendingPathComponent("Package.swift"),
             encoding: .utf8
@@ -1032,7 +1080,8 @@ private actor AppOnboardingVoxType: OnboardingVoxTypeInspecting {
                 : .unavailable(.launchFailed),
             hotkeyConfiguration: ready
                 ? VoxTypeHotkeyConfiguration(key: "FN", modifiers: [], mode: "PushToTalk")
-                : nil
+                : nil,
+            source: ready ? .external : .missing
         )
     }
 

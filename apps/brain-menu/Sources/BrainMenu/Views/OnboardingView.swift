@@ -23,7 +23,7 @@ struct OnboardingView: View {
                 Text(
                     controller.isComplete
                         ? "Dictation is ready. Meeting transcription can be set up later in Settings."
-                        : "Complete each required prerequisite before using dictation."
+                        : "Enable Brain's included speech engine and complete each required prerequisite."
                 )
                 .foregroundStyle(.secondary)
             }
@@ -88,7 +88,9 @@ struct OnboardingView: View {
                         .accessibilityValue(
                             controller.canPerform(action) ? "Enabled" : "Disabled"
                         )
-                        .accessibilityHint("May open System Settings or the official VoxType guide.")
+                        .accessibilityHint(
+                            "May enable Brain's included VoxType, download a speech model, open System Settings, or open the official guide."
+                        )
                     }
                 }
                 .padding(.vertical, 5)

@@ -84,24 +84,77 @@ struct OnboardingControllerTests {
     }
 
     @Test
-    func installActionOpensOfficialPageAndSourceDoesNotBundleVoxType() async throws {
-        let fixture = try OnboardingFixture(executableURL: nil)
+    func bundledInstallActionEnablesAndStartsVoxTypeWithoutOpeningAnotherApp() async throws {
+        let fixture = try OnboardingFixture(
+            executableURL: URL(fileURLWithPath: "/Brain.app/Contents/Library/LoginItems/VoxType.app/Contents/MacOS/voxtype"),
+            source: .bundled,
+            installerStatus: .notRegistered
+        )
+        await fixture.controller.refresh()
+
+        #expect(fixture.controller.check(.voxTypeExecutable).action == .installVoxType)
+        await fixture.controller.perform(.installVoxType)
+
+        #expect(fixture.installer.enableCalls == 1)
+        #expect(fixture.installer.status == .enabled)
+        #expect(fixture.controller.check(.voxTypeExecutable).state == .ready)
+        #expect(fixture.controller.check(.voxTypeDaemon).state == .ready)
+        #expect(fixture.opener.urls.isEmpty)
+    }
+
+    @Test
+    func freshBundledInstallPreparesTheDefaultModelBeforeLaunchingVoxType() async throws {
+        let fixture = try OnboardingFixture(
+            executableURL: URL(fileURLWithPath: "/Brain.app/Contents/Library/LoginItems/VoxType.app/Contents/MacOS/voxtype"),
+            source: .bundled,
+            installerStatus: .notRegistered,
+            readyModels: []
+        )
         await fixture.controller.refresh()
 
         await fixture.controller.perform(.installVoxType)
 
-        #expect(fixture.opener.urls == [OnboardingController.voxTypeInstallationURL])
-        let source = try String(
-            contentsOf: sourceDirectory.appendingPathComponent("OnboardingController.swift"),
-            encoding: .utf8
-        )
-        #expect(!source.contains("voxtype-tray"))
-        #expect(!source.contains("URLSession"))
-        #expect(!source.contains("downloadTask"))
+        #expect(await fixture.models.installs == [OnboardingController.defaultDictationModelID])
+        #expect(fixture.installer.enableCalls == 1)
+        #expect(fixture.restarter.restartCalls == 0)
+        #expect(fixture.controller.check(.voxTypeExecutable).state == .ready)
+        #expect(fixture.controller.check(.dictationModel).state == .ready)
+        #expect(fixture.controller.check(.meetingModel).state == .ready)
     }
 
     @Test
-    func readsVoxTypeShortcutAndSendsModelManagementBackToVoxType() async throws {
+    func missingBundledHelperFallsBackToTheOfficialGuide() async throws {
+        let fixture = try OnboardingFixture(executableURL: nil)
+        await fixture.controller.refresh()
+
+        #expect(fixture.controller.check(.voxTypeExecutable).action == .openVoxTypeGuide)
+        await fixture.controller.perform(.openVoxTypeGuide)
+
+        #expect(fixture.opener.urls == [OnboardingController.voxTypeInstallationURL])
+        #expect(fixture.installer.enableCalls == 0)
+    }
+
+    @Test
+    func deniedBackgroundItemOffersTheExactSystemSettingsRoute() async throws {
+        let fixture = try OnboardingFixture(
+            executableURL: URL(fileURLWithPath: "/Brain.app/Contents/Library/LoginItems/VoxType.app/Contents/MacOS/voxtype"),
+            source: .bundled,
+            installerStatus: .requiresApproval
+        )
+        await fixture.controller.refresh()
+
+        #expect(
+            fixture.controller.check(.voxTypeExecutable).action
+                == .openVoxTypeLoginItems
+        )
+        await fixture.controller.perform(.openVoxTypeLoginItems)
+
+        #expect(fixture.installer.openSettingsCalls == 1)
+        #expect(fixture.installer.enableCalls == 0)
+    }
+
+    @Test
+    func readsVoxTypeShortcutAndDownloadsTheSharedDefaultModelInsideBrain() async throws {
         let fixture = try OnboardingFixture(readyModels: [])
         await fixture.controller.refresh()
 
@@ -109,29 +162,52 @@ struct OnboardingControllerTests {
         #expect(fixture.controller.check(.voxTypeHotkey).detail.contains("Fn (push-to-talk)"))
         #expect(fixture.controller.check(.voxTypeHotkey).detail.contains("will not change"))
 
-        #expect(fixture.controller.check(.dictationModel).action == .openVoxTypeGuide)
-        #expect(fixture.controller.check(.meetingModel).action == .openVoxTypeGuide)
+        let action = OnboardingAction.installModel(
+            OnboardingController.defaultDictationModelID
+        )
+        #expect(fixture.controller.check(.dictationModel).action == action)
+        #expect(fixture.controller.check(.meetingModel).action == action)
         #expect(fixture.controller.check(.dictationModel).state == .optional)
         #expect(fixture.controller.check(.meetingModel).state == .optional)
 
-        await fixture.controller.perform(.openVoxTypeGuide)
-        #expect(fixture.opener.urls == [OnboardingController.voxTypeInstallationURL])
-        #expect(await fixture.models.installs.isEmpty)
+        await fixture.controller.perform(action)
 
-        #expect(await fixture.models.installs.isEmpty)
+        #expect(await fixture.models.installs == [OnboardingController.defaultDictationModelID])
+        #expect(fixture.restarter.restartCalls == 1)
+        #expect(fixture.controller.check(.dictationModel).state == .ready)
+        #expect(fixture.controller.check(.meetingModel).state == .ready)
+        #expect(fixture.opener.urls.isEmpty)
     }
 
     @Test
-    func missingModelsNeverStartInstallationInsideBrain() async throws {
+    func modelDownloadShowsProgressAndStartsOnlyAfterItsExplicitButton() async throws {
         let fixture = try OnboardingFixture(readyModels: [])
         await fixture.permissions.set(.notDetermined, for: .microphone)
         await fixture.controller.refresh()
 
         let microphone = try #require(fixture.controller.check(.microphone).action)
-        #expect(fixture.controller.check(.dictationModel).action == .openVoxTypeGuide)
-        #expect(fixture.controller.check(.meetingModel).action == .openVoxTypeGuide)
+        let modelAction = OnboardingAction.installModel(
+            OnboardingController.defaultDictationModelID
+        )
+        #expect(fixture.controller.check(.dictationModel).action == modelAction)
+        #expect(fixture.controller.check(.meetingModel).action == modelAction)
         #expect(fixture.controller.canPerform(microphone))
         #expect(await fixture.models.installs.isEmpty)
+
+        await fixture.models.blockNextInstall()
+        let installation = Task { await fixture.controller.perform(modelAction) }
+        await fixture.models.waitForInstallToStart()
+
+        #expect(fixture.controller.check(.dictationModel).state == .installing)
+        #expect(fixture.controller.check(.meetingModel).state == .installing)
+        #expect(!fixture.controller.canPerform(microphone))
+
+        await fixture.models.finishBlockedInstall()
+        await installation.value
+
+        #expect(fixture.controller.check(.dictationModel).state == .ready)
+        #expect(fixture.controller.check(.meetingModel).state == .ready)
+        #expect(fixture.restarter.restartCalls == 1)
     }
 
     @Test
@@ -207,7 +283,10 @@ struct OnboardingControllerTests {
         await optionalMeeting.refresh()
         #expect(optionalMeeting.isComplete)
         #expect(optionalMeeting.check(.dictationModel).state == .optional)
-        #expect(optionalMeeting.check(.dictationModel).action == .openVoxTypeGuide)
+        #expect(
+            optionalMeeting.check(.dictationModel).action
+                == .installModel(OnboardingController.defaultDictationModelID)
+        )
     }
 
     @Test
@@ -253,6 +332,8 @@ private final class OnboardingFixture {
     let voxType: FakeOnboardingVoxType
     let models: FakeOnboardingModels
     let permissions: FakeOnboardingPermissions
+    let installer: FakeBundledVoxTypeService
+    let restarter = FakeOnboardingVoxTypeRestarter()
     let opener = FakeOnboardingOpener()
     private let suiteName: String
     private let clock: @Sendable () -> Date
@@ -261,6 +342,8 @@ private final class OnboardingFixture {
 
     init(
         executableURL: URL? = URL(fileURLWithPath: "/opt/homebrew/bin/voxtype"),
+        source: OnboardingVoxTypeInspection.Source? = nil,
+        installerStatus: BundledVoxTypeServiceStatus = .unavailable,
         hotkeyConfiguration: VoxTypeHotkeyConfiguration? = VoxTypeHotkeyConfiguration(
             key: "FN",
             modifiers: [],
@@ -288,11 +371,13 @@ private final class OnboardingFixture {
                 status: executableURL == nil
                     ? .unavailable(.launchFailed)
                     : OnboardingControllerTests.runningStatus,
-                hotkeyConfiguration: executableURL == nil ? nil : hotkeyConfiguration
+                hotkeyConfiguration: executableURL == nil ? nil : hotkeyConfiguration,
+                source: source ?? (executableURL == nil ? .missing : .external)
             )
         )
         models = FakeOnboardingModels(ready: readyModels)
         permissions = FakeOnboardingPermissions()
+        installer = FakeBundledVoxTypeService(status: installerStatus)
     }
 
     func makeController(
@@ -304,6 +389,8 @@ private final class OnboardingFixture {
             voxType: voxType,
             models: models,
             permissions: permissions,
+            voxTypeInstaller: installer,
+            voxTypeRestarter: restarter,
             opener: opener,
             defaults: defaults,
             now: now,
@@ -331,8 +418,38 @@ private actor FakeOnboardingVoxType: OnboardingVoxTypeInspecting {
             executableURL: inspection.executableURL,
             version: inspection.version,
             status: status,
-            hotkeyConfiguration: inspection.hotkeyConfiguration
+            hotkeyConfiguration: inspection.hotkeyConfiguration,
+            source: inspection.source
         )
+    }
+}
+
+@MainActor
+private final class FakeBundledVoxTypeService: BundledVoxTypeServicing {
+    var status: BundledVoxTypeServiceStatus
+    private(set) var enableCalls = 0
+    private(set) var openSettingsCalls = 0
+
+    init(status: BundledVoxTypeServiceStatus) {
+        self.status = status
+    }
+
+    func enableAndLaunch() async throws {
+        enableCalls += 1
+        status = .enabled
+    }
+
+    func openLoginItemsSettings() {
+        openSettingsCalls += 1
+    }
+}
+
+@MainActor
+private final class FakeOnboardingVoxTypeRestarter: VoxTypeApplicationRestarting {
+    private(set) var restartCalls = 0
+
+    func restart() async throws {
+        restartCalls += 1
     }
 }
 

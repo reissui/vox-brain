@@ -547,6 +547,10 @@ final class BrainAppControllerGraph {
             voxType: client,
             inventory: ModelInventory(client: client),
             selections: SpeechSelectionStore(),
+            modelActivator: VoxTypeModelActivator(
+                configuration: VoxTypeConfigurationEditor(),
+                statuses: client
+            ),
             microphoneService: microphoneService,
             microphoneSelectionStore: microphoneSelections
         )

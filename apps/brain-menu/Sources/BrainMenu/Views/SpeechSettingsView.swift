@@ -88,9 +88,9 @@ enum VoxTypeInstallationPresentation: Equatable, Sendable {
     var detail: String {
         switch self {
         case .checking:
-            "Looking for the separately installed VoxType executable."
+            "Looking for a standalone VoxType installation or Brain's included copy."
         case .missing:
-            "Install and configure VoxType separately. Brain will not change its settings."
+            "Open Speech Setup to enable the VoxType included with Brain."
         case .installed(let version):
             "VoxType \(version.description)"
         case .unavailable:
@@ -132,7 +132,7 @@ enum VoxTypeDaemonPresentation: Equatable, Sendable {
         case .checking:
             "Waiting for VoxType status."
         case .running:
-            "VoxType is running independently and is available for meeting transcription."
+            "VoxType is running and available for dictation and meeting transcription."
         case .stopped:
             "Start VoxType for dictation and Brain meeting transcription."
         case .unavailable(let reason):
@@ -645,7 +645,7 @@ struct SpeechSettingsView: View {
                 .disabled(controller.isRefreshing)
 
                 Link("Open VoxType guide", destination: SpeechEngineCatalog.modelGuideURL)
-                Text("Manage dictation, shortcuts, models, recording limits, and output inside VoxType. Brain only reads status and uses VoxType for meeting transcription.")
+                Text("Brain can enable its included VoxType and install catalog models in-app. Existing standalone installations remain preferred; Brain changes only models you explicitly select.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

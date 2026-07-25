@@ -56,10 +56,13 @@ the request; accepted captures are polled without resubmitting their body.
 
 ## Speech and meetings
 
-VoxType is a separate optional installation for dictation and local meeting
-transcription. Brain records microphone and system audio locally, lets the user
-review the transcript, and sends only finalized transcript text to the active
-Brain mode. Meeting audio is never uploaded.
+Brain includes VoxType as an optional engine for dictation and local meeting
+transcription. Speech Setup enables it in-app, while a compatible standalone
+VoxType installation remains supported and takes precedence. Brain can also
+download and activate its recommended speech model in-app. Brain records
+microphone and system audio locally, lets the user review the transcript, and
+sends only finalized transcript text to the active Brain mode. Meeting audio
+is never uploaded.
 
 See [meetings.md](meetings.md).
 

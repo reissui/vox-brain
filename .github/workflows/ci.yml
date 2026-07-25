@@ -70,6 +70,11 @@ jobs:
       - name: Bundle input checks
         run: |
           plutil -lint apps/brain-menu/Resources/Info.plist
+          plutil -lint apps/brain-menu/Resources/VoxTypeInfo.plist
           test -s apps/brain-menu/Resources/Brain.icns
+          test -s apps/brain-menu/Resources/VoxType-LICENSE.txt
           bash -n apps/brain-menu/install.sh
           bash -n apps/brain-menu/package.sh
+          bash -n apps/brain-menu/fetch-voxtype.sh
+          apps/brain-menu/fetch-voxtype.sh "$RUNNER_TEMP/voxtype"
+          test "$("$RUNNER_TEMP/voxtype" --version)" = "voxtype 0.7.5"

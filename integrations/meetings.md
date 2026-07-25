@@ -1,9 +1,10 @@
 # Native meeting capture
 
 Brain.app records microphone plus system audio on the Mac where the meeting
-occurs. A separately installed VoxType service transcribes locally. The user
-reviews the transcript before Brain sends finalized text to the active local
-or remote vault.
+occurs. Its included VoxType speech engine transcribes locally; a compatible
+standalone VoxType installation can be used instead and takes precedence. The
+user reviews the transcript before Brain sends finalized text to the active
+local or remote vault.
 
 ```text
 Brain.app audio capture
@@ -17,13 +18,17 @@ Audio never enters either capture request.
 
 ## Onboarding and permissions
 
-1. Install VoxType separately and start its service.
+1. In Brain's Speech Setup, choose **Enable Speech**. Brain prepares the
+   recommended model, enables its included speech engine, and starts it without
+   leaving the app. If macOS has disabled background items, approve it in the
+   Login Items settings page Brain opens.
 2. Complete Brain onboarding for **Microphone**, **Screen & System Audio
    Recording**, and **Accessibility**. Accessibility supports selected-text
    context and paste-related features; Brain does not monitor global keys.
-3. Install and test a meeting transcription model in VoxType. Brain defaults
-   English meetings to Parakeet TDT 0.6B v3; Whisper large-v3-turbo is the
-   multilingual fallback. See the
+3. Download and activate the recommended model in Brain's Speech Setup. Brain
+   defaults English meetings to Parakeet TDT 0.6B v3; Whisper large-v3-turbo is
+   the multilingual fallback. Additional catalog models remain available in
+   Speech settings. See the
    [VoxType model guide](https://voxtype.io/docs/MODEL_SELECTION_GUIDE).
 4. In **Audio Tests**, speak for the full microphone test and require visible
    input. A pinned input uses its persistent Core Audio UID and never silently
@@ -80,8 +85,10 @@ Retain the previous app artifact until this passes.
 - **No microphone:** run the five-second Speech test, reconnect a pinned input,
   or choose System Default; recheck macOS Microphone permission.
 - **No system track:** recheck Screen & System Audio Recording permission.
-- **VoxType/model missing:** install or update it separately, then refresh
-  Brain's read-only status.
+- **VoxType missing:** choose **Enable Speech** in Speech Setup. If the bundled
+  helper is unavailable, Brain links to the official installation guide.
+- **Model missing:** use **Download** in Speech Setup or Speech settings; Brain
+  downloads, activates, and verifies the catalog model in-app.
 - **Remote upload queued:** inspect D1, Queue, Agent logs, and the remote inbox
   in that order.
 - **AI unavailable:** raw transcript completion and upload still work; test

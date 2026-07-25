@@ -86,15 +86,24 @@ enum OnboardingPermission: String, CaseIterable, Equatable, Sendable {
 
 enum OnboardingAction: Equatable, Sendable {
     case installVoxType
+    case installModel(String)
     case openVoxTypeGuide
+    case openVoxTypeLoginItems
     case recheck
     case requestPermission(OnboardingPermission)
     case openSystemSettings(OnboardingPermission)
 
     var label: String {
         switch self {
-        case .installVoxType: "Install VoxType"
+        case .installVoxType: "Enable Speech"
+        case .installModel(let modelID):
+            if let model = SpeechEngineCatalog.model(id: modelID) {
+                "Download \(model.displayName)"
+            } else {
+                "Download Model"
+            }
         case .openVoxTypeGuide: "Open VoxType Guide"
+        case .openVoxTypeLoginItems: "Allow Background Item"
         case .recheck: "Check Again"
         case .requestPermission(let permission):
             switch permission {
@@ -162,10 +171,17 @@ struct SystemOnboardingPermissionProvider: OnboardingPermissionProviding {
 }
 
 struct OnboardingVoxTypeInspection: Equatable, Sendable {
+    enum Source: Equatable, Sendable {
+        case missing
+        case external
+        case bundled
+    }
+
     let executableURL: URL?
     let version: VoxTypeVersion?
     let status: VoxTypeStatus
     let hotkeyConfiguration: VoxTypeHotkeyConfiguration?
+    let source: Source
 }
 
 protocol OnboardingVoxTypeInspecting: Sendable {
@@ -179,20 +195,25 @@ struct SystemOnboardingVoxTypeInspector: OnboardingVoxTypeInspecting {
                 executableURL: nil,
                 version: nil,
                 status: .unavailable(.launchFailed),
-                hotkeyConfiguration: nil
+                hotkeyConfiguration: nil,
+                source: .missing
             )
         }
         return OnboardingVoxTypeInspection(
             executableURL: client.executableURL,
             version: try? await client.version(),
             status: await client.status(),
-            hotkeyConfiguration: try? await client.hotkeyConfiguration()
+            hotkeyConfiguration: try? await client.hotkeyConfiguration(),
+            source: BundledVoxTypeLayout.contains(executableURL: client.executableURL)
+                ? .bundled
+                : .external
         )
     }
 }
 
 protocol OnboardingModelManaging: Sendable {
     func refresh() async -> ModelInventorySnapshot
+    func installCatalogModel(id: String) async throws -> ModelInventorySnapshot
 }
 
 struct SystemOnboardingModelManager: OnboardingModelManaging {
@@ -201,6 +222,12 @@ struct SystemOnboardingModelManager: OnboardingModelManaging {
         return await ModelInventory(client: client).refresh()
     }
 
+    func installCatalogModel(id: String) async throws -> ModelInventorySnapshot {
+        guard let client = try VoxTypeClient.discover() else {
+            throw ModelInventoryError.installFailed
+        }
+        return try await ModelInventory(client: client).install(modelID: id)
+    }
 }
 
 @MainActor
@@ -247,6 +274,8 @@ final class OnboardingController {
     @ObservationIgnored private let voxType: any OnboardingVoxTypeInspecting
     @ObservationIgnored private let models: any OnboardingModelManaging
     @ObservationIgnored private let permissions: any OnboardingPermissionProviding
+    @ObservationIgnored private let voxTypeInstaller: any BundledVoxTypeServicing
+    @ObservationIgnored private let voxTypeRestarter: any VoxTypeApplicationRestarting
     @ObservationIgnored private let opener: any OnboardingURLOpening
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let now: @Sendable () -> Date
@@ -259,6 +288,8 @@ final class OnboardingController {
         voxType: any OnboardingVoxTypeInspecting = SystemOnboardingVoxTypeInspector(),
         models: any OnboardingModelManaging = SystemOnboardingModelManager(),
         permissions: any OnboardingPermissionProviding = SystemOnboardingPermissionProvider(),
+        voxTypeInstaller: any BundledVoxTypeServicing = SystemBundledVoxTypeService(),
+        voxTypeRestarter: any VoxTypeApplicationRestarting = SystemVoxTypeApplicationRestarter(),
         opener: any OnboardingURLOpening = SystemOnboardingURLOpener(),
         defaults: UserDefaults = .standard,
         now: @escaping @Sendable () -> Date = Date.init,
@@ -269,6 +300,8 @@ final class OnboardingController {
         self.voxType = voxType
         self.models = models
         self.permissions = permissions
+        self.voxTypeInstaller = voxTypeInstaller
+        self.voxTypeRestarter = voxTypeRestarter
         self.opener = opener
         self.defaults = defaults
         self.now = now
@@ -313,13 +346,17 @@ final class OnboardingController {
         defer { isWorking = false }
 
         let inspection = await voxType.inspect()
+        await refreshChecks(using: inspection)
+    }
+
+    private func refreshChecks(using inspection: OnboardingVoxTypeInspection) async {
         let inventory = await models.refresh()
         let microphone = await effectivePermissionStatus(.microphone)
         let systemAudio = await effectivePermissionStatus(.systemAudio)
         let accessibility = await effectivePermissionStatus(.accessibility)
 
         var refreshed: [OnboardingCheck] = []
-        refreshed.append(executableCheck(inspection.executableURL))
+        refreshed.append(executableCheck(inspection))
         refreshed.append(versionCheck(inspection))
         refreshed.append(daemonCheck(inspection))
         refreshed.append(hotkeyCheck(inspection))
@@ -370,8 +407,88 @@ final class OnboardingController {
         isWorking = true
         defer { isWorking = false }
         switch action {
-        case .installVoxType, .openVoxTypeGuide:
+        case .installVoxType:
+            replaceCheck(OnboardingCheck(
+                id: .voxTypeExecutable,
+                state: .installing,
+                detail: "Enabling the VoxType included with Brain…",
+                action: nil
+            ))
+            replaceCheck(OnboardingCheck(
+                id: .voxTypeDaemon,
+                state: .installing,
+                detail: "Starting VoxType…",
+                action: nil
+            ))
+            let inventory = await models.refresh()
+            let defaultAvailability = inventory.availability(for: dictationModelID)
+            if defaultAvailability == .missing || defaultAvailability == .incompatible {
+                guard let model = SpeechEngineCatalog.model(id: dictationModelID) else { return }
+                for id in modelCheckIDs(for: dictationModelID) {
+                    replaceCheck(OnboardingCheck(
+                        id: id,
+                        state: .installing,
+                        detail: "Downloading and preparing \(model.displayName)…",
+                        action: nil
+                    ))
+                }
+                do {
+                    _ = try await models.installCatalogModel(id: dictationModelID)
+                } catch {
+                    let inspection = await voxType.inspect()
+                    await refreshChecks(using: inspection)
+                    replaceModelChecksAfterFailure(model)
+                    return
+                }
+            }
+            do {
+                try await voxTypeInstaller.enableAndLaunch()
+                let inspection = await waitForVoxTypeStartup()
+                await refreshChecks(using: inspection)
+            } catch {
+                let inspection = await voxType.inspect()
+                await refreshChecks(using: inspection)
+                if voxTypeInstaller.status != .requiresApproval {
+                    replaceCheck(OnboardingCheck(
+                        id: .voxTypeExecutable,
+                        state: .actionNeeded,
+                        detail: error.localizedDescription,
+                        action: .installVoxType
+                    ))
+                }
+            }
+        case .installModel(let modelID):
+            guard let model = SpeechEngineCatalog.model(id: modelID) else { break }
+            let affectedChecks = modelCheckIDs(for: modelID)
+            for id in affectedChecks {
+                replaceCheck(OnboardingCheck(
+                    id: id,
+                    state: .installing,
+                    detail: "Downloading and preparing \(model.displayName)…",
+                    action: nil
+                ))
+            }
+            do {
+                _ = try await models.installCatalogModel(id: modelID)
+                let current = await voxType.inspect()
+                let shouldRestart = current.source != .bundled
+                    || voxTypeInstaller.status == .enabled
+                if shouldRestart {
+                    try await voxTypeRestarter.restart()
+                }
+                let inspection = shouldRestart
+                    ? await waitForVoxTypeStartup()
+                    : current
+                await refreshChecks(using: inspection)
+            } catch {
+                let inspection = await voxType.inspect()
+                await refreshChecks(using: inspection)
+                replaceModelChecksAfterFailure(model)
+            }
+        case .openVoxTypeGuide:
             _ = opener.open(Self.voxTypeInstallationURL)
+        case .openVoxTypeLoginItems:
+            voxTypeInstaller.openLoginItemsSettings()
         case .recheck:
             break
         case .requestPermission(let permission):
@@ -407,14 +524,54 @@ final class OnboardingController {
         }
     }
 
-    private func executableCheck(_ executableURL: URL?) -> OnboardingCheck {
-        guard let executableURL else {
+    private func executableCheck(_ inspection: OnboardingVoxTypeInspection) -> OnboardingCheck {
+        guard let executableURL = inspection.executableURL else {
+            if voxTypeInstaller.status == .notRegistered {
+                return OnboardingCheck(
+                    id: .voxTypeExecutable,
+                    state: .actionNeeded,
+                    detail: "VoxType is included with Brain and ready to enable.",
+                    action: .installVoxType
+                )
+            }
             return OnboardingCheck(
                 id: .voxTypeExecutable,
                 state: .actionNeeded,
-                detail: "Install VoxType from its official installation guide.",
-                action: .installVoxType
+                detail: "This copy of Brain does not include VoxType.",
+                action: .openVoxTypeGuide
             )
+        }
+        if inspection.source == .bundled {
+            switch voxTypeInstaller.status {
+            case .notRegistered:
+                return OnboardingCheck(
+                    id: .voxTypeExecutable,
+                    state: .actionNeeded,
+                    detail: "VoxType is included with Brain and ready to enable.",
+                    action: .installVoxType
+                )
+            case .requiresApproval:
+                return OnboardingCheck(
+                    id: .voxTypeExecutable,
+                    state: .actionNeeded,
+                    detail: "Allow Brain's VoxType background item, then check again.",
+                    action: .openVoxTypeLoginItems
+                )
+            case .unavailable:
+                return OnboardingCheck(
+                    id: .voxTypeExecutable,
+                    state: .unavailable,
+                    detail: "Brain's bundled VoxType helper is unavailable.",
+                    action: .openVoxTypeGuide
+                )
+            case .enabled:
+                return OnboardingCheck(
+                    id: .voxTypeExecutable,
+                    state: .ready,
+                    detail: "VoxType is included with Brain and enabled.",
+                    action: nil
+                )
+            }
         }
         return OnboardingCheck(
             id: .voxTypeExecutable,
@@ -436,7 +593,9 @@ final class OnboardingController {
                 id: .voxTypeVersion,
                 state: .actionNeeded,
                 detail: "VoxType \(version) is older than required \(minimumVersion).",
-                action: .installVoxType
+                action: inspection.source == .external
+                    ? .openVoxTypeGuide
+                    : .installVoxType
             )
         }
         return OnboardingCheck(
@@ -449,15 +608,30 @@ final class OnboardingController {
 
     private func daemonCheck(_ inspection: OnboardingVoxTypeInspection) -> OnboardingCheck {
         guard inspection.executableURL != nil else {
-            return unavailable(.voxTypeDaemon, "Install VoxType before checking its daemon.")
+            return unavailable(.voxTypeDaemon, "VoxType must be available before checking its daemon.")
+        }
+        if inspection.source == .bundled, voxTypeInstaller.status != .enabled {
+            let action: OnboardingAction = voxTypeInstaller.status == .requiresApproval
+                ? .openVoxTypeLoginItems
+                : .installVoxType
+            return OnboardingCheck(
+                id: .voxTypeDaemon,
+                state: .actionNeeded,
+                detail: voxTypeInstaller.status == .requiresApproval
+                    ? "Allow the background item before VoxType can start."
+                    : "Enable the VoxType included with Brain.",
+                action: action
+            )
         }
         guard case .available(let snapshot) = inspection.status,
               snapshot.daemonIsRunning else {
             return OnboardingCheck(
                 id: .voxTypeDaemon,
                 state: .actionNeeded,
-                detail: "Start VoxType, then check again.",
-                action: .recheck
+                detail: inspection.source == .bundled
+                    ? "VoxType is enabled but not running."
+                    : "Start VoxType, then check again.",
+                action: inspection.source == .bundled ? .installVoxType : .recheck
             )
         }
         return OnboardingCheck(
@@ -509,15 +683,15 @@ final class OnboardingController {
             return OnboardingCheck(
                 id: id,
                 state: .optional,
-                detail: "Configure \(modelName) in VoxType, then check again. Brain will not install or activate VoxType models.",
-                action: .openVoxTypeGuide
+                detail: "Brain can download and activate \(modelName) without leaving the app.",
+                action: .installModel(modelID)
             )
         case .incompatible:
             return OnboardingCheck(
                 id: id,
                 state: .optional,
-                detail: "Replace \(modelName) in VoxType, then check again. Brain will not install or activate VoxType models.",
-                action: .openVoxTypeGuide
+                detail: "Brain can replace this with the supported \(modelName) build.",
+                action: .installModel(modelID)
             )
         case .installing:
             return OnboardingCheck(
@@ -533,6 +707,24 @@ final class OnboardingController {
                 detail: "VoxType could not report \(modelName) readiness. Manage models in VoxType.",
                 action: .openVoxTypeGuide
             )
+        }
+    }
+
+    private func modelCheckIDs(for modelID: String) -> [OnboardingCheckID] {
+        var ids: [OnboardingCheckID] = []
+        if dictationModelID == modelID { ids.append(.dictationModel) }
+        if meetingModelID == modelID { ids.append(.meetingModel) }
+        return ids
+    }
+
+    private func replaceModelChecksAfterFailure(_ model: SpeechModelDescriptor) {
+        for id in modelCheckIDs(for: model.id) {
+            replaceCheck(OnboardingCheck(
+                id: id,
+                state: .optional,
+                detail: "Brain could not download and activate \(model.displayName). Try again.",
+                action: .installModel(model.id)
+            ))
         }
     }
 
@@ -580,6 +772,19 @@ final class OnboardingController {
 
     private func unavailable(_ id: OnboardingCheckID, _ detail: String) -> OnboardingCheck {
         OnboardingCheck(id: id, state: .unavailable, detail: detail, action: .recheck)
+    }
+
+    private func waitForVoxTypeStartup() async -> OnboardingVoxTypeInspection {
+        var inspection = await voxType.inspect()
+        for _ in 0..<20 {
+            if case .available(let snapshot) = inspection.status,
+               snapshot.daemonIsRunning {
+                return inspection
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+            inspection = await voxType.inspect()
+        }
+        return inspection
     }
 
     private func effectivePermissionStatus(

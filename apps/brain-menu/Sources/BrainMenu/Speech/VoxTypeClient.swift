@@ -67,9 +67,12 @@ struct SystemVoxTypeApplicationRestarter: VoxTypeApplicationRestarting {
     }
 
     func restart() async throws {
-        let running = NSRunningApplication.runningApplications(
-            withBundleIdentifier: Self.bundleIdentifier
-        )
+        let running = [
+            Self.bundleIdentifier,
+            BundledVoxTypeLayout.bundleIdentifier,
+        ].flatMap { bundleIdentifier in
+            NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+        }
         for application in running where !application.isTerminated {
             _ = application.terminate()
         }
@@ -87,9 +90,17 @@ struct SystemVoxTypeApplicationRestarter: VoxTypeApplicationRestarting {
             throw VoxTypeApplicationRestartError.terminationFailed
         }
 
+        let bundledApplicationURL = BundledVoxTypeLayout.applicationURL()
         let resolvedURL = applicationURL
             ?? workspace.urlForApplication(withBundleIdentifier: Self.bundleIdentifier)
-            ?? URL(fileURLWithPath: "/Applications/Voxtype.app", isDirectory: true)
+            ?? workspace.urlForApplication(
+                withBundleIdentifier: BundledVoxTypeLayout.bundleIdentifier
+            )
+            ?? (
+                FileManager.default.fileExists(atPath: bundledApplicationURL.path)
+                    ? bundledApplicationURL
+                    : URL(fileURLWithPath: "/Applications/Voxtype.app", isDirectory: true)
+            )
         guard FileManager.default.fileExists(atPath: resolvedURL.path) else {
             throw VoxTypeApplicationRestartError.applicationMissing
         }
@@ -258,13 +269,16 @@ struct VoxTypeExecutableDiscoverer: Sendable {
 
     private let fileSystem: any VoxTypeExecutableFileSystem
     private let path: String
+    private let bundledCandidate: URL?
 
     init(
         fileSystem: any VoxTypeExecutableFileSystem = LocalVoxTypeExecutableFileSystem(),
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundledCandidate: URL? = BundledVoxTypeLayout.executableURL()
     ) {
         self.fileSystem = fileSystem
         path = environment["PATH"] ?? ""
+        self.bundledCandidate = bundledCandidate
     }
 
     func discover(userSelected: URL? = nil) throws -> URL? {
@@ -286,7 +300,7 @@ struct VoxTypeExecutableDiscoverer: Sendable {
                     .appendingPathComponent("voxtype", isDirectory: false)
             }
 
-        for candidate in Self.fixedCandidates + pathCandidates {
+        for candidate in Self.fixedCandidates + pathCandidates + [bundledCandidate].compactMap({ $0 }) {
             let standardized = candidate.standardizedFileURL
             guard seen.insert(standardized.path).inserted,
                   isNamedVoxType(standardized),
