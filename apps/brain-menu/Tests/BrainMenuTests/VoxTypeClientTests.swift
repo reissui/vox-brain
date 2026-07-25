@@ -589,7 +589,7 @@ struct VoxTypeClientTests {
     func modelActivatorRestartsAndWaitsForExactStatusBeforeSuccess() async throws {
         let selection = SpeechEngineSelection(
             engine: .parakeet,
-            modelID: SpeechEngineCatalog.englishDefaultModelID
+            modelID: "parakeet-tdt-0.6b-v3"
         )
         let configuration = FakeVoxTypeConfigurationEditor()
         let restarter = FakeVoxTypeApplicationRestarter()
@@ -620,7 +620,7 @@ struct VoxTypeClientTests {
     func modelActivatorRollsBackLaunchFailureAndIncompatibleStatus() async {
         let requested = SpeechEngineSelection(
             engine: .parakeet,
-            modelID: SpeechEngineCatalog.englishDefaultModelID
+            modelID: "parakeet-tdt-0.6b-v3"
         )
 
         let launchConfiguration = FakeVoxTypeConfigurationEditor()

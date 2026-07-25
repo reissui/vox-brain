@@ -54,7 +54,10 @@ struct SpeechEngineDescriptor: Equatable, Identifiable, Sendable {
 }
 
 enum SpeechEngineCatalog {
-    static let englishDefaultModelID = "parakeet-tdt-0.6b-v3"
+    // Brain embeds VoxType's signed universal macOS release, which is built
+    // with Whisper/Metal but not the optional Parakeet feature. Keep the
+    // automatic fresh-install choice inside that verified capability set.
+    static let englishDefaultModelID = "small.en"
     static let multilingualFallbackModelID = "large-v3-turbo"
     static let modelGuideURL = URL(
         string: "https://voxtype.io/docs/MODEL_SELECTION_GUIDE"
@@ -70,10 +73,7 @@ enum SpeechEngineCatalog {
             supportsBatch: true,
             previewSupport: .chunked,
             diskSizeMB: 2_600,
-            recommendation: SpeechModelRecommendation(
-                title: "Recommended",
-                detail: "Recommended for English accuracy and built-in punctuation."
-            )
+            recommendation: nil
         ),
         SpeechModelDescriptor(
             id: "parakeet-unified-en-0.6b",
@@ -95,7 +95,10 @@ enum SpeechEngineCatalog {
             supportsBatch: true,
             previewSupport: .chunked,
             diskSizeMB: 466,
-            recommendation: nil
+            recommendation: SpeechModelRecommendation(
+                title: "Recommended",
+                detail: "Recommended English model for Brain's bundled VoxType engine."
+            )
         ),
         SpeechModelDescriptor(
             id: "medium.en",

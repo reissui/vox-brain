@@ -265,6 +265,13 @@ enum SpeechModelApplicationState: Equatable, Sendable {
 @MainActor
 @Observable
 final class SpeechSettingsController {
+    static let parakeetIncompatibleBundledVersion = VoxTypeVersion(
+        major: 0,
+        minor: 7,
+        patch: 5,
+        prerelease: nil
+    )
+
     private(set) var installationState: VoxTypeInstallationPresentation
     private(set) var daemonState: VoxTypeDaemonPresentation = .checking
     private(set) var hotkeyState: VoxTypeHotkeyPresentation = .checking
@@ -366,8 +373,9 @@ final class SpeechSettingsController {
         let stored = selections.selection(for: workflow)
         if let pending = stored.pending { return pending }
         if let active = stored.active { return active }
+        let model = SpeechEngineCatalog.model(id: SpeechEngineCatalog.englishDefaultModelID)
         return SpeechEngineSelection(
-            engine: .parakeet,
+            engine: model?.engine ?? .whisper,
             modelID: SpeechEngineCatalog.englishDefaultModelID
         )
     }
@@ -446,18 +454,70 @@ final class SpeechSettingsController {
         async let hotkey: VoxTypeHotkeyConfiguration? = try? voxType.hotkeyConfiguration()
         async let status = voxType.status()
         inventorySnapshot = await refreshedInventory
-        if let version = await version {
-            installationState = .installed(version)
+        let resolvedVersion = await version
+        let resolvedStatus = await status
+        if let resolvedVersion {
+            installationState = .installed(resolvedVersion)
         } else {
             installationState = .unavailable
         }
-        daemonState = Self.daemonPresentation(await status)
+        daemonState = Self.daemonPresentation(resolvedStatus)
         if let hotkey = await hotkey {
             hotkeyState = .configured(hotkey)
         } else {
             hotkeyState = .unavailable
         }
+        if await repairUnsupportedParakeetSelectionIfNeeded(
+            version: resolvedVersion,
+            status: resolvedStatus
+        ) {
+            return
+        }
         reconcileReadyPendingSelections()
+    }
+
+    /// Brain 0.1.2 could select Parakeet even though its verified VoxType 0.7.5
+    /// universal binary was built without that optional engine. Repair that
+    /// shipped combination once by installing and activating the bundled-safe
+    /// Whisper default for both speech workflows.
+    private func repairUnsupportedParakeetSelectionIfNeeded(
+        version: VoxTypeVersion?,
+        status: VoxTypeStatus
+    ) async -> Bool {
+        guard let version,
+              version <= Self.parakeetIncompatibleBundledVersion,
+              let activeModelID = status.snapshot?.model,
+              SpeechEngineCatalog.model(id: activeModelID)?.engine == .parakeet,
+              let defaultModel = SpeechEngineCatalog.model(
+                  id: SpeechEngineCatalog.englishDefaultModelID
+              ),
+              defaultModel.engine == .whisper,
+              let modelActivator else {
+            return false
+        }
+
+        let repaired = SpeechEngineSelection(
+            engine: defaultModel.engine,
+            modelID: defaultModel.id
+        )
+        do {
+            if inventorySnapshot.availability(for: repaired.modelID) != .ready {
+                inventorySnapshot = try await inventory.install(
+                    modelID: repaired.modelID,
+                    progress: { _ in }
+                )
+            }
+            try await modelActivator.apply(repaired)
+            for workflow in SpeechWorkflow.allCases {
+                try selections.activate(repaired, for: workflow)
+                modelApplicationStates[workflow] = .applied(repaired)
+            }
+            errorMessage = nil
+        } catch {
+            errorMessage = (error as? LocalizedError)?.errorDescription
+                ?? "Brain could not repair the incompatible speech model automatically."
+        }
+        return true
     }
 
     func installModel(_ modelID: String) async {
@@ -491,8 +551,9 @@ final class SpeechSettingsController {
         }
         if !unconfiguredWorkflows.isEmpty,
            inventorySnapshot.availability(for: SpeechEngineCatalog.englishDefaultModelID) == .ready {
+            let model = SpeechEngineCatalog.model(id: SpeechEngineCatalog.englishDefaultModelID)
             let selection = SpeechEngineSelection(
-                engine: .parakeet,
+                engine: model?.engine ?? .whisper,
                 modelID: SpeechEngineCatalog.englishDefaultModelID
             )
             beginApplying(

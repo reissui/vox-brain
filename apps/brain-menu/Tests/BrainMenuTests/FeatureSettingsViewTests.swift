@@ -6,13 +6,14 @@ import Testing
 @MainActor
 struct FeatureSettingsViewTests {
     @Test
-    func freshSpeechSettingsRecommendParakeetForBothWorkflowsAndNameMultilingualFallback() throws {
+    func freshSpeechSettingsUseABundledCompatibleWhisperDefaultForBothWorkflows() throws {
         let controller = speechController(snapshot: readySnapshot())
         let expected = SpeechEngineSelection(
-            engine: .parakeet,
-            modelID: SpeechEngineCatalog.englishDefaultModelID
+            engine: .whisper,
+            modelID: "small.en"
         )
 
+        #expect(SpeechEngineCatalog.englishDefaultModelID == "small.en")
         #expect(controller.selection(for: .dictation) == expected)
         #expect(controller.selection(for: .meetings) == expected)
         #expect(OnboardingController.defaultDictationModelID == expected.modelID)
@@ -25,15 +26,15 @@ struct FeatureSettingsViewTests {
             SpeechEngineCatalog.model(id: SpeechEngineCatalog.multilingualFallbackModelID)
         )
         #expect(recommended.recommendation?.title == "Recommended")
-        #expect(recommended.recommendation?.detail.contains("accuracy") == true)
-        #expect(recommended.recommendation?.detail.contains("punctuation") == true)
+        #expect(recommended.engine == .whisper)
+        #expect(recommended.recommendation?.detail.contains("bundled") == true)
         #expect(multilingual.recommendation?.title == "Multilingual fallback")
         #expect(SpeechEngineCatalog.modelGuideURL.absoluteString
             == "https://voxtype.io/docs/MODEL_SELECTION_GUIDE")
     }
 
     @Test
-    func firstReadyRefreshAppliesAndPersistsOneParakeetDefaultForBothWorkflows() async {
+    func firstReadyRefreshAppliesAndPersistsBundledCompatibleDefaultForBothWorkflows() async {
         let snapshot = readySnapshot()
         let activator = FeatureModelActivator()
         let controller = SpeechSettingsController(
@@ -55,12 +56,47 @@ struct FeatureSettingsViewTests {
         await controller.waitForPendingModelApplication()
 
         let expected = SpeechEngineSelection(
-            engine: .parakeet,
+            engine: .whisper,
             modelID: SpeechEngineCatalog.englishDefaultModelID
         )
         #expect(activator.applied == [expected])
         #expect(controller.activeSelection(for: .dictation) == expected)
         #expect(controller.activeSelection(for: .meetings) == expected)
+    }
+
+    @Test
+    func refreshRepairsTheShippedParakeetSelectionBeforePushToTalkIsUsed() async {
+        let snapshot = ModelInventorySnapshot(availabilityByModelID: [
+            "parakeet-tdt-0.6b-v3": .ready,
+            SpeechEngineCatalog.englishDefaultModelID: .missing,
+        ])
+        let inventory = FeatureInventory(snapshot: snapshot)
+        let activator = FeatureModelActivator()
+        let controller = SpeechSettingsController(
+            voxType: FeatureVoxTypeController(
+                version: SpeechSettingsController.parakeetIncompatibleBundledVersion,
+                status: .available(VoxTypeStatusSnapshot(
+                    state: .idle,
+                    model: "parakeet-tdt-0.6b-v3",
+                    device: nil,
+                    backend: nil
+                ))
+            ),
+            inventory: inventory,
+            selections: featureSpeechStore(namespace: "feature.repair"),
+            modelActivator: activator
+        )
+
+        await controller.refresh()
+
+        let repaired = SpeechEngineSelection(
+            engine: .whisper,
+            modelID: SpeechEngineCatalog.englishDefaultModelID
+        )
+        #expect(await inventory.installedModelIDs == [repaired.modelID])
+        #expect(activator.applied == [repaired])
+        #expect(controller.activeSelection(for: .dictation) == repaired)
+        #expect(controller.activeSelection(for: .meetings) == repaired)
     }
 
     @Test
@@ -202,7 +238,7 @@ struct FeatureSettingsViewTests {
         )
         let requested = SpeechEngineSelection(
             engine: .parakeet,
-            modelID: SpeechEngineCatalog.englishDefaultModelID
+            modelID: "parakeet-tdt-0.6b-v3"
         )
 
         controller.selectModel(requested.modelID, for: .meetings)

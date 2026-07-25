@@ -12,6 +12,7 @@ struct AppIntegrationTests {
             .activity,
             .dictation,
             .meetings,
+            .aiSetup,
             .settings,
         ])
 
@@ -20,11 +21,43 @@ struct AppIntegrationTests {
             .general,
             .shortcuts,
             .speech,
-            .ai,
             .audioPrivacy,
             .updates,
             .gmail,
         ])
+    }
+
+    @Test
+    func aiSetupOwnsBothWorkflowsAndTheLibrarianModelReachesOnlyTheSandboxedCLI() throws {
+        let dashboard = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "Sources/BrainMenu/Views/DashboardView.swift"
+            ),
+            encoding: .utf8
+        )
+        let setup = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "Sources/BrainMenu/Views/AISetupView.swift"
+            ),
+            encoding: .utf8
+        )
+        let script = try String(
+            contentsOf: packageRoot
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("scripts/brain"),
+            encoding: .utf8
+        )
+
+        #expect(dashboard.contains("AISetupView("))
+        #expect(dashboard.contains("settingsSelection = .updates"))
+        #expect(dashboard.contains("selection = .settings"))
+        #expect(dashboard.contains("graph.updates.sidebarAlert"))
+        #expect(setup.contains("Librarian AI"))
+        #expect(setup.contains("Meeting"))
+        #expect(script.contains("BRAIN_LIBRARIAN_MODEL"))
+        #expect(script.contains("model_args=(--model"))
+        #expect(script.contains("--sandbox \"$sandbox\""))
     }
 
     @Test
@@ -484,7 +517,6 @@ struct AppIntegrationTests {
                 gmail: graph.gmail,
                 meetingHotkey: graph.meetingHotkey,
                 speech: graph.speechSettings,
-                ai: graph.aiSettings,
                 updates: graph.updates,
                 audioRetention: graph.audioRetention,
                 onboarding: graph.onboarding

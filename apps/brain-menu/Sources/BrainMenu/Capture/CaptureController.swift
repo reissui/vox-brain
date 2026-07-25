@@ -500,6 +500,8 @@ final class CaptureController {
     @ObservationIgnored private var pendingSubmission: PendingSubmission?
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
     @ObservationIgnored private var activityRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var deliveryHandler: (@MainActor @Sendable (String) -> Void)?
+    @ObservationIgnored private var notifiedDeliveries = Set<String>()
     @ObservationIgnored private var draftRevision = 0
     @ObservationIgnored private var isClearingDeliveredDraft = false
 
@@ -681,6 +683,12 @@ final class CaptureController {
     func checkAgain() {
         if activeMonitor != nil { startMonitoring(immediately: true) }
         startActivityRefresh(excluding: activeMonitor?.id)
+    }
+
+    func setDeliveryHandler(
+        _ handler: @escaping @MainActor @Sendable (String) -> Void
+    ) {
+        deliveryHandler = handler
     }
 
     func clearCompletedActivity() {
@@ -1196,6 +1204,11 @@ final class CaptureController {
         activities[index].updatedAt = now()
         activities[index].error = error
         persistActivities()
+        if stage == .delivered,
+           let deliveredID = captureID ?? activities[index].captureID,
+           notifiedDeliveries.insert(deliveredID).inserted {
+            deliveryHandler?(deliveredID)
+        }
     }
 
     private func persistActivities() {

@@ -19,6 +19,11 @@ enum BrainUpdateState: Equatable, Sendable {
     case unavailable(String)
 }
 
+struct BrainUpdateSidebarAlert: Equatable, Sendable {
+    let title: String
+    let detail: String
+}
+
 enum BrainUpdateError: LocalizedError {
     case invalidResponse
     case noReleasePublished
@@ -281,13 +286,18 @@ final class UpdateController {
     var automaticChecksEnabled: Bool {
         didSet {
             defaults.set(automaticChecksEnabled, forKey: Self.automaticChecksDefaultsKey)
-            if automaticChecksEnabled { start() }
+            if automaticChecksEnabled {
+                start()
+            } else {
+                stop()
+            }
         }
     }
 
     @ObservationIgnored private let service: any BrainUpdateServing
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let now: @Sendable () -> Date
+    @ObservationIgnored private let sleep: @Sendable (Duration) async throws -> Void
     @ObservationIgnored private let buildInfo: BrainBuildInfo?
     @ObservationIgnored private var automaticTask: Task<Void, Never>?
 
@@ -295,11 +305,15 @@ final class UpdateController {
         service: any BrainUpdateServing = GitHubBrainUpdateService(),
         defaults: UserDefaults = .standard,
         now: @escaping @Sendable () -> Date = Date.init,
+        sleep: @escaping @Sendable (Duration) async throws -> Void = {
+            try await Task.sleep(for: $0)
+        },
         buildInfo: BrainBuildInfo? = BrainBuildInfo.current
     ) {
         self.service = service
         self.defaults = defaults
         self.now = now
+        self.sleep = sleep
         self.buildInfo = buildInfo
         automaticChecksEnabled = defaults.object(
             forKey: Self.automaticChecksDefaultsKey
@@ -317,6 +331,14 @@ final class UpdateController {
         }
     }
 
+    var sidebarAlert: BrainUpdateSidebarAlert? {
+        guard let release = availableRelease else { return nil }
+        return BrainUpdateSidebarAlert(
+            title: state == .downloading(release) ? "Installing update" : "Update available",
+            detail: "Brain \(release.version)"
+        )
+    }
+
     var isWorking: Bool {
         switch state {
         case .checking, .downloading: true
@@ -327,14 +349,33 @@ final class UpdateController {
     func start() {
         guard automaticChecksEnabled, automaticTask == nil else { return }
         let lastCheck = defaults.object(forKey: Self.lastCheckDefaultsKey) as? Date
-        guard lastCheck.map({ now().timeIntervalSince($0) >= Self.automaticCheckInterval })
-                ?? true else {
-            return
+        let initialDelay = lastCheck.map {
+            max(0, Self.automaticCheckInterval - now().timeIntervalSince($0))
+        } ?? 0
+        automaticTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            if initialDelay > 0 {
+                do {
+                    try await self.sleep(.seconds(initialDelay))
+                } catch {
+                    return
+                }
+            }
+            while !Task.isCancelled, self.automaticChecksEnabled {
+                await self.checkNow()
+                do {
+                    try await self.sleep(.seconds(Self.automaticCheckInterval))
+                } catch {
+                    return
+                }
+            }
+            self.automaticTask = nil
         }
-        automaticTask = Task { [weak self] in
-            await self?.checkNow()
-            self?.automaticTask = nil
-        }
+    }
+
+    func stop() {
+        automaticTask?.cancel()
+        automaticTask = nil
     }
 
     func checkNow() async {

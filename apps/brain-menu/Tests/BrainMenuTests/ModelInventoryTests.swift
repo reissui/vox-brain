@@ -183,7 +183,7 @@ struct ModelInventoryTests {
         let inventory = ModelInventory(client: client)
 
         let initial = await inventory.refresh()
-        #expect(initial.availability(for: SpeechEngineCatalog.englishDefaultModelID) == .ready)
+        #expect(initial.availability(for: "parakeet-tdt-0.6b-v3") == .ready)
         let refreshed = try await inventory.install(modelID: "medium.en")
         #expect(refreshed.availability(for: "medium.en") == .ready)
 

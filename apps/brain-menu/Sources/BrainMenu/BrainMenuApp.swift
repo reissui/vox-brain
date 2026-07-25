@@ -127,6 +127,7 @@ final class BrainAppControllerGraph {
     let gmail: GmailConnectionController
     let speechSettings: SpeechSettingsController
     let aiSettings: AISettingsController
+    let librarianAI: LibrarianAIController
     let updates: UpdateController
     let audioRetention: AudioRetentionController
 
@@ -193,6 +194,7 @@ final class BrainAppControllerGraph {
         frontmostApplications: any FrontmostApplicationProviding = WorkspaceFrontmostApplicationProvider(),
         speechSettings: SpeechSettingsController? = nil,
         aiSettings: AISettingsController = AISettingsController(settings: AISettingsStore()),
+        librarianAI: LibrarianAIController = LibrarianAIController(),
         updates: UpdateController = UpdateController(),
         audioRetention: AudioRetentionController = AudioRetentionController(),
         now: @escaping @MainActor () -> Date = Date.init,
@@ -207,6 +209,7 @@ final class BrainAppControllerGraph {
         self.launchAtLogin = launchAtLogin
         self.gmail = gmail
         self.aiSettings = aiSettings
+        self.librarianAI = librarianAI
         self.updates = updates
         self.audioRetention = audioRetention
         self.now = now
@@ -271,6 +274,9 @@ final class BrainAppControllerGraph {
                 inventoryProvider: microphoneInventory
             )
         )
+        capture.setDeliveryHandler { [weak librarianAI] _ in
+            librarianAI?.captureDelivered()
+        }
         router.graph = self
         nativeMeeting.setTransitionHandler { [weak self] in
             self?.meetingDidTransition()
@@ -282,6 +288,7 @@ final class BrainAppControllerGraph {
         isStarted = true
         startCount += 1
         store.start()
+        librarianAI.start()
         _ = meetingHotkey.start()
         updates.start()
         dictationHistory.startMonitoring()
@@ -299,7 +306,9 @@ final class BrainAppControllerGraph {
         guard isStarted else { return }
         isStarted = false
         store.stop()
+        librarianAI.stop()
         meetingHotkey.stop()
+        updates.stop()
         dictationHistory.stopMonitoring()
         dictation.stopMonitoring()
         activityClockTask?.cancel()
@@ -518,13 +527,13 @@ final class BrainAppControllerGraph {
             audioMonitor: audioMonitor,
             microphoneSelections: microphoneSelections,
             microphoneInventory: microphoneInventory,
-            speechEngine: SpeechEngineID.parakeet.rawValue,
+            speechEngine: SpeechEngineID.whisper.rawValue,
             speechModel: OnboardingController.defaultMeetingModelID
         )
         return MeetingController(
             detector: MeetingDetector(),
             recorder: recorder,
-            speechEngine: SpeechEngineID.parakeet.rawValue,
+            speechEngine: SpeechEngineID.whisper.rawValue,
             speechModel: OnboardingController.defaultMeetingModelID,
             audioMonitor: audioMonitor
         )
