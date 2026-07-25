@@ -91,42 +91,33 @@ private struct LibrarianAISettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Local AI") {
-                LabeledContent {
-                    TextField(
-                        AILocalCLICommandTemplate.exampleCommand,
-                        text: $controller.command
-                    )
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
-                        .accessibilityLabel("Librarian AI CLI template")
-                } label: {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Command")
-                        Text("Enter a Codex CLI template, including an optional model.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Label(
-                    "Brain adds its Librarian sandbox and safety arguments. It never invokes a shell.",
-                    systemImage: "lock.shield"
+            Section("CLI Command") {
+                AICommandEditor(
+                    command: $controller.command,
+                    accessibilityLabel: "Librarian AI CLI command",
+                    canSave: controller.canSave,
+                    save: controller.save,
+                    canTestConnection: controller.canTestConnection,
+                    testConnection: controller.testConnection,
+                    testState: controller.testState,
+                    testDetail: controller.testDetail,
+                    selectedModelName: controller.selectedModelName,
+                    confirmedModelName: controller.confirmedModelName,
+                    commandErrorMessage: controller.commandErrorMessage,
+                    savedMessage: controller.savedMessage
                 )
-                .font(.caption)
-                .foregroundStyle(.secondary)
+
+                if let errorMessage = controller.errorMessage {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Section {
                 HStack(spacing: 10) {
                     Button("Run Librarian Now") {
                         Task { await controller.runNow() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(controller.isWorking)
-
-                    Button("Save Settings") {
-                        controller.save()
                     }
                     .disabled(controller.isWorking)
 
@@ -136,16 +127,6 @@ private struct LibrarianAISettingsView: View {
                             .controlSize(.small)
                             .accessibilityLabel("Librarian AI is working")
                     }
-                }
-
-                if let savedMessage = controller.savedMessage {
-                    Label(savedMessage, systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                if let errorMessage = controller.errorMessage {
-                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

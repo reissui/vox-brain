@@ -355,10 +355,13 @@ struct FeatureSettingsViewTests {
             "codex exec --skip-git-repo-check --model gpt-5.6-sol"
         #expect(controller.configuration.model == "gpt-5.6-sol")
         #expect(controller.configuration.provider == .codex)
+        #expect(controller.selectedModelName == "gpt-5.6-sol")
+        #expect(controller.confirmedModelName == nil)
         #expect(controller.canSave == false)
 
         await controller.testConnection()
         #expect(controller.testState == .result(.ready))
+        #expect(controller.confirmedModelName == "gpt-5.6-sol")
         #expect(controller.testState.accessibilityLabel.contains("state: Ready"))
         #expect(controller.canSave)
         controller.save()
@@ -367,6 +370,8 @@ struct FeatureSettingsViewTests {
         controller.customCommand =
             "codex exec --skip-git-repo-check --model gpt-5.6-terra"
         #expect(controller.testState == .untested)
+        #expect(controller.selectedModelName == "gpt-5.6-terra")
+        #expect(controller.confirmedModelName == nil)
         #expect(controller.canSave == false)
 
         controller.selectProvider(.claude)
@@ -481,11 +486,19 @@ struct FeatureSettingsViewTests {
             contentsOf: views.appendingPathComponent("AISettingsView.swift"),
             encoding: .utf8
         )
+        let setupSource = try String(
+            contentsOf: views.appendingPathComponent("AISetupView.swift"),
+            encoding: .utf8
+        )
         #expect(aiSource.contains("controller.customCommand"))
         #expect(aiSource.contains("AI Setup"))
         #expect(aiSource.contains("Current choice"))
-        #expect(aiSource.contains("CLI Template"))
-        #expect(aiSource.contains("AILocalCLICommandTemplate.exampleCommand"))
+        #expect(aiSource.contains("AICommandEditor("))
+        #expect(setupSource.contains("AICommandEditor("))
+        #expect(aiSource.contains("TextField(\"CLI command\", text: $command)"))
+        #expect(aiSource.contains(".labelsHidden()"))
+        #expect(!aiSource.contains("AILocalCLICommandTemplate.exampleCommand,\n"))
+        #expect(!setupSource.contains("AILocalCLICommandTemplate.exampleCommand,\n"))
         #expect(!aiSource.contains("CLI Tool"))
         #expect(!aiSource.contains("Transcript Context"))
     }
@@ -507,7 +520,8 @@ struct FeatureSettingsViewTests {
         #expect(speech.contains("accessibilityValue(controller.selectedMicrophoneDetail)"))
         #expect(ai.contains("accessibilityFocused($accessibilityFocus, equals: .primaryField)"))
         #expect(ai.contains("accessibilityFocused($accessibilityFocus, equals: .errorSummary)"))
-        #expect(ai.contains("accessibilityHint(\"Removes Brain's AI command setting"))
+        #expect(ai.contains(".accessibilityLabel(accessibilityLabel)"))
+        #expect(ai.contains(".accessibilityValue(canTestConnection ? \"Enabled\" : \"Disabled\")"))
     }
 
     private func speechController(

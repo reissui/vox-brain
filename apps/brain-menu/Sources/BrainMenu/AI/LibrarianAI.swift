@@ -130,17 +130,28 @@ final class LibrarianAIController {
     static let captureDebounce: Duration = .seconds(3)
 
     var automaticProcessingEnabled: Bool
-    var command: String
+    var command: String {
+        didSet {
+            guard command != oldValue else { return }
+            testState = .untested
+            lastTestedCommand = nil
+            savedMessage = nil
+            errorMessage = nil
+        }
+    }
 
     private(set) var state: LibrarianAIRunState = .idle
+    private(set) var testState: AISettingsTestState = .untested
     private(set) var savedMessage: String?
     private(set) var errorMessage: String?
 
     @ObservationIgnored private let settings: any LibrarianAISettingsPersisting
     @ObservationIgnored private let processor: any LibrarianProcessing
+    @ObservationIgnored private let providerFactory: any AIProviderMaking
     @ObservationIgnored private let deploymentMode: @MainActor () -> BrainDeploymentMode?
     @ObservationIgnored private let sleep: @Sendable (Duration) async throws -> Void
     @ObservationIgnored private var savedConfiguration: LibrarianAIConfiguration
+    @ObservationIgnored private var lastTestedCommand: String?
     @ObservationIgnored private var processingTask: Task<Void, Never>?
     @ObservationIgnored private var scheduledTask: Task<Void, Never>?
     @ObservationIgnored private var periodicTask: Task<Void, Never>?
@@ -149,6 +160,7 @@ final class LibrarianAIController {
     init(
         settings: any LibrarianAISettingsPersisting = LibrarianAISettingsStore(),
         processor: any LibrarianProcessing = LocalLibrarianProcessor(),
+        providerFactory: any AIProviderMaking = LocalAIProviderFactory(),
         deploymentMode: @escaping @MainActor () -> BrainDeploymentMode? = {
             BrainRuntime.deploymentMode()
         },
@@ -158,6 +170,7 @@ final class LibrarianAIController {
     ) {
         self.settings = settings
         self.processor = processor
+        self.providerFactory = providerFactory
         self.deploymentMode = deploymentMode
         self.sleep = sleep
         let loaded = settings.load()
@@ -168,6 +181,47 @@ final class LibrarianAIController {
 
     var isWorking: Bool {
         state == .running || state == .scheduled
+    }
+
+    var commandErrorMessage: String? {
+        do {
+            _ = try validatedTemplate()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    var canSave: Bool {
+        !isWorking && commandErrorMessage == nil
+    }
+
+    var canTestConnection: Bool {
+        !isWorking && testState != .testing && commandErrorMessage == nil
+    }
+
+    var selectedModelName: String? {
+        guard let template = try? validatedTemplate() else { return nil }
+        return template.model ?? "CLI default"
+    }
+
+    var confirmedModelName: String? {
+        let candidate = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard testState == .result(.ready),
+              lastTestedCommand == candidate else {
+            return nil
+        }
+        return selectedModelName
+    }
+
+    var testDetail: String {
+        if testState == .result(.unauthenticated) {
+            return "codex login --device-auth"
+        }
+        if testState == .result(.missingExecutable) {
+            return "Codex CLI was not found. Install Codex or ChatGPT, then test again."
+        }
+        return testState.detail
     }
 
     func start() {
@@ -205,10 +259,7 @@ final class LibrarianAIController {
     func save() {
         do {
             let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
-            let template = try AILocalCLICommandTemplate.parse(trimmedCommand)
-            guard template.provider == .codex else {
-                throw AILocalCLICommandTemplateError.librarianRequiresCodex
-            }
+            _ = try validatedTemplate(trimmedCommand)
             let configuration = LibrarianAIConfiguration(
                 automaticProcessingEnabled: automaticProcessingEnabled,
                 command: trimmedCommand
@@ -222,6 +273,31 @@ final class LibrarianAIController {
             savedMessage = nil
             errorMessage = error.localizedDescription
         }
+    }
+
+    func testConnection() async {
+        guard canTestConnection else { return }
+        let candidate = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let template: AILocalCLICommandTemplate
+        do {
+            template = try validatedTemplate(candidate)
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+
+        testState = .testing
+        savedMessage = nil
+        errorMessage = nil
+        let result = await providerFactory.makeProvider(configuration: AIProviderConfiguration(
+            provider: .codex,
+            model: template.model
+        )).testConnection()
+        guard command.trimmingCharacters(in: .whitespacesAndNewlines) == candidate else {
+            return
+        }
+        testState = .result(result)
+        lastTestedCommand = result == .ready ? candidate : nil
     }
 
     func runNow() async {
@@ -292,5 +368,17 @@ final class LibrarianAIController {
             self.processingTask = nil
         }
         await processingTask?.value
+    }
+
+    private func validatedTemplate(
+        _ candidate: String? = nil
+    ) throws -> AILocalCLICommandTemplate {
+        let template = try AILocalCLICommandTemplate.parse(
+            candidate ?? command.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        guard template.provider == .codex else {
+            throw AILocalCLICommandTemplateError.librarianRequiresCodex
+        }
+        return template
     }
 }
