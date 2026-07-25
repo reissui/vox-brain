@@ -177,6 +177,38 @@ struct CLIProviderTests {
     }
 
     @Test
+    func localCommandTemplateSelectsProviderAndModelWithoutApplicationPaths() throws {
+        let codex = try AILocalCLICommandTemplate.parse(
+            "codex exec --skip-git-repo-check --model gpt-5.6-sol"
+        )
+        let claude = try AILocalCLICommandTemplate.parse(
+            "claude -p --model sonnet"
+        )
+
+        #expect(codex.provider == .codex)
+        #expect(codex.model == "gpt-5.6-sol")
+        #expect(claude.provider == .claude)
+        #expect(claude.model == "sonnet")
+        #expect(
+            AILocalCLICommandTemplate.render(configuration: AIProviderConfiguration(
+                provider: .advanced,
+                executableURL: URL(
+                    fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex"
+                ),
+                arguments: ["exec", "--skip-git-repo-check"]
+            )) == "codex exec --skip-git-repo-check"
+        )
+        #expect(throws: AIProviderError.invalidArguments) {
+            try AILocalCLICommandTemplate.parse(
+                "codex exec --skip-git-repo-check --model gpt-5.6-sol --api-key secret"
+            )
+        }
+        #expect(throws: AILocalCLICommandTemplateError.self) {
+            try AILocalCLICommandTemplate.parse("open -a ChatGPT")
+        }
+    }
+
+    @Test
     func testConnectionDistinguishesEveryRequiredStateWithFixedPrompt() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -6,11 +6,11 @@ import Testing
 @MainActor
 struct LibrarianAIControllerTests {
     @Test
-    func settingsKeepLibrarianModelSeparateAndManualRunUsesSavedChoice() async {
+    func settingsKeepLibrarianCommandSeparateAndManualRunUsesSavedChoice() async {
         let settings = TestLibrarianSettings(
             configuration: LibrarianAIConfiguration(
                 automaticProcessingEnabled: true,
-                model: nil
+                command: AILocalCLICommandTemplate.defaultCommand
             )
         )
         let processor = TestLibrarianProcessor()
@@ -20,12 +20,18 @@ struct LibrarianAIControllerTests {
             deploymentMode: { .local }
         )
 
-        controller.model = "gpt-5.4-mini"
+        controller.command =
+            "codex exec --skip-git-repo-check --model gpt-5.6-sol"
         controller.save()
         await controller.runNow()
 
-        #expect(settings.configuration.model == "gpt-5.4-mini")
-        #expect(await processor.models == ["gpt-5.4-mini"])
+        #expect(
+            settings.configuration.command
+                == "codex exec --skip-git-repo-check --model gpt-5.6-sol"
+        )
+        #expect(await processor.commands == [
+            "codex exec --skip-git-repo-check --model gpt-5.6-sol",
+        ])
         #expect(controller.state == .completed)
         #expect(controller.errorMessage == nil)
     }
@@ -35,7 +41,7 @@ struct LibrarianAIControllerTests {
         let settings = TestLibrarianSettings(
             configuration: LibrarianAIConfiguration(
                 automaticProcessingEnabled: false,
-                model: nil
+                command: AILocalCLICommandTemplate.defaultCommand
             )
         )
         let processor = TestLibrarianProcessor()
@@ -56,16 +62,16 @@ struct LibrarianAIControllerTests {
         await controller.waitForPendingWork()
         controller.stop()
 
-        #expect(await processor.models.count == 1)
+        #expect(await processor.commands.count == 1)
         #expect(controller.state == .completed)
     }
 
     @Test
-    func invalidModelNeverCrossesTheProcessBoundary() async {
+    func invalidCommandNeverCrossesTheProcessBoundary() async {
         let settings = TestLibrarianSettings(
             configuration: LibrarianAIConfiguration(
                 automaticProcessingEnabled: true,
-                model: nil
+                command: AILocalCLICommandTemplate.defaultCommand
             )
         )
         let processor = TestLibrarianProcessor()
@@ -75,11 +81,28 @@ struct LibrarianAIControllerTests {
             deploymentMode: { .local }
         )
 
-        controller.model = "model; export SECRET"
+        controller.command = "codex exec --model 'model; export SECRET'"
         await controller.runNow()
 
-        #expect(await processor.models.isEmpty)
-        #expect(controller.errorMessage?.contains("valid Codex model") == true)
+        #expect(await processor.commands.isEmpty)
+        #expect(controller.errorMessage != nil)
+    }
+
+    @Test
+    func legacyModelSettingMigratesToCommandTemplate() throws {
+        let data = Data(
+            #"{"automaticProcessingEnabled":true,"model":"gpt-5.4-mini"}"#.utf8
+        )
+
+        let configuration = try JSONDecoder().decode(
+            LibrarianAIConfiguration.self,
+            from: data
+        )
+
+        #expect(
+            configuration.command
+                == "codex exec --skip-git-repo-check --model gpt-5.4-mini"
+        )
     }
 }
 
@@ -100,10 +123,10 @@ private final class TestLibrarianSettings: LibrarianAISettingsPersisting, @unche
 }
 
 private actor TestLibrarianProcessor: LibrarianProcessing {
-    private(set) var models: [String?] = []
+    private(set) var commands: [String] = []
 
-    func process(model: String?) async throws -> BrainJobCreated {
-        models.append(model)
+    func process(command: String) async throws -> BrainJobCreated {
+        commands.append(command)
         return BrainJobCreated(id: UUID().uuidString, state: .completed)
     }
 }

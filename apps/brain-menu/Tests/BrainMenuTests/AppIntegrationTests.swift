@@ -28,7 +28,7 @@ struct AppIntegrationTests {
     }
 
     @Test
-    func aiSetupOwnsBothWorkflowsAndTheLibrarianModelReachesOnlyTheSandboxedCLI() throws {
+    func aiSetupOwnsBothCommandTemplatesAndTheLibrarianModelReachesOnlyTheSandboxedCLI() throws {
         let dashboard = try String(
             contentsOf: packageRoot.appendingPathComponent(
                 "Sources/BrainMenu/Views/DashboardView.swift"
@@ -55,6 +55,8 @@ struct AppIntegrationTests {
         #expect(dashboard.contains("graph.updates.sidebarAlert"))
         #expect(setup.contains("Librarian AI"))
         #expect(setup.contains("Meeting"))
+        #expect(setup.contains("AILocalCLICommandTemplate.exampleCommand"))
+        #expect(!setup.contains("Provider default"))
         #expect(script.contains("BRAIN_LIBRARIAN_MODEL"))
         #expect(script.contains("model_args=(--model"))
         #expect(script.contains("--sandbox \"$sandbox\""))

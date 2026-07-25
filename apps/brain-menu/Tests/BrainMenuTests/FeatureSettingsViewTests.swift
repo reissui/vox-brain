@@ -332,7 +332,7 @@ struct FeatureSettingsViewTests {
     }
 
     @Test
-    func aiOffersEveryProviderAndReadyTestUnlocksOnlyTheExactConfiguration() async {
+    func aiUsesOneCommandTemplateAndReadyTestUnlocksOnlyTheExactConfiguration() async {
         let settings = FeatureAISettings()
         let controller = AISettingsController(
             settings: settings,
@@ -347,19 +347,14 @@ struct FeatureSettingsViewTests {
         ])
         #expect(controller.canSave == false)
         controller.selectProvider(.codex)
-        #expect(controller.usesPreset)
-        #expect(controller.exposesManualConfiguration == false)
-        #expect(controller.resolvedExecutablePath == "/opt/homebrew/bin/codex")
-        #expect(controller.commandPreview == "/opt/homebrew/bin/codex exec --skip-git-repo-check --ephemeral --sandbox read-only --ignore-user-config --ignore-rules --output-schema <Brain schema> -")
+        #expect(controller.customCommand == "codex exec --skip-git-repo-check")
         #expect(controller.configuration.executableURL == nil)
         #expect(controller.configuration.arguments.isEmpty)
         #expect(controller.configuration.model == nil)
-        controller.model = "gpt-5.4-mini"
-        #expect(controller.configuration.model == "gpt-5.4-mini")
-        #expect(controller.commandPreview?.contains("--model gpt-5.4-mini -") == true)
-        controller.configuration.timeout = 450
-        controller.configuration.contextChoice = .plain
-        #expect(controller.providerHelp.contains("Codex CLI sign-in"))
+        controller.customCommand =
+            "codex exec --skip-git-repo-check --model gpt-5.6-sol"
+        #expect(controller.configuration.model == "gpt-5.6-sol")
+        #expect(controller.configuration.provider == .codex)
         #expect(controller.canSave == false)
 
         await controller.testConnection()
@@ -369,21 +364,21 @@ struct FeatureSettingsViewTests {
         controller.save()
         #expect(settings.savedConfigurations == [controller.configuration])
 
-        controller.configuration.timeout = 451
+        controller.customCommand =
+            "codex exec --skip-git-repo-check --model gpt-5.6-terra"
         #expect(controller.testState == .untested)
         #expect(controller.canSave == false)
 
         controller.selectProvider(.claude)
-        #expect(controller.providerHelp.contains("Claude CLI sign-in"))
-        controller.selectProvider(.advanced)
-        #expect(controller.exposesManualConfiguration)
-        controller.customCommand = "codex exec --skip-git-repo-check --model gpt-5.4-mini -"
-        #expect(controller.configuration.executableURL?.path == "/opt/homebrew/bin/codex")
-        #expect(controller.configuration.arguments == [
-            "exec", "--skip-git-repo-check", "--model", "gpt-5.4-mini", "-",
-        ])
+        #expect(controller.customCommand == "claude -p")
+        controller.customCommand = "claude -p --model sonnet"
+        #expect(controller.configuration.provider == .claude)
+        #expect(controller.configuration.model == "sonnet")
         #expect(controller.commandErrorMessage == nil)
-        #expect(controller.providerHelp.contains("never through a shell"))
+
+        controller.customCommand = "codex exec --dangerously-bypass-approvals"
+        #expect(controller.commandErrorMessage?.contains("not supported") == true)
+        #expect(controller.canTestConnection == false)
     }
 
     @Test
@@ -486,12 +481,13 @@ struct FeatureSettingsViewTests {
             contentsOf: views.appendingPathComponent("AISettingsView.swift"),
             encoding: .utf8
         )
-        #expect(aiSource.contains("if controller.usesPreset"))
         #expect(aiSource.contains("controller.customCommand"))
         #expect(aiSource.contains("AI Setup"))
         #expect(aiSource.contains("Current choice"))
-        #expect(aiSource.contains("CLI Tool"))
-        #expect(aiSource.contains("controller.commandPreview"))
+        #expect(aiSource.contains("CLI Template"))
+        #expect(aiSource.contains("AILocalCLICommandTemplate.exampleCommand"))
+        #expect(!aiSource.contains("CLI Tool"))
+        #expect(!aiSource.contains("Transcript Context"))
     }
 
     @Test
@@ -511,7 +507,7 @@ struct FeatureSettingsViewTests {
         #expect(speech.contains("accessibilityValue(controller.selectedMicrophoneDetail)"))
         #expect(ai.contains("accessibilityFocused($accessibilityFocus, equals: .primaryField)"))
         #expect(ai.contains("accessibilityFocused($accessibilityFocus, equals: .errorSummary)"))
-        #expect(ai.contains("accessibilityHint(\"Removes Brain's provider settings"))
+        #expect(ai.contains("accessibilityHint(\"Removes Brain's AI command setting"))
     }
 
     private func speechController(

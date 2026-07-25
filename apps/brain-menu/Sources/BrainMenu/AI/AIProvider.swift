@@ -287,7 +287,11 @@ enum AICommandLine {
 
     static func render(executable: URL?, arguments: [String]) -> String {
         guard let executable else { return "" }
-        return ([executable.path] + arguments)
+        return render(executableName: executable.path, arguments: arguments)
+    }
+
+    static func render(executableName: String, arguments: [String]) -> String {
+        ([executableName] + arguments)
             .map(renderToken)
             .joined(separator: " ")
     }
@@ -301,5 +305,141 @@ enum AICommandLine {
             return token
         }
         return "'" + token.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+enum AILocalCLICommandTemplateError: Error, Equatable, LocalizedError, Sendable {
+    case unsupportedExecutable
+    case missingMode
+    case unsupportedArgument
+    case missingModel
+    case duplicateModel
+    case librarianRequiresCodex
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedExecutable:
+            "Use a Codex or Claude CLI command."
+        case .missingMode:
+            "Codex commands must start with “codex exec”; Claude commands must start with “claude -p”."
+        case .unsupportedArgument:
+            "The template contains an argument that is not supported."
+        case .missingModel:
+            "Add a model after --model, or remove the flag."
+        case .duplicateModel:
+            "The template can select only one model."
+        case .librarianRequiresCodex:
+            "The Librarian command must start with “codex exec”."
+        }
+    }
+}
+
+struct AILocalCLICommandTemplate: Equatable, Sendable {
+    static let defaultCommand = "codex exec --skip-git-repo-check"
+    static let exampleCommand =
+        "codex exec --skip-git-repo-check --model gpt-5.6-sol"
+
+    let provider: AIProvider
+    let model: String?
+
+    static func parse(_ command: String) throws -> Self {
+        let tokens = try AICommandLine.parse(command)
+        try AIProviderValidation.validateAdvancedArguments(Array(tokens.dropFirst()))
+
+        switch tokens[0] {
+        case "codex":
+            guard tokens.count >= 2, tokens[1] == "exec" else {
+                throw AILocalCLICommandTemplateError.missingMode
+            }
+            return try parseArguments(
+                Array(tokens.dropFirst(2)),
+                provider: .codex,
+                ignoredFlags: ["--skip-git-repo-check", "-"]
+            )
+        case "claude":
+            guard tokens.count >= 2, ["-p", "--print"].contains(tokens[1]) else {
+                throw AILocalCLICommandTemplateError.missingMode
+            }
+            return try parseArguments(
+                Array(tokens.dropFirst(2)),
+                provider: .claude,
+                ignoredFlags: []
+            )
+        default:
+            throw AILocalCLICommandTemplateError.unsupportedExecutable
+        }
+    }
+
+    static func render(configuration: AIProviderConfiguration) -> String {
+        switch configuration.provider {
+        case .disabled:
+            ""
+        case .codex:
+            render(provider: .codex, model: configuration.model)
+        case .claude:
+            render(provider: .claude, model: configuration.model)
+        case .advanced:
+            configuration.executableURL.map {
+                AICommandLine.render(
+                    executableName: $0.lastPathComponent,
+                    arguments: configuration.arguments
+                )
+            } ?? ""
+        }
+    }
+
+    static func render(provider: AIProvider, model: String?) -> String {
+        let base = switch provider {
+        case .codex:
+            defaultCommand
+        case .claude:
+            "claude -p"
+        case .disabled, .advanced:
+            ""
+        }
+        guard let model, !model.isEmpty else { return base }
+        return "\(base) --model \(model)"
+    }
+
+    private static func parseArguments(
+        _ arguments: [String],
+        provider: AIProvider,
+        ignoredFlags: Set<String>
+    ) throws -> Self {
+        var model: String?
+        var index = 0
+        while index < arguments.count {
+            let argument = arguments[index]
+            if ignoredFlags.contains(argument) {
+                index += 1
+                continue
+            }
+            if argument == "--model" || argument == "-m" {
+                guard model == nil else {
+                    throw AILocalCLICommandTemplateError.duplicateModel
+                }
+                guard arguments.indices.contains(index + 1) else {
+                    throw AILocalCLICommandTemplateError.missingModel
+                }
+                model = try AIProviderValidation.validatedModel(arguments[index + 1])
+                index += 2
+                continue
+            }
+            if argument.hasPrefix("--model=") {
+                guard model == nil else {
+                    throw AILocalCLICommandTemplateError.duplicateModel
+                }
+                model = try AIProviderValidation.validatedModel(
+                    String(argument.dropFirst("--model=".count))
+                )
+                guard model != nil else {
+                    throw AILocalCLICommandTemplateError.missingModel
+                }
+                index += 1
+                continue
+            }
+            throw AILocalCLICommandTemplateError.unsupportedArgument
+        }
+        return Self(provider: provider, model: model)
     }
 }
