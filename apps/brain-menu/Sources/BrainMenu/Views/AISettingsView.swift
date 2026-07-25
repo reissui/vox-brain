@@ -55,7 +55,7 @@ enum AISettingsTestState: Equatable, Sendable {
         case .testing:
             "Brain is sending a fixed, non-private connection test."
         case .result(.disabled):
-            "AI analysis is disabled. Use Clear to remove saved AI settings."
+            "AI analysis is off."
         case .result(.missingExecutable):
             "Choose an executable or install the selected provider CLI."
         case .result(.unauthenticated):
@@ -168,6 +168,22 @@ final class AISettingsController {
         "AI provider test state: \(testState.title). \(testDetail)"
     }
 
+    var selectedModelName: String? {
+        guard configuration.provider != .disabled,
+              commandErrorMessage == nil else {
+            return nil
+        }
+        return configuration.model ?? "CLI default"
+    }
+
+    var confirmedModelName: String? {
+        guard testState == .result(.ready),
+              lastTestedConfiguration == configuration else {
+            return nil
+        }
+        return selectedModelName
+    }
+
     func selectProvider(_ provider: AIProvider) {
         let previous = configuration
         switch provider {
@@ -265,6 +281,112 @@ final class AISettingsController {
 }
 
 @MainActor
+struct AICommandEditor: View {
+    @Binding var command: String
+    let accessibilityLabel: String
+    let canSave: Bool
+    let save: () -> Void
+    let canTestConnection: Bool
+    let testConnection: () async -> Void
+    let testState: AISettingsTestState
+    let testDetail: String
+    let selectedModelName: String?
+    let confirmedModelName: String?
+    let commandErrorMessage: String?
+    let savedMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                TextField("CLI command", text: $command)
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(maxWidth: .infinity)
+                    .layoutPriority(1)
+                    .accessibilityLabel(accessibilityLabel)
+
+                Button("Save", action: save)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut("s", modifiers: .command)
+                    .disabled(!canSave)
+            }
+
+            if let commandErrorMessage {
+                Label(commandErrorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            } else if let confirmedModelName {
+                Label(
+                    "Connection confirmed — Model: \(confirmedModelName)",
+                    systemImage: "checkmark.circle.fill"
+                )
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.green)
+            } else if let selectedModelName {
+                Label(
+                    "Model selected: \(selectedModelName)",
+                    systemImage: "cpu"
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                Button("Test Connection") {
+                    Task { await testConnection() }
+                }
+                .disabled(!canTestConnection)
+                .accessibilityValue(canTestConnection ? "Enabled" : "Disabled")
+
+                if testState == .testing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Testing AI connection")
+                }
+
+                Label(testState.title, systemImage: testState.symbolName)
+                    .font(.caption)
+                    .foregroundStyle(testStateColor)
+            }
+
+            if shouldShowTestDetail {
+                Text(testDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let savedMessage {
+                Label(savedMessage, systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var shouldShowTestDetail: Bool {
+        switch testState {
+        case .result(.ready), .untested:
+            false
+        case .testing, .result:
+            true
+        }
+    }
+
+    private var testStateColor: Color {
+        switch testState {
+        case .result(.ready):
+            .green
+        case .result(.disabled), .untested, .testing:
+            .secondary
+        case .result:
+            .orange
+        }
+    }
+}
+
+@MainActor
 struct AISettingsView: View {
     @Bindable var controller: AISettingsController
     @AccessibilityFocusState private var accessibilityFocus: AccessibilityTarget?
@@ -293,7 +415,6 @@ struct AISettingsView: View {
                     }
 
                     Spacer()
-                    readinessBadge
                 }
 
                 LabeledContent {
@@ -315,89 +436,31 @@ struct AISettingsView: View {
             }
 
             if controller.configuration.provider != .disabled {
-                Section("CLI Template") {
-                    LabeledContent {
-                        TextField(
-                            AILocalCLICommandTemplate.exampleCommand,
-                            text: $controller.customCommand
-                        )
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
-                        .accessibilityLabel("Meeting AI CLI template")
-                    } label: {
-                        settingLabel(
-                            "Command",
-                            detail: "Enter a Codex or Claude CLI template, including an optional model."
-                        )
-                    }
-
-                    if let commandErrorMessage = controller.commandErrorMessage {
-                        Label(commandErrorMessage, systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-
-                    Label(
-                        "Brain adds its read-only safety and response-schema arguments. It never invokes a shell.",
-                        systemImage: "lock.shield"
+                Section("CLI Command") {
+                    AICommandEditor(
+                        command: $controller.customCommand,
+                        accessibilityLabel: "Meeting AI CLI command",
+                        canSave: controller.canSave,
+                        save: controller.save,
+                        canTestConnection: controller.canTestConnection,
+                        testConnection: controller.testConnection,
+                        testState: controller.testState,
+                        testDetail: controller.testDetail,
+                        selectedModelName: controller.selectedModelName,
+                        confirmedModelName: controller.confirmedModelName,
+                        commandErrorMessage: controller.commandErrorMessage,
+                        savedMessage: controller.savedMessage
                     )
-                    .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
 
-            if controller.configuration.provider != .disabled {
-                Section {
-                    Button("Test Connection") {
-                        Task { await controller.testConnection() }
-                    }
-                    .disabled(!controller.canTestConnection)
-                    .accessibilityValue(controller.canTestConnection ? "Enabled" : "Disabled")
-
-                    LabeledContent {
-                        Label(controller.testState.title, systemImage: controller.testState.symbolName)
-                            .accessibilityLabel(controller.testAccessibilityLabel)
-                    } label: {
-                        settingLabel("Readiness", detail: controller.testDetail)
+                    if let errorMessage = controller.errorMessage {
+                        Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityLabel("AI settings error: \(errorMessage)")
+                            .accessibilityFocused($accessibilityFocus, equals: .errorSummary)
                     }
                 }
             }
-
-            Section {
-                HStack(spacing: 10) {
-                    Button("Save") {
-                        controller.save()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut("s", modifiers: .command)
-                    .disabled(!controller.canSave)
-
-                    Button("Clear", role: .destructive) {
-                        controller.clear()
-                    }
-                    .help("Removes only Brain's AI settings. It does not log out or delete CLI credentials.")
-                    .accessibilityHint("Removes Brain's AI command setting but keeps CLI credentials")
-
-                    Spacer()
-                }
-
-                Text("Clear removes only Brain's AI command setting. It never logs out of Codex or Claude and never deletes CLI credentials.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                if let savedMessage = controller.savedMessage {
-                    Label(savedMessage, systemImage: "checkmark.circle.fill")
-                        .accessibilityLabel("AI settings status: \(savedMessage)")
-                }
-                if let errorMessage = controller.errorMessage {
-                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityLabel("AI settings error: \(errorMessage)")
-                        .accessibilityFocused($accessibilityFocus, equals: .errorSummary)
-                }
-            }
-
         }
         .formStyle(.grouped)
         .navigationTitle("AI Setup")
@@ -416,31 +479,10 @@ struct AISettingsView: View {
                         controller.selectProvider(.codex)
                     }
                 } else {
-                    controller.selectProvider(.disabled)
+                    controller.clear()
                 }
             }
         )
-    }
-
-    private var readinessBadge: some View {
-        Label(controller.testState.title, systemImage: controller.testState.symbolName)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(readinessColor)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(readinessColor.opacity(0.1), in: Capsule())
-            .accessibilityLabel(controller.testAccessibilityLabel)
-    }
-
-    private var readinessColor: Color {
-        switch controller.testState {
-        case .result(.ready):
-            .green
-        case .result(.disabled), .untested, .testing:
-            .secondary
-        case .result:
-            .orange
-        }
     }
 
     private func settingLabel(_ title: String, detail: String) -> some View {

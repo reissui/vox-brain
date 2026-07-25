@@ -14,14 +14,22 @@ struct LibrarianAIControllerTests {
             )
         )
         let processor = TestLibrarianProcessor()
+        let providerFactory = TestLibrarianProviderFactory(state: .ready)
         let controller = LibrarianAIController(
             settings: settings,
             processor: processor,
+            providerFactory: providerFactory,
             deploymentMode: { .local }
         )
 
         controller.command =
             "codex exec --skip-git-repo-check --model gpt-5.6-sol"
+        #expect(controller.selectedModelName == "gpt-5.6-sol")
+        #expect(controller.confirmedModelName == nil)
+        await controller.testConnection()
+        #expect(controller.testState == .result(.ready))
+        #expect(controller.confirmedModelName == "gpt-5.6-sol")
+        #expect(providerFactory.configurations.map(\.model) == ["gpt-5.6-sol"])
         controller.save()
         await controller.runNow()
 
@@ -128,5 +136,38 @@ private actor TestLibrarianProcessor: LibrarianProcessing {
     func process(command: String) async throws -> BrainJobCreated {
         commands.append(command)
         return BrainJobCreated(id: UUID().uuidString, state: .completed)
+    }
+}
+
+private final class TestLibrarianProviderFactory: AIProviderMaking, @unchecked Sendable {
+    let state: AIConnectionState
+    private let lock = NSLock()
+    private var storedConfigurations: [AIProviderConfiguration] = []
+
+    init(state: AIConnectionState) {
+        self.state = state
+    }
+
+    var configurations: [AIProviderConfiguration] {
+        lock.withLock { storedConfigurations }
+    }
+
+    func makeProvider(configuration: AIProviderConfiguration) -> any AIProviding {
+        lock.withLock {
+            storedConfigurations.append(configuration)
+        }
+        return TestLibrarianProvider(state: state)
+    }
+}
+
+private struct TestLibrarianProvider: AIProviding {
+    let state: AIConnectionState
+
+    func run(prompt: String, jsonSchema: Data) async throws -> Data {
+        Data()
+    }
+
+    func testConnection() async -> AIConnectionState {
+        state
     }
 }
