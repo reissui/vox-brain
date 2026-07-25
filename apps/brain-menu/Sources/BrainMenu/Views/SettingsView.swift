@@ -6,7 +6,6 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case general = "General"
     case shortcuts = "Shortcuts"
     case speech = "Speech"
-    case ai = "Post-Processing"
     case audioPrivacy = "Privacy"
     case updates = "Updates"
     case gmail = "Gmail"
@@ -19,7 +18,6 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .general: "gearshape"
         case .shortcuts: "keyboard"
         case .speech: "waveform.and.mic"
-        case .ai: "sparkles"
         case .audioPrivacy: "lock.shield"
         case .updates: "arrow.triangle.2.circlepath"
         case .gmail: "envelope"
@@ -35,7 +33,6 @@ struct SettingsView: View {
     @State private var gmail: GmailConnectionController
     @State private var meetingHotkey: MeetingHotkeyController?
     @State private var speech: SpeechSettingsController?
-    @State private var ai: AISettingsController?
     @State private var updates: UpdateController?
     @State private var audioRetention: AudioRetentionController
     @State private var onboarding: OnboardingController
@@ -49,7 +46,6 @@ struct SettingsView: View {
         gmail: GmailConnectionController = GmailConnectionController(),
         meetingHotkey: MeetingHotkeyController? = nil,
         speech: SpeechSettingsController? = nil,
-        ai: AISettingsController? = nil,
         updates: UpdateController? = nil,
         audioRetention: AudioRetentionController = AudioRetentionController(),
         onboarding: OnboardingController = OnboardingController()
@@ -60,7 +56,6 @@ struct SettingsView: View {
         _gmail = State(initialValue: gmail)
         _meetingHotkey = State(initialValue: meetingHotkey)
         _speech = State(initialValue: speech)
-        _ai = State(initialValue: ai)
         _updates = State(initialValue: updates)
         _audioRetention = State(initialValue: audioRetention)
         _onboarding = State(initialValue: onboarding)
@@ -106,12 +101,6 @@ struct SettingsView: View {
                 } else {
                     unavailable("Speech", "Open Settings from the Brain app dashboard to inspect VoxType and model readiness.")
                 }
-            case .ai:
-                if let ai {
-                    AISettingsView(controller: ai)
-                } else {
-                    unavailable("Post-Processing", "Open Settings from the Brain app dashboard to configure a local CLI command.")
-                }
             case .audioPrivacy:
                 AudioPrivacySettingsView(
                     retention: audioRetention,
@@ -146,7 +135,6 @@ struct SettingsView: View {
             .general,
             .shortcuts,
             .speech,
-            .ai,
             .audioPrivacy,
             .updates,
         ]

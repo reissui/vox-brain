@@ -23,7 +23,7 @@ struct EndToEndAcceptanceTests {
         try await voice.detectedAndManualMeetingsUseDualFixturesRollTranscriptAndRequireExplicitStop()
 
         let speech = FeatureSettingsViewTests()
-        await speech.firstReadyRefreshAppliesAndPersistsOneParakeetDefaultForBothWorkflows()
+        await speech.firstReadyRefreshAppliesAndPersistsBundledCompatibleDefaultForBothWorkflows()
         speech.speechRowsExposeEveryReadinessStateCapabilitiesAndAccessibilityText()
 
         // The exact three-rollover regression is executed independently by the

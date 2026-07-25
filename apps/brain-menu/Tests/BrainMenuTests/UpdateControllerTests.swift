@@ -40,6 +40,10 @@ struct UpdateControllerTests {
         await controller.checkNow()
 
         #expect(controller.state == .available(release))
+        #expect(controller.sidebarAlert == BrainUpdateSidebarAlert(
+            title: "Update available",
+            detail: "Brain 1.3.0"
+        ))
         #expect(defaults.object(forKey: UpdateController.lastCheckDefaultsKey) as? Date == checkedAt)
     }
 
@@ -61,6 +65,48 @@ struct UpdateControllerTests {
         await controller.checkNow()
 
         #expect(controller.state == .unavailable("No Brain releases have been published yet."))
+    }
+
+    @MainActor
+    @Test
+    func automaticChecksContinueWhileTheAppRemainsOpen() async throws {
+        let release = BrainRelease(
+            version: "1.2.3",
+            pageURL: try #require(URL(string: "https://example.test/brain-v1.2.3")),
+            archiveURL: try #require(URL(string: "https://example.test/Brain-1.2.3.zip")),
+            archiveSize: 42
+        )
+        let service = CountingUpdateService(release: release)
+        let sleeper = RecurringUpdateSleeper()
+        let controller = UpdateController(
+            service: service,
+            defaults: UserDefaults.standard,
+            sleep: { duration in
+                try await sleeper.sleep(duration)
+            },
+            buildInfo: BrainBuildInfo(infoDictionary: [
+                "CFBundleShortVersionString": "1.2.3",
+                "CFBundleVersion": "123",
+                "BrainSourceSHA": String(repeating: "a", count: 40),
+                "BrainChannel": "release",
+                "BrainBuildDate": "2026-07-24T12:00:00Z",
+            ])
+        )
+
+        controller.start()
+        for _ in 0..<500 {
+            if await service.checkCount >= 2, await sleeper.durations.count >= 2 {
+                break
+            }
+            await Task.yield()
+        }
+        controller.stop()
+
+        #expect(await service.checkCount == 2)
+        #expect(await sleeper.durations == [
+            .seconds(UpdateController.automaticCheckInterval),
+            .seconds(UpdateController.automaticCheckInterval),
+        ])
     }
 }
 
@@ -85,5 +131,33 @@ private actor NoReleaseUpdateService: BrainUpdateServing {
 
     func prepareInstallation(for release: BrainRelease) async throws -> BrainPreparedUpdate {
         throw BrainUpdateError.noReleasePublished
+    }
+}
+
+private actor CountingUpdateService: BrainUpdateServing {
+    let release: BrainRelease
+    private(set) var checkCount = 0
+
+    init(release: BrainRelease) {
+        self.release = release
+    }
+
+    func latestRelease() async throws -> BrainRelease {
+        checkCount += 1
+        return release
+    }
+
+    func prepareInstallation(for release: BrainRelease) async throws -> BrainPreparedUpdate {
+        throw BrainUpdateError.invalidApplication
+    }
+}
+
+private actor RecurringUpdateSleeper {
+    private(set) var durations: [Duration] = []
+
+    func sleep(_ duration: Duration) async throws {
+        durations.append(duration)
+        if durations.count == 1 { return }
+        try await Task.sleep(for: .seconds(3_600))
     }
 }

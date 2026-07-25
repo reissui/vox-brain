@@ -22,11 +22,16 @@ as an optional speech engine for dictation and meeting transcription.
 
 ## Included VoxType speech
 
-Brain's Speech Setup downloads and selects the recommended model, then enables
+Brain's Speech Setup downloads and selects the verified Whisper English model,
+then enables
 and starts the included VoxType login item without opening a browser or
 installer. If macOS has disabled background items, Brain opens the exact Login
 Items settings page for approval. A compatible standalone VoxType installation
 remains supported and takes precedence over the included copy.
+
+Brain 0.1.3 also repairs the incompatible Parakeet default offered by 0.1.2:
+when VoxType 0.7.5 reports that selection, Brain downloads and activates the
+bundled-compatible Whisper model before dictation is used.
 
 Brain can also download and activate additional catalog-approved models from
 Speech settings. VoxType continues to own recording, transcription, shortcut,
@@ -50,13 +55,20 @@ Local mode provides:
 - owner-only local attachment storage;
 - direct vault access in Finder and Obsidian;
 - accurate local activity and Librarian progress;
-- fixed local Librarian processing; and
+- automatic local Librarian processing after capture and every 15 minutes;
+- separate selectable Codex models for Librarian work and meeting
+  post-processing under **AI Setup**; and
 - local meetings and optional VoxType speech.
 
 The app package contains `Contents/Resources/BrainRuntime` with the generic
 Librarian charter, prompts, templates, and CLI helpers. It contains no personal
 vault content. Codex is needed for Librarian intelligence, but not for basic
 capture, storage, search, or reading.
+
+The Librarian preserves captured words while enriching sources, filing notes,
+building links and maps, and updating project, person, and owner-profile
+material from evidence in the vault. Automatic processing can be disabled or
+run immediately from **AI Setup**.
 
 MCP, Cloudflare, pairing, remote device credentials, Gmail, runner health, and
 private-site access are hidden in local mode.

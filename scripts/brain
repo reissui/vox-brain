@@ -1184,8 +1184,18 @@ run_librarian() { # $1 sandbox; optional $2=gmail; prompt arrives on stdin
   local sandbox="$1"
   local capability="${2:-}" log rc command_toml
   local -a gmail_config=()
+  local -a model_args=()
   local -a sandbox_config=()
   codex_subscription_ready || return 1
+  if [ -n "${BRAIN_LIBRARIAN_MODEL:-}" ]; then
+    case "$BRAIN_LIBRARIAN_MODEL" in
+      *[!A-Za-z0-9._:/-]*)
+        echo "error: BRAIN_LIBRARIAN_MODEL is not a safe Codex model identifier" >&2
+        return 1
+        ;;
+      *) model_args=(--model "$BRAIN_LIBRARIAN_MODEL") ;;
+    esac
+  fi
   if [ "$capability" = "gmail" ] && [ -x "$GMAIL_CONNECTOR" ] \
     && "$GMAIL_CONNECTOR" status >/dev/null 2>&1; then
     command_toml="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$GMAIL_CONNECTOR")"
@@ -1222,6 +1232,7 @@ run_librarian() { # $1 sandbox; optional $2=gmail; prompt arrives on stdin
       --ephemeral \
       --color never \
       --sandbox "$sandbox" \
+      ${model_args[@]+"${model_args[@]}"} \
       - 2>"$log"
   rc=$?
   if [ "$rc" -ne 0 ]; then

@@ -96,11 +96,13 @@ struct LocalBrainClient: BrainStatusAPI, BrainCaptureAPI, RemoteKnowledgeAPI,
     let pairedInstance: BrainInstanceMetadata?
 
     private let fileManager: FileManager
+    private let librarianModel: String?
 
     init(
         configuration: BrainLocalConfiguration,
         fileManager: FileManager = .default,
-        requireInitializedVault: Bool = true
+        requireInitializedVault: Bool = true,
+        librarianModel: String? = nil
     ) throws {
         let vaultURL = configuration.vaultURL.standardizedFileURL
         let cliURL = configuration.cliURL.standardizedFileURL
@@ -120,6 +122,11 @@ struct LocalBrainClient: BrainStatusAPI, BrainCaptureAPI, RemoteKnowledgeAPI,
             cliPath: cliURL.path
         )
         self.fileManager = fileManager
+        do {
+            self.librarianModel = try AIProviderValidation.validatedModel(librarianModel)
+        } catch {
+            throw LocalBrainError.invalidConfiguration
+        }
         pairedInstance = BrainInstanceMetadata(
             baseURL: URL(string: "https://local.brain.invalid")!,
             instanceID: "local",
@@ -359,6 +366,11 @@ struct LocalBrainClient: BrainStatusAPI, BrainCaptureAPI, RemoteKnowledgeAPI,
                 .deletingLastPathComponent()
                 .deletingLastPathComponent()
                 .path
+            if let librarianModel {
+                environment["BRAIN_LIBRARIAN_MODEL"] = librarianModel
+            } else {
+                environment.removeValue(forKey: "BRAIN_LIBRARIAN_MODEL")
+            }
             let commonPaths = [
                 FileManager.default.homeDirectoryForCurrentUser
                     .appendingPathComponent(".local/bin").path,

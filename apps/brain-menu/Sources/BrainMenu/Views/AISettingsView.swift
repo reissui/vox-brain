@@ -367,7 +367,7 @@ struct AISettingsView: View {
                         .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("AI Setup")
+                        Text("Meeting Post-Processing")
                             .font(.title3.weight(.semibold))
                         Text("Optional. Powers meeting titles, summaries, and transcript analysis.")
                             .font(.callout)
@@ -584,7 +584,7 @@ struct AISettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("Post-Processing")
+        .navigationTitle("AI Setup")
         .onAppear { accessibilityFocus = .primaryField }
         .onChange(of: controller.errorMessage) { _, error in
             if error != nil { accessibilityFocus = .errorSummary }

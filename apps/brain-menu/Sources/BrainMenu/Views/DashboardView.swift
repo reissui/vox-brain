@@ -22,6 +22,7 @@ enum DashboardSection: String, CaseIterable, Identifiable {
     case activity = "Activity"
     case dictation = "Dictation"
     case meetings = "Meetings"
+    case aiSetup = "AI Setup"
     case settings = "Settings"
 
     var id: Self { self }
@@ -31,6 +32,7 @@ enum DashboardSection: String, CaseIterable, Identifiable {
         case .activity: "waveform.path.ecg"
         case .dictation: "waveform.and.mic"
         case .meetings: "person.2.wave.2"
+        case .aiSetup: "sparkles"
         case .settings: "gearshape"
         }
     }
@@ -61,6 +63,36 @@ struct DashboardView: View {
                             .tag(section)
                         }
                         Divider()
+                        if let graph,
+                           let alert = graph.updates.sidebarAlert {
+                            Button {
+                                settingsSelection = .updates
+                                selection = .settings
+                            } label: {
+                                HStack(spacing: 9) {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                        .foregroundStyle(.orange)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(alert.title)
+                                            .font(.caption.weight(.semibold))
+                                        Text(alert.detail)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .padding(10)
+                            .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
+                            .padding(.horizontal, 8)
+                            .padding(.bottom, 4)
+                            .accessibilityHint("Opens the Updates screen")
+                        }
                         Group {
                             if let buildInfo = BrainBuildInfo.current {
                                 Text(buildInfo.versionLabel)
@@ -103,6 +135,19 @@ struct DashboardView: View {
                         } else {
                             MeetingsView()
                         }
+                    case .aiSetup:
+                        if let graph {
+                            AISetupView(
+                                librarian: graph.librarianAI,
+                                meetings: graph.aiSettings
+                            )
+                        } else {
+                            FeaturePlaceholderView(
+                                title: "AI Setup",
+                                symbolName: DashboardSection.aiSetup.symbolName,
+                                detail: "Open Brain.app to configure Librarian and meeting AI."
+                            )
+                        }
                     case .settings:
                         if let graph {
                             SettingsView(
@@ -112,7 +157,6 @@ struct DashboardView: View {
                                 gmail: graph.gmail,
                                 meetingHotkey: graph.meetingHotkey,
                                 speech: graph.speechSettings,
-                                ai: graph.aiSettings,
                                 updates: graph.updates,
                                 audioRetention: graph.audioRetention,
                                 onboarding: graph.onboarding

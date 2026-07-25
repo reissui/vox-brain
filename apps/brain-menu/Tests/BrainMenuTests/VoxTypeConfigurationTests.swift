@@ -46,7 +46,7 @@ struct VoxTypeConfigurationTests {
         let fixture = try VoxTypeConfigurationFixture(source)
         let selection = SpeechEngineSelection(
             engine: .parakeet,
-            modelID: SpeechEngineCatalog.englishDefaultModelID
+            modelID: "parakeet-tdt-0.6b-v3"
         )
 
         let backup = try fixture.editor.apply(selection)
@@ -90,7 +90,7 @@ struct VoxTypeConfigurationTests {
             #expect(throws: expected) {
                 try fixture.editor.apply(SpeechEngineSelection(
                     engine: .parakeet,
-                    modelID: SpeechEngineCatalog.englishDefaultModelID
+                    modelID: "parakeet-tdt-0.6b-v3"
                 ))
             }
             #expect(try fixture.text() == source)
@@ -118,7 +118,7 @@ struct VoxTypeConfigurationTests {
         #expect(throws: VoxTypeConfigurationError.atomicWriteFailed) {
             try failing.apply(SpeechEngineSelection(
                 engine: .parakeet,
-                modelID: SpeechEngineCatalog.englishDefaultModelID
+                modelID: "parakeet-tdt-0.6b-v3"
             ))
         }
         #expect(try failedFixture.text() == original)
@@ -127,7 +127,7 @@ struct VoxTypeConfigurationTests {
         let fixture = try VoxTypeConfigurationFixture(original)
         let backup = try fixture.editor.apply(SpeechEngineSelection(
             engine: .parakeet,
-            modelID: SpeechEngineCatalog.englishDefaultModelID
+            modelID: "parakeet-tdt-0.6b-v3"
         ))
         try fixture.editor.rollback(to: backup)
         #expect(try fixture.text() == original)
@@ -145,7 +145,7 @@ struct VoxTypeConfigurationTests {
         #expect(throws: VoxTypeConfigurationError.configurationIsNotRegularFile) {
             try fixture.editor.apply(SpeechEngineSelection(
                 engine: .parakeet,
-                modelID: SpeechEngineCatalog.englishDefaultModelID
+                modelID: "parakeet-tdt-0.6b-v3"
             ))
         }
         #expect(try String(contentsOf: outside, encoding: .utf8) == "engine = \"whisper\"")
@@ -162,7 +162,7 @@ struct VoxTypeConfigurationTests {
         #expect(throws: VoxTypeConfigurationError.unsafeBackup) {
             try backupFixture.editor.apply(SpeechEngineSelection(
                 engine: .parakeet,
-                modelID: SpeechEngineCatalog.englishDefaultModelID
+                modelID: "parakeet-tdt-0.6b-v3"
             ))
         }
         #expect(try String(contentsOf: protected, encoding: .utf8) == "unchanged")
