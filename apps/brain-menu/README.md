@@ -17,16 +17,24 @@ Activity is the local-first home screen. It shows current recording,
 transcription, analysis, and Librarian work using actual local process state,
 plus recent completed work. Remote services stay hidden unless configured.
 
-Speech and meeting setup no longer blocks first launch. VoxType is an optional
-separate installation used only for dictation and meeting transcription.
+Speech and meeting setup no longer blocks first launch. Brain includes VoxType
+as an optional speech engine for dictation and meeting transcription.
 
-## Optional VoxType speech
+## Included VoxType speech
 
-VoxType is installed separately. VoxType owns dictation end to end: shortcut,
-recording, models, limits, transcription, and output.
+Brain's Speech Setup downloads and selects the recommended model, then enables
+and starts the included VoxType login item without opening a browser or
+installer. If macOS has disabled background items, Brain opens the exact Login
+Items settings page for approval. A compatible standalone VoxType installation
+remains supported and takes precedence over the included copy.
+
+Brain can also download and activate additional catalog-approved models from
+Speech settings. VoxType continues to own recording, transcription, shortcut,
+limits, and output behavior.
 Brain read-only tails VoxType's existing local `stdout.log` for Dictation
-History and records text only after VoxType logs successful output. Brain never
-changes VoxType configuration, and VoxType dictation continues unaffected.
+History and records text only after VoxType logs successful output. Brain
+changes only an explicitly selected speech engine/model and leaves the rest of
+VoxType's configuration untouched.
 
 For meetings, Brain records microphone plus system audio and uses VoxType for
 local transcription. Failed or interrupted jobs retain their private source
@@ -79,7 +87,8 @@ apps/brain-menu/install.sh
 The development installer requires a clean Git checkout because the displayed
 version identifies the exact source revision. It builds `BrainMenu` and the
 lossless `BrainDictationObserver`, assembles the reusable local runtime, signs
-the app, and atomically installs it at `~/Applications/Brain.app` by default.
+the app, embeds the pinned VoxType login item, and atomically installs it at
+`~/Applications/Brain.app` by default.
 
 Set `BRAIN_MENU_APP_DEST` to use another destination. Set
 `BRAIN_SIGN_IDENTITY=-` only for an explicit ad-hoc build.
@@ -101,8 +110,14 @@ contain:
 - `Contents/MacOS/BrainMenu`;
 - `Contents/Helpers/BrainDictationObserver`;
 - `Contents/Helpers/BrainUpdater`;
+- `Contents/Library/LoginItems/VoxType.app`;
 - `Contents/Resources/BrainRuntime`; and
 - application metadata and signatures.
+
+The VoxType binary is fetched from the pinned upstream release, verified by
+SHA-256 and universal architecture, then signed inside Brain's nested code
+before the outer app is signed and notarized. Its upstream MIT license ships
+inside the nested app.
 
 It must not contain vault Markdown, personal attachments, tokens, Git metadata,
 OAuth files, source-control history, or machine-specific paths.
@@ -115,6 +130,10 @@ Brain requests permissions only for features the user enables:
 - Screen & System Audio Recording for system meeting audio;
 - Accessibility for selected-text context and paste-related features; and
 - Notifications for app status.
+
+The included VoxType login item requests its own macOS permissions when the
+speech engine first needs them; Brain cannot grant those permissions on the
+user's behalf.
 
 Meeting audio retention is off by default. Local and remote modes both keep
 recording audio on the recording Mac; only finalized transcript text can enter

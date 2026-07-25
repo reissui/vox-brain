@@ -14,6 +14,9 @@ sign_identity="${BRAIN_SIGN_IDENTITY:--}"
 plist_source="$app_dir/Resources/Info.plist"
 entitlements="$app_dir/Resources/Brain.entitlements"
 app_icon="$app_dir/Resources/Brain.icns"
+voxtype_fetcher="$app_dir/fetch-voxtype.sh"
+voxtype_plist="$app_dir/Resources/VoxTypeInfo.plist"
+voxtype_license="$app_dir/Resources/VoxType-LICENSE.txt"
 
 usage() {
   echo "usage: BRAIN_APP_VERSION=1.2.3 BRAIN_APP_BUILD=123 BRAIN_APP_SOURCE_SHA=<40 lowercase hex> BRAIN_APP_CHANNEL=development|test|release BRAIN_APP_BUILD_DATE=YYYY-MM-DDTHH:MM:SSZ [BRAIN_APP_OUTPUT_DIR=path] [BRAIN_SIGN_IDENTITY=identity] $0" >&2
@@ -50,7 +53,13 @@ if [ "$channel" = "release" ] && [ "$sign_identity" = "-" ]; then
   exit 64
 fi
 
-for required in "$plist_source" "$entitlements" "$app_icon"; do
+for required in \
+  "$plist_source" \
+  "$entitlements" \
+  "$app_icon" \
+  "$voxtype_fetcher" \
+  "$voxtype_plist" \
+  "$voxtype_license"; do
   if [ ! -f "$required" ]; then
     echo "error: required packaging input is missing: $required" >&2
     exit 66
@@ -91,7 +100,7 @@ if [ "$canonical_build_date" != "$build_date" ]; then
   exit 64
 fi
 
-for command in swift codesign ditto plutil; do
+for command in swift codesign curl ditto lipo plutil shasum; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "error: required packaging command is unavailable: $command" >&2
     exit 69
@@ -130,13 +139,23 @@ if [ ! -x "$updater_binary" ]; then
   exit 70
 fi
 
-mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Helpers" \
-  "$staged_app/Contents/Resources"
+voxtype_app="$staged_app/Contents/Library/LoginItems/VoxType.app"
+voxtype_contents="$voxtype_app/Contents"
+voxtype_binary="$voxtype_contents/MacOS/voxtype"
+mkdir -p \
+  "$staged_app/Contents/MacOS" \
+  "$staged_app/Contents/Helpers" \
+  "$staged_app/Contents/Resources" \
+  "$voxtype_contents/MacOS" \
+  "$voxtype_contents/Resources"
 install -m 0644 "$plist_source" "$staged_app/Contents/Info.plist"
 install -m 0644 "$app_icon" "$staged_app/Contents/Resources/Brain.icns"
 install -m 0755 "$binary" "$staged_app/Contents/MacOS/BrainMenu"
 install -m 0755 "$observer_binary" "$staged_app/Contents/Helpers/BrainDictationObserver"
 install -m 0755 "$updater_binary" "$staged_app/Contents/Helpers/BrainUpdater"
+install -m 0644 "$voxtype_plist" "$voxtype_contents/Info.plist"
+install -m 0644 "$voxtype_license" "$voxtype_contents/Resources/LICENSE.txt"
+"$voxtype_fetcher" "$voxtype_binary"
 
 runtime="$staged_app/Contents/Resources/BrainRuntime"
 mkdir -p "$runtime/scripts" "$runtime/prompts" "$runtime/system/templates"
@@ -174,6 +193,10 @@ else
   sign_args+=(--timestamp)
 fi
 
+echo "Signing bundled executable: Contents/Library/LoginItems/VoxType.app/Contents/MacOS/voxtype" >&2
+codesign "${sign_args[@]}" "$voxtype_binary"
+echo "Signing bundled login item: Contents/Library/LoginItems/VoxType.app" >&2
+codesign "${sign_args[@]}" --generate-entitlement-der "$voxtype_app"
 echo "Signing helper executable: Contents/Helpers/BrainDictationObserver" >&2
 codesign "${sign_args[@]}" "$staged_app/Contents/Helpers/BrainDictationObserver"
 echo "Signing updater executable: Contents/Helpers/BrainUpdater" >&2

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>VoxType for Brain</string>
+	<key>CFBundleExecutable</key>
+	<string>voxtype</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.voxbrain.voxtype</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>VoxType for Brain</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.7.5</string>
+	<key>CFBundleVersion</key>
+	<string>75</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>VoxType uses accessibility access to type text you dictate.</string>
+	<key>NSInputMonitoringUsageDescription</key>
+	<string>VoxType monitors the shortcut you choose for push-to-talk dictation.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>VoxType records your microphone only while you dictate.</string>
+	<key>VoxTypeSourceSHA256</key>
+	<string>12e794655f0e0efadceb92e6313cec2c618c571892490368d0b90194cc27cc6e</string>
+	<key>VoxTypeSourceVersion</key>
+	<string>v0.7.5</string>
+</dict>
+</plist>

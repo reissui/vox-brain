@@ -8,6 +8,9 @@ destination_parent="$(dirname "$destination")"
 destination_name="$(basename "$destination")"
 entitlements="$app_dir/Resources/Brain.entitlements"
 app_icon="$app_dir/Resources/Brain.icns"
+voxtype_fetcher="$app_dir/fetch-voxtype.sh"
+voxtype_plist="$app_dir/Resources/VoxTypeInfo.plist"
+voxtype_license="$app_dir/Resources/VoxType-LICENSE.txt"
 canonical_destination="$HOME/Applications/Brain.app"
 manage_privacy="${BRAIN_MENU_MANAGE_PRIVACY:-}"
 requested_sign_identity="${BRAIN_SIGN_IDENTITY:-auto}"
@@ -99,8 +102,15 @@ trap cleanup EXIT
 swift build --package-path "$app_dir" --configuration release
 binary_dir="$(swift build --package-path "$app_dir" --configuration release --show-bin-path)"
 
-mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Helpers" \
-  "$staged_app/Contents/Resources"
+voxtype_app="$staged_app/Contents/Library/LoginItems/VoxType.app"
+voxtype_contents="$voxtype_app/Contents"
+voxtype_binary="$voxtype_contents/MacOS/voxtype"
+mkdir -p \
+  "$staged_app/Contents/MacOS" \
+  "$staged_app/Contents/Helpers" \
+  "$staged_app/Contents/Resources" \
+  "$voxtype_contents/MacOS" \
+  "$voxtype_contents/Resources"
 install -m 0644 "$app_dir/Resources/Info.plist" "$staged_app/Contents/Info.plist"
 install -m 0644 "$app_icon" "$staged_app/Contents/Resources/Brain.icns"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $app_version" "$staged_app/Contents/Info.plist"
@@ -111,6 +121,9 @@ install -m 0644 "$app_icon" "$staged_app/Contents/Resources/Brain.icns"
 install -m 0755 "$binary_dir/BrainMenu" "$staged_app/Contents/MacOS/BrainMenu"
 install -m 0755 "$binary_dir/BrainDictationObserver" "$staged_app/Contents/Helpers/BrainDictationObserver"
 install -m 0755 "$binary_dir/BrainUpdater" "$staged_app/Contents/Helpers/BrainUpdater"
+install -m 0644 "$voxtype_plist" "$voxtype_contents/Info.plist"
+install -m 0644 "$voxtype_license" "$voxtype_contents/Resources/LICENSE.txt"
+"$voxtype_fetcher" "$voxtype_binary"
 
 runtime="$staged_app/Contents/Resources/BrainRuntime"
 mkdir -p "$runtime/scripts" "$runtime/prompts" "$runtime/system/templates"
@@ -127,6 +140,8 @@ for helper in brain build-libraries.py clean_vtt.py design-media design-shot twe
 done
 install -m 0644 "$source_root/scripts/requirements.txt" "$runtime/scripts/requirements.txt"
 
+codesign --force --sign "$sign_identity" --timestamp=none "$voxtype_binary"
+codesign --force --sign "$sign_identity" --timestamp=none --generate-entitlement-der "$voxtype_app"
 codesign --force --sign "$sign_identity" --timestamp=none "$staged_app/Contents/Helpers/BrainDictationObserver"
 codesign --force --sign "$sign_identity" --timestamp=none "$staged_app/Contents/Helpers/BrainUpdater"
 codesign --force --sign "$sign_identity" --timestamp=none "$staged_app/Contents/MacOS/BrainMenu"

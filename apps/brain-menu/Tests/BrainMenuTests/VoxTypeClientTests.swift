@@ -24,7 +24,8 @@ struct VoxTypeClientTests {
         ])
         let discoverer = VoxTypeExecutableDiscoverer(
             fileSystem: fileSystem,
-            environment: ["PATH": "relative:/tools/bin:/other/bin"]
+            environment: ["PATH": "relative:/tools/bin:/other/bin"],
+            bundledCandidate: nil
         )
 
         #expect(try discoverer.discover(userSelected: selected) == selectedResolved)
@@ -34,11 +35,42 @@ struct VoxTypeClientTests {
             fileSystem: FakeVoxTypeExecutableFileSystem(executables: [
                 "/tools/bin/voxtype": pathResolved,
             ]),
-            environment: ["PATH": "relative:/tools/bin:/other/bin"]
+            environment: ["PATH": "relative:/tools/bin:/other/bin"],
+            bundledCandidate: nil
         )
         #expect(try pathOnly.discover() == pathResolved)
         #expect(fileSystem.queries.first == selected.path)
         #expect(!fileSystem.queries.contains("relative/voxtype"))
+    }
+
+    @Test
+    func discoveryUsesBundledVoxTypeOnlyAfterStandaloneCandidates() throws {
+        let bundled = URL(
+            fileURLWithPath: "/Brain.app/Contents/Library/LoginItems/VoxType.app/Contents/MacOS/voxtype"
+        )
+        let bundledResolved = URL(
+            fileURLWithPath: "/Brain.app/Contents/Library/LoginItems/VoxType.app/Contents/MacOS/voxtype"
+        )
+        let external = URL(fileURLWithPath: "/tools/bin/voxtype")
+        let externalResolved = URL(fileURLWithPath: "/tools/cellar/voxtype")
+        let withExternal = VoxTypeExecutableDiscoverer(
+            fileSystem: FakeVoxTypeExecutableFileSystem(executables: [
+                external.path: externalResolved,
+                bundled.path: bundledResolved,
+            ]),
+            environment: ["PATH": "/tools/bin"],
+            bundledCandidate: bundled
+        )
+        #expect(try withExternal.discover() == externalResolved)
+
+        let bundledOnly = VoxTypeExecutableDiscoverer(
+            fileSystem: FakeVoxTypeExecutableFileSystem(executables: [
+                bundled.path: bundledResolved,
+            ]),
+            environment: [:],
+            bundledCandidate: bundled
+        )
+        #expect(try bundledOnly.discover() == bundledResolved)
     }
 
     @Test
@@ -48,7 +80,11 @@ struct VoxTypeClientTests {
             "/Applications/voxtype-tray": URL(fileURLWithPath: "/Applications/voxtype-tray"),
             "/tmp/voxtype": URL(fileURLWithPath: "/bin/sh"),
         ])
-        let discoverer = VoxTypeExecutableDiscoverer(fileSystem: fileSystem, environment: [:])
+        let discoverer = VoxTypeExecutableDiscoverer(
+            fileSystem: fileSystem,
+            environment: [:],
+            bundledCandidate: nil
+        )
 
         #expect(throws: VoxTypeDiscoveryError.unsafeUserSelection) {
             try discoverer.discover(userSelected: URL(fileURLWithPath: "/bin/sh"))

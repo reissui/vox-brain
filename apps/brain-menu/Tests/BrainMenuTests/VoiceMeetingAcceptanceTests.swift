@@ -61,8 +61,14 @@ struct VoiceMeetingAcceptanceTests {
             defaults: defaults
         )
         await guidance.refresh()
-        #expect(guidance.check(OnboardingCheckID.dictationModel).action == .openVoxTypeGuide)
-        #expect(guidance.check(OnboardingCheckID.meetingModel).action == .openVoxTypeGuide)
+        #expect(
+            guidance.check(OnboardingCheckID.dictationModel).action
+                == .installModel(OnboardingController.defaultDictationModelID)
+        )
+        #expect(
+            guidance.check(OnboardingCheckID.meetingModel).action
+                == .installModel(OnboardingController.defaultMeetingModelID)
+        )
         #expect(guidance.check(OnboardingCheckID.dictationModel).state == .optional)
         #expect(guidance.check(OnboardingCheckID.meetingModel).state == .optional)
 
@@ -626,7 +632,8 @@ private actor AcceptanceVoxTypeInspector: OnboardingVoxTypeInspecting {
                 key: "FN",
                 modifiers: [],
                 mode: "PushToTalk"
-            )
+            ),
+            source: .external
         )
     }
 }
