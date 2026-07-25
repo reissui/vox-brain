@@ -29,6 +29,74 @@ struct MeetingTranscriptionCoordinatorTests {
     }
 
     @Test
+    func finalizationDiscardsOnlyShortMeetingsWithoutMeaningfulTranscript() async throws {
+        let shortEmpty = try MeetingTranscriptionCoordinatorFixture(duration: 29.999)
+        let shortEmptyCapture = try shortEmpty.makeCapture()
+        let shortEmptyClient = CoordinatorEmptyClient()
+        let shortEmptyCoordinator = shortEmpty.coordinator(client: shortEmptyClient)
+        let shortEmptyProcessing = try shortEmptyCoordinator.stage(
+            meeting: shortEmpty.meeting,
+            capture: shortEmptyCapture
+        )
+
+        _ = await shortEmptyCoordinator.complete(
+            meeting: shortEmptyProcessing,
+            capture: shortEmptyCapture,
+            transcript: try shortEmpty.transcript(
+                client: shortEmptyClient,
+                capture: shortEmptyCapture
+            )
+        )
+
+        #expect(!FileManager.default.fileExists(atPath: shortEmpty.meetingDirectory.path))
+        #expect(throws: MeetingStoreError.meetingNotFound(shortEmpty.meeting.id)) {
+            try shortEmpty.store.load(shortEmpty.meeting.id)
+        }
+
+        let shortSpoken = try MeetingTranscriptionCoordinatorFixture(duration: 5)
+        let shortSpokenCapture = try shortSpoken.makeCapture()
+        let shortSpokenClient = CoordinatorSuccessClient()
+        let shortSpokenCoordinator = shortSpoken.coordinator(client: shortSpokenClient)
+        let shortSpokenProcessing = try shortSpokenCoordinator.stage(
+            meeting: shortSpoken.meeting,
+            capture: shortSpokenCapture
+        )
+
+        let completed = await shortSpokenCoordinator.complete(
+            meeting: shortSpokenProcessing,
+            capture: shortSpokenCapture,
+            transcript: try shortSpoken.transcript(
+                client: shortSpokenClient,
+                capture: shortSpokenCapture
+            )
+        )
+
+        #expect(completed.transcriptionState == .completed)
+        #expect(!(try shortSpoken.store.load(shortSpoken.meeting.id)).utterances.isEmpty)
+
+        let boundaryEmpty = try MeetingTranscriptionCoordinatorFixture(duration: 30)
+        let boundaryCapture = try boundaryEmpty.makeCapture()
+        let boundaryClient = CoordinatorEmptyClient()
+        let boundaryCoordinator = boundaryEmpty.coordinator(client: boundaryClient)
+        let boundaryProcessing = try boundaryCoordinator.stage(
+            meeting: boundaryEmpty.meeting,
+            capture: boundaryCapture
+        )
+
+        _ = await boundaryCoordinator.complete(
+            meeting: boundaryProcessing,
+            capture: boundaryCapture,
+            transcript: try boundaryEmpty.transcript(
+                client: boundaryClient,
+                capture: boundaryCapture
+            )
+        )
+
+        #expect(FileManager.default.fileExists(atPath: boundaryEmpty.meetingDirectory.path))
+        #expect(try boundaryEmpty.store.load(boundaryEmpty.meeting.id).utterances.isEmpty)
+    }
+
+    @Test
     func unsupportedFinalPersistsFailureAndKeepsRawAudioRetryable() async throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()
@@ -403,7 +471,7 @@ private final class MeetingTranscriptionCoordinatorFixture {
         store.directoryURL(for: meeting.id)
     }
 
-    init() throws {
+    init(duration: TimeInterval = 60) throws {
         rootURL = FileManager.default.temporaryDirectory.appendingPathComponent(
             "BrainMeetingTranscriptionCoordinatorTests-\(UUID().uuidString)",
             isDirectory: true
@@ -424,7 +492,7 @@ private final class MeetingTranscriptionCoordinatorFixture {
             title: "Meeting",
             detectedApplication: "Test Call",
             startedAt: Date(timeIntervalSince1970: 1_784_200_000),
-            endedAt: Date(timeIntervalSince1970: 1_784_200_001),
+            endedAt: Date(timeIntervalSince1970: 1_784_200_000 + duration),
             lifecycleState: .completed,
             speechEngine: SpeechEngineID.parakeet.rawValue,
             speechModel: "parakeet-tdt-0.6b-v3",
@@ -540,6 +608,12 @@ private actor CoordinatorSuccessClient: LiveTranscriptionClient {
         return wavURL.lastPathComponent.contains("microphone")
             ? "The microphone transcript succeeded."
             : "The computer transcript succeeded."
+    }
+}
+
+private actor CoordinatorEmptyClient: LiveTranscriptionClient {
+    func transcribe(wavURL: URL, engine: String) async throws -> String {
+        " \n "
     }
 }
 
