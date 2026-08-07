@@ -80,6 +80,23 @@ struct LiveTranscriptFailure: Equatable, Sendable {
     let startMilliseconds: Int64?
     let endMilliseconds: Int64?
     let message: String
+    let isSystemic: Bool
+
+    init(
+        source: MeetingAudioSource,
+        phase: LiveTranscriptionPhase,
+        startMilliseconds: Int64?,
+        endMilliseconds: Int64?,
+        message: String,
+        isSystemic: Bool = false
+    ) {
+        self.source = source
+        self.phase = phase
+        self.startMilliseconds = startMilliseconds
+        self.endMilliseconds = endMilliseconds
+        self.message = message
+        self.isSystemic = isSystemic
+    }
 }
 
 enum LiveTranscriptPreviewLagState: Equatable, Sendable {
@@ -319,7 +336,7 @@ actor LiveTranscriptionService {
         )
     }
 
-    /// Flushes the live preview workers, then derives source-attributed speech
+    /// Cancels non-authoritative preview work, then derives source-attributed speech
     /// spans from the persisted tracks on their shared meeting clock. Preview
     /// queue pressure never affects final completeness, and a failed final
     /// span cannot collapse the rest of a source into one whole-track blob.
@@ -341,13 +358,15 @@ actor LiveTranscriptionService {
             )
         }
 
-        for source in MeetingAudioSource.allCases {
-            guard let window = windows[source], window.index != nil else { continue }
-            if let chunk = finishWindow(source: source, window: window, fullWindow: false) {
-                await enqueue(chunk)
-            }
-            windows[source] = SourceWindow(nextMinimumIndex: window.nextMinimumIndex)
+        let tailChunks = MeetingAudioSource.allCases.compactMap { source -> PendingSamples? in
+            guard let window = windows[source], window.index != nil else { return nil }
+            return finishWindow(source: source, window: window, fullWindow: false)
         }
+        await cancelPreviewWork()
+        // Preserve at most one unfinished preview window per source. This keeps
+        // short acknowledgements that fall below final VAD thresholds without
+        // draining an arbitrary backlog before final transcription.
+        for chunk in tailChunks { await enqueue(chunk) }
         await drainWorkers()
         if wasCancelled || Task.isCancelled {
             isStopping = false
@@ -432,6 +451,22 @@ actor LiveTranscriptionService {
             wavDirectory,
             fileManager: fileManager
         )
+    }
+
+    /// Preview text is opportunistic. Stop never waits for queued preview
+    /// commands before starting the authoritative final pass, and cancellation
+    /// is propagated to any in-flight VoxType child process.
+    private func cancelPreviewWork() async {
+        windows.removeAll()
+        let tasks = Array(workerTasks.values)
+        for task in tasks { task.cancel() }
+        for task in tasks { await task.value }
+        for queue in queues.values {
+            for chunk in queue { try? fileManager.removeItem(at: chunk.wavURL) }
+        }
+        queues.removeAll()
+        workerTasks.removeAll()
+        activeSources.removeAll()
     }
 
     private var previewLagState: LiveTranscriptPreviewLagState {
@@ -570,13 +605,9 @@ actor LiveTranscriptionService {
                 guard !sourceSpans.isEmpty else { continue }
                 group.addTask {
                     var batch = FinalSpanBatch()
-                    var skipRemainingSpans = false
-                    for span in sourceSpans {
+                    var consecutiveFailures = 0
+                    sourceLoop: for span in sourceSpans {
                         guard !Task.isCancelled else { break }
-                        if skipRemainingSpans {
-                            batch.failures.append(Self.skippedFinalFailure(span: span))
-                            continue
-                        }
                         switch await Self.transcribeFinalSpan(
                             span,
                             timeline: timeline,
@@ -586,9 +617,13 @@ actor LiveTranscriptionService {
                         ) {
                         case .segment(let segment):
                             batch.segments.append(segment)
+                            consecutiveFailures = 0
                         case .failure(let failure, let shouldStopSource):
                             batch.failures.append(failure)
-                            skipRemainingSpans = shouldStopSource
+                            consecutiveFailures += 1
+                            if shouldStopSource || consecutiveFailures >= 3 {
+                                break sourceLoop
+                            }
                         }
                     }
                     return batch
@@ -620,7 +655,6 @@ actor LiveTranscriptionService {
         defer { try? FileManager.default.removeItem(at: wavURL) }
 
         var finalMessage = "VoxType returned no text for a detected speech span."
-        var systemicClientErrorCount = 0
         for attempt in 0..<2 {
             do {
                 let text = try await client.transcribe(
@@ -642,8 +676,18 @@ actor LiveTranscriptionService {
                 finalMessage = CancellationError().localizedDescription
                 break
             } catch {
+                if let error = error as? VoxTypeClientError,
+                   error == .invalidTranscript {
+                    return .failure(
+                        finalFailure(span: span, error: error, isSystemic: false),
+                        stopSource: false
+                    )
+                }
                 if isSystemicFinalFailure(error) {
-                    systemicClientErrorCount += 1
+                    return .failure(
+                        finalFailure(span: span, error: error, isSystemic: true),
+                        stopSource: true
+                    )
                 }
                 finalMessage = boundedMessage(error)
             }
@@ -656,41 +700,29 @@ actor LiveTranscriptionService {
                 endMilliseconds: span.endMilliseconds,
                 message: String(finalMessage.prefix(240))
             ),
-            stopSource: systemicClientErrorCount == 2
+            stopSource: false
         )
     }
 
     private static func finalFailure(
         span: MeetingTimelineSpeechSpan,
-        error: Error
+        error: Error,
+        isSystemic: Bool = false
     ) -> LiveTranscriptFailure {
         LiveTranscriptFailure(
             source: span.source,
             phase: .final,
             startMilliseconds: span.startMilliseconds,
             endMilliseconds: span.endMilliseconds,
-            message: boundedMessage(error)
-        )
-    }
-
-    private static func skippedFinalFailure(
-        span: MeetingTimelineSpeechSpan
-    ) -> LiveTranscriptFailure {
-        LiveTranscriptFailure(
-            source: span.source,
-            phase: .final,
-            startMilliseconds: span.startMilliseconds,
-            endMilliseconds: span.endMilliseconds,
-            message: "Skipped after VoxType failed twice for an earlier source span."
+            message: boundedMessage(error),
+            isSystemic: isSystemic
         )
     }
 
     private static func isSystemicFinalFailure(_ error: Error) -> Bool {
+        if error is VoxTypeUnsupportedEngineError { return true }
         guard let error = error as? VoxTypeClientError else { return false }
-        return switch error {
-        case .timedOut(command: .transcribe), .launchFailed(command: .transcribe): true
-        default: false
-        }
+        return error != .invalidTranscript
     }
 
     private func writePreviewWAV(_ chunk: PendingSamples) throws -> URL {
@@ -757,7 +789,8 @@ actor LiveTranscriptionService {
                 phase: .final,
                 startMilliseconds: start,
                 endMilliseconds: end,
-                message: boundedMessage(error)
+                message: boundedMessage(error),
+                isSystemic: true
             )
         }
     }

@@ -341,7 +341,7 @@ struct LiveTranscriptControllerTests {
 
     @Test
     @MainActor
-    func systemicFinalTimeoutTripsPerSourceCircuitAfterTwoCalls() async throws {
+    func systemicFinalTimeoutTripsPerSourceCircuitAfterOneCall() async throws {
         let fixture = try LiveTranscriptFixture()
         let client = FakeLiveTranscriptionClient(systemicFinalFailureSources: [.system])
         let service = try LiveTranscriptionService(
@@ -361,11 +361,39 @@ struct LiveTranscriptControllerTests {
         await controller.stop(capture: try fixture.captureSummary(buffers: buffers))
 
         let finalCalls = await client.calls.filter { $0.phase == .final }
-        #expect(finalCalls.count == 2)
+        #expect(finalCalls.count == 1)
+        #expect(controller.errors.count == 1)
+        #expect(controller.utterances.count == 1)
+        #expect(controller.utterances.first?.text.hasPrefix("preview ") == true)
+    }
+
+    @Test
+    @MainActor
+    func repeatedOrdinaryFinalFailuresStopAfterThreeSpans() async throws {
+        let fixture = try LiveTranscriptFixture()
+        let client = FakeLiveTranscriptionClient(failingFinalSources: [.system])
+        let service = try LiveTranscriptionService(
+            client: client,
+            engine: .parakeet,
+            originHostTimestamp: 375,
+            wavDirectory: fixture.wavDirectory
+        )
+        let controller = LiveTranscriptController(service: service)
+        let buffers = [0.0, 2.0, 4.0, 6.0].map { offset in
+            fixture.buffer(
+                source: .system,
+                hostTimestamp: 375 + offset,
+                duration: 0.3,
+                amplitude: 0.2
+            )
+        }
+        for buffer in buffers { await controller.append(buffer) }
+
+        await controller.stop(capture: try fixture.captureSummary(buffers: buffers))
+
+        let finalCalls = await client.calls.filter { $0.phase == .final }
+        #expect(finalCalls.count == 6)
         #expect(controller.errors.count == 3)
-        #expect(controller.errors.dropFirst().allSatisfy {
-            $0.message.contains("Skipped after VoxType failed twice")
-        })
         #expect(controller.utterances.count == 1)
         #expect(controller.utterances.first?.text.hasPrefix("preview ") == true)
     }

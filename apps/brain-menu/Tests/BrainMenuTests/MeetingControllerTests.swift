@@ -254,9 +254,31 @@ struct MeetingControllerTests {
         #expect(fixture.recorder.actions == [.start(MeetingRecordingRequest(
             meetingID: try #require(fixture.controller.currentMeeting?.id),
             application: unknownApp,
-            startedAt: fixture.clock.now
+            startedAt: fixture.clock.now,
+            title: "Meeting in Huddle",
+            titleSource: .application
         ))])
         #expect(fixture.detector.trackedApplications == [unknownApp])
+    }
+
+    @Test
+    func longVoiceNoteUsesTheMeetingRecorderAndSurvivesAsItsOwnTitle() async throws {
+        let fixture = makeFixture()
+
+        await fixture.controller.startVoiceNote()
+
+        let meeting = try #require(fixture.controller.currentMeeting)
+        #expect(fixture.controller.state == .recording)
+        #expect(meeting.title == "Voice note")
+        #expect(meeting.titleSource == .manual)
+        #expect(meeting.detectedApplication == nil)
+        #expect(fixture.recorder.actions == [.start(MeetingRecordingRequest(
+            meetingID: meeting.id,
+            application: nil,
+            startedAt: fixture.clock.now,
+            title: "Voice note",
+            titleSource: .manual
+        ))])
     }
 
     @Test

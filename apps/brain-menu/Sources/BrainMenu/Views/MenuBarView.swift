@@ -94,6 +94,15 @@ struct MenuBarView: View {
                     || graph?.meeting.state == .finalizing
             )
 
+            if graph?.meeting.isCapturingAudio != true {
+                Button {
+                    Task { await graph?.startVoiceNote() }
+                } label: {
+                    Label("Record Voice Note", systemImage: "mic.circle")
+                }
+                .disabled(graph == nil || graph?.meeting.state == .finalizing)
+            }
+
             Divider()
 
             HStack {
@@ -147,7 +156,10 @@ struct MenuBarView: View {
     }
 
     private var meetingActionTitle: String {
-        graph?.meeting.isCapturingAudio == true ? "Stop Meeting" : "Start Meeting"
+        guard graph?.meeting.isCapturingAudio == true else { return "Start Meeting" }
+        return graph?.meeting.currentMeeting?.title == "Voice note"
+            ? "Stop Voice Note"
+            : "Stop Meeting"
     }
 
     private var meetingActionSymbol: String {

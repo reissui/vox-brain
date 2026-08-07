@@ -122,7 +122,8 @@ final class MeetingStore: @unchecked Sendable {
 
             let meetingURL = directory.appendingPathComponent(Self.meetingFilename)
             let transcriptURL = directory.appendingPathComponent(Self.transcriptFilename)
-            let oldMeeting = try existingData(at: meetingURL)
+            _ = try existingData(at: meetingURL)
+            let oldTranscript = try existingData(at: transcriptURL)
             if fileManager.fileExists(atPath: transcriptURL.path), !isRegularFile(transcriptURL) {
                 throw MeetingStoreError.unsafeStorePath(transcriptURL.lastPathComponent)
             }
@@ -139,13 +140,16 @@ final class MeetingStore: @unchecked Sendable {
                 throw error
             }
 
-            var replacedMeeting = false
+            var replacedTranscript = false
             do {
-                try replace(stagedMeeting, at: meetingURL, file: .meeting, injectFailure: true)
-                replacedMeeting = true
                 if let stagedTranscript {
                     try replace(stagedTranscript, at: transcriptURL, file: .transcript, injectFailure: true)
+                    replacedTranscript = true
                 }
+                // meeting.json is the visible commit marker. It is replaced
+                // last so a completed state can never point at older transcript
+                // bytes after an interrupted two-file update.
+                try replace(stagedMeeting, at: meetingURL, file: .meeting, injectFailure: true)
             } catch {
                 try? fileManager.removeItem(at: stagedMeeting)
                 if let stagedTranscript {
@@ -153,8 +157,13 @@ final class MeetingStore: @unchecked Sendable {
                 }
 
                 do {
-                    if replacedMeeting {
-                        try restore(oldMeeting, at: meetingURL, file: .meeting, in: directory)
+                    if replacedTranscript {
+                        try restore(
+                            oldTranscript,
+                            at: transcriptURL,
+                            file: .transcript,
+                            in: directory
+                        )
                     }
                     if createdDirectory {
                         try? fileManager.removeItem(at: directory)

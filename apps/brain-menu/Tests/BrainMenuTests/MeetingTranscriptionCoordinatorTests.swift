@@ -130,6 +130,33 @@ struct MeetingTranscriptionCoordinatorTests {
     }
 
     @Test
+    func isolatedInvalidSpanCompletesWithWarningAndUploadsSuccessfulUtterances() async throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        let capture = try fixture.makeCapture()
+        let client = CoordinatorPartialInvalidClient()
+        var scheduledUploads: [UUID] = []
+        let coordinator = fixture.coordinator(
+            client: client,
+            uploadScheduler: { scheduledUploads.append($0) }
+        )
+        let processing = try coordinator.stage(meeting: fixture.meeting, capture: capture)
+
+        let completed = await coordinator.complete(
+            meeting: processing,
+            capture: capture,
+            transcript: try fixture.transcript(client: client, capture: capture)
+        )
+        let stored = try fixture.store.load(fixture.meeting.id)
+
+        #expect(completed.transcriptionState == .completed)
+        #expect(completed.transcriptionErrorMessage?.contains("1 skipped audio span") == true)
+        #expect(stored.utterances.count == 1)
+        #expect(stored.utterances.first?.source == .system)
+        #expect(scheduledUploads == [fixture.meeting.id])
+        #expect(await client.microphoneCallCount == 1)
+    }
+
+    @Test
     func successfulRetryCompletesTranscriptAndCleansRawAudioWhenRetentionIsOff() async throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()
@@ -457,6 +484,65 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(await client.callCount == 0)
         #expect(try fixture.store.load(completed.id).meeting == completed)
     }
+
+    @Test
+    func launchReconciliationMakesProcessingRetryableWithoutStartingSpeechWork() async throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        let capture = try fixture.makeCapture()
+        let client = CoordinatorSuccessClient()
+        let coordinator = fixture.coordinator(client: client)
+        let processing = try coordinator.stage(meeting: fixture.meeting, capture: capture)
+        let stoppedAt = processing.startedAt.addingTimeInterval(90)
+
+        let reconciled = coordinator.reconcileInterruptedJobs(at: stoppedAt)
+        let stored = try fixture.store.load(processing.id)
+
+        #expect(reconciled.map(\.id) == [processing.id])
+        #expect(stored.meeting.lifecycleState == .completed)
+        #expect(stored.meeting.transcriptionState == .failed)
+        #expect(stored.meeting.transcriptionErrorMessage?.contains("Retry") == true)
+        #expect(stored.meeting.endedAt == processing.endedAt)
+        #expect(await client.callCount == 0)
+    }
+
+    @Test
+    func retryReconstructsManifestlessRawTracks() async throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        _ = try fixture.makeCapture()
+        var failed = fixture.meeting
+        failed.transcriptionState = .failed
+        failed.transcriptionErrorMessage = "Interrupted before the manifest was committed."
+        try fixture.store.save(failed, utterances: [])
+        try FileManager.default.removeItem(at: fixture.meetingDirectory.appendingPathComponent(
+            MeetingAudioWriter.manifestFilename
+        ))
+
+        let completed = try await fixture.coordinator(client: CoordinatorSuccessClient())
+            .retry(meetingID: failed.id)
+
+        #expect(completed.transcriptionState == .completed)
+        #expect(!(try fixture.store.load(failed.id)).utterances.isEmpty)
+    }
+
+    @Test
+    func launchReconciliationImportsSafeOrphanedRawRecording() throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        let capture = try fixture.makeCapture()
+        let system = try #require(capture.tracks.first { $0.source == .system })
+        try FileManager.default.removeItem(at: fixture.meetingDirectory.appendingPathComponent(
+            MeetingAudioWriter.manifestFilename
+        ))
+        try FileManager.default.removeItem(at: system.fileURL)
+
+        let recovered = fixture.coordinator(client: CoordinatorSuccessClient())
+            .reconcileInterruptedJobs(at: fixture.meeting.startedAt)
+        let stored = try fixture.store.load(fixture.meeting.id)
+
+        #expect(recovered.map(\.id) == [fixture.meeting.id])
+        #expect(stored.meeting.title == "Recovered recording")
+        #expect(stored.meeting.transcriptionState == .failed)
+        #expect(FileManager.default.fileExists(atPath: system.fileURL.path))
+    }
 }
 
 private final class MeetingTranscriptionCoordinatorFixture {
@@ -608,6 +694,18 @@ private actor CoordinatorSuccessClient: LiveTranscriptionClient {
         return wavURL.lastPathComponent.contains("microphone")
             ? "The microphone transcript succeeded."
             : "The computer transcript succeeded."
+    }
+}
+
+private actor CoordinatorPartialInvalidClient: LiveTranscriptionClient {
+    private(set) var microphoneCallCount = 0
+
+    func transcribe(wavURL: URL, engine: String) async throws -> String {
+        if wavURL.lastPathComponent.contains("microphone") {
+            microphoneCallCount += 1
+            throw VoxTypeClientError.invalidTranscript
+        }
+        return "The computer transcript succeeded."
     }
 }
 
