@@ -44,9 +44,11 @@ Audio never enters either capture request.
 Brain may suggest a meeting when a supported call app is active, but it never
 starts or stops recording automatically.
 
-1. Choose **Start Meeting** and confirm microphone/system meters move.
-2. Brain fails the start if no microphone frames arrive within three seconds;
-   system audio alone is insufficient.
+1. Choose **Start Meeting**, or **Record Voice Note** for a solo dictated
+   session, and confirm the microphone meter moves.
+2. Brain warns when no usable microphone signal arrives during startup and
+   keeps recording so a muted or temporarily quiet input does not discard the
+   session.
 3. Pause/resume explicitly. Dictation cannot take the microphone during a
    meeting.
 4. Choose **End & Process**. Dismissing the prompt keeps recording.
@@ -57,6 +59,10 @@ starts or stops recording automatically.
 With retention off, Brain removes local audio after final transcript
 persistence. With retention on, local reveal/export/delete controls appear,
 but the capture payload still contains no audio.
+
+Recording and transcription work is bounded. A failing speech source stops
+after repeated errors, partial transcripts remain reviewable, and interrupted
+capture or processing is surfaced as a retryable meeting at the next launch.
 
 ## Delivery behavior
 

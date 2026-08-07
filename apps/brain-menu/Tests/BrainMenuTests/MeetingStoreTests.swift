@@ -291,12 +291,12 @@ struct MeetingStoreTests {
         original.title = "Replacement"
         let replacementTranscript = [try makeUtterance(text: "Must not partially appear")]
         let failingStore = MeetingStore(rootURL: temp.url) { event in
-            if event == .beforeAtomicReplacement(.transcript) {
+            if event == .beforeAtomicReplacement(.meeting) {
                 throw InjectedMeetingStoreFailure()
             }
         }
 
-        #expect(throws: MeetingStoreError.atomicWriteFailed(.transcript)) {
+        #expect(throws: MeetingStoreError.atomicWriteFailed(.meeting)) {
             try failingStore.save(original, utterances: replacementTranscript)
         }
 

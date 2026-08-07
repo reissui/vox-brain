@@ -123,6 +123,70 @@ struct MeetingAudioCaptureTests {
     }
 
     @Test
+    func twentyMinuteCallbackStreamProducesOneBoundedManifestChunk() throws {
+        let temp = try MeetingAudioTestDirectory()
+        let meetingDirectory = temp.url.appendingPathComponent("twenty-minute")
+        let writer = try MeetingAudioWriter(meetingDirectory: meetingDirectory)
+        let callbackDuration: TimeInterval = 0.02
+        let callbackCount = Int(20 * 60 / callbackDuration)
+        let samples = [Float](repeating: 0.1, count: 320)
+
+        for index in 0..<callbackCount {
+            let timestamp = 1_000 + Double(index) * callbackDuration
+            _ = try writer.append(MeetingAudioSampleBuffer(
+                source: .microphone,
+                sourceTimestamp: timestamp,
+                hostTimestamp: timestamp,
+                sampleRate: 16_000,
+                channelCount: 1,
+                interleavedSamples: samples
+            ))
+        }
+        let summary = try writer.finalize()
+        let manifest = meetingDirectory.appendingPathComponent(
+            MeetingAudioWriter.manifestFilename
+        )
+        let manifestSize = try #require(
+            FileManager.default.attributesOfItem(atPath: manifest.path)[.size] as? NSNumber
+        ).intValue
+
+        #expect(summary.chunks.count == 1)
+        #expect(summary.chunks.first?.frameCount == callbackCount * samples.count)
+        #expect(summary.tracks.first { $0.source == .microphone }?.frameCount == 19_200_000)
+        #expect(manifestSize < 8_192)
+    }
+
+    @Test
+    func explicitDiscontinuityStartsANewCoalescedChunk() throws {
+        let temp = try MeetingAudioTestDirectory()
+        let writer = try MeetingAudioWriter(
+            meetingDirectory: temp.url.appendingPathComponent("coalesced-gaps")
+        )
+        for timestamp in [10.0, 10.01] {
+            _ = try writer.append(buffer(
+                source: .microphone,
+                hostTimestamp: timestamp,
+                samples: [Float](repeating: 0.2, count: 160)
+            ))
+        }
+        _ = try writer.recordDiscontinuity(
+            source: .microphone,
+            reason: .streamInterrupted,
+            hostTimestamp: 10.02
+        )
+        _ = try writer.append(buffer(
+            source: .microphone,
+            hostTimestamp: 10.02,
+            samples: [Float](repeating: 0.2, count: 160)
+        ))
+
+        let summary = try writer.finalize()
+
+        #expect(summary.chunks.count == 2)
+        #expect(summary.chunks.map(\.frameCount) == [320, 160])
+    }
+
+    @Test
     func levelUpdatesAreAtMostTenHertzAndReportRMSAndClipping() throws {
         let temp = try MeetingAudioTestDirectory()
         let writer = try MeetingAudioWriter(meetingDirectory: temp.url.appendingPathComponent("level"))

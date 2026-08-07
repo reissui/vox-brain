@@ -873,6 +873,10 @@ struct MeetingDetailView: View {
                     }
                     .disabled(!model.transcriptionCanRetry)
                 }
+            } else if let message = model.transcriptionMessage {
+                Label(message, systemImage: "exclamationmark.bubble")
+                    .foregroundStyle(.orange)
+                    .font(.caption)
             }
             if let error = model.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle")

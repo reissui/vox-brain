@@ -134,6 +134,7 @@ final class MeetingAudioWriter: @unchecked Sendable {
     static let sampleRate = 16_000
     static let channelCount = 1
     static let manifestFilename = "audio-capture.json"
+    private static let contiguousTimestampTolerance: TimeInterval = 0.1
 
     let meetingDirectory: URL
     let origin: Date
@@ -188,6 +189,7 @@ final class MeetingAudioWriter: @unchecked Sendable {
                 throw MeetingAudioWriterError.invalidBuffer
             }
 
+            var requiresNewChunk = state.forceNewChunkSources.remove(buffer.source) != nil
             if let prior = state.lastHostTimestamp[buffer.source], buffer.hostTimestamp < prior {
                 state.discontinuities.append(StoredDiscontinuity(
                     source: buffer.source,
@@ -196,6 +198,7 @@ final class MeetingAudioWriter: @unchecked Sendable {
                     reason: .timestampRegression,
                     detail: "Audio arrived before an earlier buffer from the same source."
                 ))
+                requiresNewChunk = true
             }
             state.lastHostTimestamp[buffer.source] = max(
                 state.lastHostTimestamp[buffer.source] ?? buffer.hostTimestamp,
@@ -216,13 +219,26 @@ final class MeetingAudioWriter: @unchecked Sendable {
             track.frameCount += Int64(normalized.count)
             state.tracks[buffer.source] = track
             state.hasNonzeroAudio = state.hasNonzeroAudio || normalized.contains { $0 != 0 }
-            state.chunks.append(StoredChunk(
+            let chunk = StoredChunk(
                 source: buffer.source,
                 hostTimestamp: buffer.hostTimestamp,
                 sourceTimestamp: buffer.sourceTimestamp,
                 frameOffset: frameOffset,
                 frameCount: normalized.count
-            ))
+            )
+            if !requiresNewChunk,
+               let index = state.lastChunkIndex[buffer.source],
+               state.chunks.indices.contains(index),
+               state.chunks[index].canCoalesce(
+                   chunk,
+                   timestampTolerance: Self.contiguousTimestampTolerance,
+                   sampleRate: Self.sampleRate
+               ) {
+                state.chunks[index].frameCount += normalized.count
+            } else {
+                state.chunks.append(chunk)
+                state.lastChunkIndex[buffer.source] = state.chunks.index(before: state.chunks.endIndex)
+            }
 
             let level: MeetingAudioLevel?
             let previousLevelTime = state.lastLevelHostTimestamp[buffer.source]
@@ -268,6 +284,7 @@ final class MeetingAudioWriter: @unchecked Sendable {
                 detail: detail
             )
             state.discontinuities.append(stored)
+            state.forceNewChunkSources.insert(source)
             return stored.publicValue(origin: state.originHostTimestamp ?? hostTimestamp)
         }
     }
@@ -293,6 +310,7 @@ final class MeetingAudioWriter: @unchecked Sendable {
                 message: message
             )
             state.failures.append(stored)
+            if let source { state.forceNewChunkSources.insert(source) }
             return stored.publicValue(origin: state.originHostTimestamp ?? hostTimestamp)
         }
     }
@@ -550,6 +568,8 @@ private struct State {
     var lastHostTimestamp: [MeetingAudioSource: TimeInterval] = [:]
     var lastLevelHostTimestamp: [MeetingAudioSource: TimeInterval] = [:]
     var chunks: [StoredChunk] = []
+    var lastChunkIndex: [MeetingAudioSource: Int] = [:]
+    var forceNewChunkSources = Set<MeetingAudioSource>()
     var discontinuities: [StoredDiscontinuity] = []
     var failures: [StoredFailure] = []
     var hasNonzeroAudio = false
@@ -567,7 +587,22 @@ private struct StoredChunk {
     let hostTimestamp: TimeInterval
     let sourceTimestamp: TimeInterval
     let frameOffset: Int64
-    let frameCount: Int
+    var frameCount: Int
+
+    func canCoalesce(
+        _ next: StoredChunk,
+        timestampTolerance: TimeInterval,
+        sampleRate: Int
+    ) -> Bool {
+        guard source == next.source,
+              frameOffset <= Int64.max - Int64(frameCount),
+              frameOffset + Int64(frameCount) == next.frameOffset,
+              frameCount <= Int.max - next.frameCount else {
+            return false
+        }
+        let expectedTimestamp = hostTimestamp + Double(frameCount) / Double(sampleRate)
+        return abs(next.hostTimestamp - expectedTimestamp) <= timestampTolerance
+    }
 
     func publicValue(origin: TimeInterval) -> MeetingAudioChunk {
         MeetingAudioChunk(

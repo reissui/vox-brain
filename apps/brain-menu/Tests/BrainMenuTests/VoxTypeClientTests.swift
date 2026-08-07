@@ -405,7 +405,8 @@ struct VoxTypeClientTests {
         assertSecureRequest(
             try #require(await runner.requests.first),
             arguments: ["--quiet", "transcribe", wav.path, "--engine", "parakeet"],
-            scheduling: .background
+            scheduling: .background,
+            timeout: VoxTypeClient.transcriptionTimeout
         )
     }
 
@@ -463,7 +464,8 @@ struct VoxTypeClientTests {
         assertSecureRequest(
             try #require(await runner.requests.first),
             arguments: ["--quiet", "transcribe", wav.path, "--engine", "parakeet"],
-            scheduling: .background
+            scheduling: .background,
+            timeout: VoxTypeClient.transcriptionTimeout
         )
     }
 
@@ -727,13 +729,14 @@ struct VoxTypeClientTests {
     private func assertSecureRequest(
         _ request: VoxTypeProcessRequest,
         arguments: [String],
-        scheduling: VoxTypeProcessScheduling = .normal
+        scheduling: VoxTypeProcessScheduling = .normal,
+        timeout: TimeInterval = VoxTypeClient.commandTimeout
     ) {
         #expect(request.executableURL == executable)
         #expect(request.arguments == arguments)
         #expect(request.currentDirectoryURL == workingDirectory)
         #expect(request.standardInput == nil)
-        #expect(request.timeout == 30)
+        #expect(request.timeout == timeout)
         #expect(request.maximumOutputBytes == 1_048_576)
         #expect(request.scheduling == scheduling)
         #expect(!request.environment.keys.contains("VOXTYPE_TOKEN"))

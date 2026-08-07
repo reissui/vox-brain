@@ -411,6 +411,86 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         return results
     }
 
+    /// Launch recovery is intentionally cheap and finite. Interrupted jobs are
+    /// made visible and retryable, but expensive speech work never resumes
+    /// without the user's explicit Retry action.
+    @discardableResult
+    func reconcileInterruptedJobs(at date: Date = Date()) -> [MeetingRecord] {
+        guard let entries = try? store.list() else { return [] }
+        var reconciled: [MeetingRecord] = []
+        for entry in entries {
+            if case .unavailable(let unavailable) = entry,
+               unavailable.reason == .missingMeeting,
+               let id = unavailable.id,
+               let recovered = recoverOrphanedRecording(id: id, fallbackDate: date) {
+                reconciled.append(recovered)
+                continue
+            }
+            guard case .available(let listed) = entry,
+                  !Self.registry.contains(key(for: listed.id)),
+                  let stored = try? store.load(listed.id) else { continue }
+            var meeting = stored.meeting
+            let interruptedCapture = [
+                MeetingLifecycleState.starting,
+                .recording,
+                .paused,
+                .stopSuggested,
+                .finalizing,
+            ].contains(meeting.lifecycleState)
+            let interruptedTranscript = [.pending, .processing]
+                .contains(meeting.transcriptionState)
+
+            if interruptedCapture || interruptedTranscript {
+                meeting.endedAt = meeting.endedAt ?? date
+                meeting.lifecycleState = interruptedCapture ? .failed : .completed
+                meeting.transcriptionState = .failed
+                meeting.transcriptionErrorMessage = interruptedCapture
+                    ? "Brain stopped before this recording finished. Its local audio was preserved; retry the transcript when ready."
+                    : "Brain stopped before this transcript finished. Retry it when ready."
+                meeting.analysisState = .notRequested
+                meeting.uploadState = .notUploaded
+                if (try? store.save(meeting, utterances: stored.utterances)) != nil {
+                    reconciled.append(meeting)
+                }
+            } else if meeting.transcriptionState == .completed,
+                      meeting.transcriptionAttemptCount > 0,
+                      meeting.uploadState == .notUploaded {
+                scheduleUpload(meeting.id)
+            }
+        }
+        return reconciled
+    }
+
+    private func recoverOrphanedRecording(
+        id: UUID,
+        fallbackDate: Date
+    ) -> MeetingRecord? {
+        let directory = store.directoryURL(for: id)
+        let attributes = try? fileManagerBox.value.attributesOfItem(atPath: directory.path)
+        let recoveredAt = attributes?[.modificationDate] as? Date ?? fallbackDate
+        let recovered = MeetingRecord(
+            id: id,
+            title: "Recovered recording",
+            titleSource: .application,
+            startedAt: recoveredAt,
+            endedAt: recoveredAt,
+            lifecycleState: .failed,
+            speechEngine: SpeechEngineID.whisper.rawValue,
+            speechModel: OnboardingController.defaultMeetingModelID,
+            transcriptionState: .failed,
+            transcriptionErrorMessage: "Brain recovered local audio from an interrupted recording. Retry the transcript when ready."
+        )
+        guard (try? Self.recoverCaptureFromRawPCM(
+            meeting: recovered,
+            directory: directory,
+            fileManager: fileManagerBox.value
+        )) != nil,
+        (try? store.save(recovered, utterances: [])) != nil else {
+            return nil
+        }
+        return recovered
+    }
+
     private nonisolated static func persistFinalResult(
         meeting: MeetingRecord,
         capture: MeetingAudioCaptureSummary,
@@ -450,8 +530,12 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 )
             }
         }
-        guard failures.isEmpty else {
-            let message = failures.prefix(3).map(Self.failureDescription).joined(separator: " ")
+        let systemicFailures = failures.filter(\.isSystemic)
+        guard systemicFailures.isEmpty && (utterances.isEmpty ? failures.isEmpty : true) else {
+            let blockingFailures = systemicFailures.isEmpty ? failures : systemicFailures
+            let message = blockingFailures.prefix(3)
+                .map(Self.failureDescription)
+                .joined(separator: " ")
             return MeetingTranscriptionPersistenceOutcome(
                 meeting: persistFailureIfCurrent(
                     meeting: currentMeeting,
@@ -465,7 +549,9 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
 
         var completed = currentMeeting
         completed.transcriptionState = .completed
-        completed.transcriptionErrorMessage = nil
+        completed.transcriptionErrorMessage = failures.isEmpty
+            ? nil
+            : "Transcript completed with \(failures.count) skipped audio span\(failures.count == 1 ? "" : "s")."
         if currentMeeting.titleSource != .manual {
             completed.title = MeetingContextTitle.make(
                 utterances: utterances,
@@ -595,12 +681,94 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         do {
             return try loadCapture(directory: directory, fileManager: fileManager)
         } catch {
-            return try recoverCaptureFromRetainedCAF(
-                meeting: meeting,
-                directory: directory,
-                fileManager: fileManager
-            )
+            do {
+                return try recoverCaptureFromRawPCM(
+                    meeting: meeting,
+                    directory: directory,
+                    fileManager: fileManager
+                )
+            } catch {
+                return try recoverCaptureFromRetainedCAF(
+                    meeting: meeting,
+                    directory: directory,
+                    fileManager: fileManager
+                )
+            }
         }
+    }
+
+    /// A process can disappear before the normal manifest commit. The writer's
+    /// compact PCM tracks are still useful; reconstructing one conservative
+    /// chunk per source makes that audio retryable without a checkpoint format.
+    private nonisolated static func recoverCaptureFromRawPCM(
+        meeting: MeetingRecord,
+        directory: URL,
+        fileManager: FileManager
+    ) throws -> MeetingAudioCaptureSummary {
+        let directory = directory.standardizedFileURL
+        guard directory.isFileURL,
+              directory.path.hasPrefix("/"),
+              directory.resolvingSymlinksInPath().standardizedFileURL == directory,
+              let directoryAttributes = try? fileManager.attributesOfItem(atPath: directory.path),
+              directoryAttributes[.type] as? FileAttributeType == .typeDirectory,
+              (directoryAttributes[.ownerAccountID] as? NSNumber)?.uint32Value == Darwin.geteuid(),
+              ((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o777) & 0o077 == 0 else {
+            throw MeetingTranscriptionCoordinatorError.unsafeAudioManifest
+        }
+
+        var tracks: [MeetingAudioTrack] = []
+        var chunks: [MeetingAudioChunk] = []
+        for source in MeetingAudioSource.allCases {
+            let url = directory.appendingPathComponent("\(source.rawValue).f32le.pcm")
+                .standardizedFileURL
+            if !fileManager.fileExists(atPath: url.path) {
+                let empty = try createOwnerOnlyFile(at: url, fileManager: fileManager)
+                try empty.close()
+            }
+            guard url.deletingLastPathComponent() == directory,
+                  url.resolvingSymlinksInPath().standardizedFileURL == url,
+                  let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+                  attributes[.type] as? FileAttributeType == .typeRegular,
+                  (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == Darwin.geteuid(),
+                  ((attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o777) & 0o077 == 0,
+                  let size = (attributes[.size] as? NSNumber)?.int64Value,
+                  size >= 0,
+                  size % Int64(MemoryLayout<Float>.size) == 0 else {
+                throw MeetingTranscriptionCoordinatorError.unsafeAudioManifest
+            }
+            let frames = size / Int64(MemoryLayout<Float>.size)
+            tracks.append(MeetingAudioTrack(
+                source: source,
+                fileURL: url,
+                sampleRate: MeetingAudioWriter.sampleRate,
+                channelCount: MeetingAudioWriter.channelCount,
+                frameCount: frames
+            ))
+            if frames > 0, frames <= Int64(Int.max) {
+                chunks.append(MeetingAudioChunk(
+                    source: source,
+                    timestampMilliseconds: 0,
+                    sourceTimestamp: 0,
+                    frameOffset: 0,
+                    frameCount: Int(frames)
+                ))
+            }
+        }
+        guard !chunks.isEmpty else {
+            throw MeetingTranscriptionCoordinatorError.unsafeAudioManifest
+        }
+        return try validatedManifest(
+            MeetingAudioCaptureSummary(
+                origin: meeting.startedAt,
+                originHostTimestamp: 0,
+                tracks: tracks,
+                chunks: chunks,
+                discontinuities: [],
+                failures: []
+            ),
+            directory: directory,
+            fileManager: fileManager
+        )
     }
 
     private nonisolated static func loadCapture(

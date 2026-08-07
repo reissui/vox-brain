@@ -282,21 +282,35 @@ private struct MeetingsWorkspaceView: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Saving meeting and finalizing transcript")
         } else {
-            Button(meetingButtonTitle) {
-                Task { await graph.toggleMeeting() }
+            HStack {
+                Button(meetingButtonTitle) {
+                    Task { await graph.toggleMeeting() }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(graph.meeting.isCapturingAudio ? .red : nil)
+                .accessibilityHint(
+                    graph.meeting.isCapturingAudio
+                        ? "Stops recording immediately, then saves the final transcript"
+                        : "Starts microphone and computer audio recording"
+                )
+
+                if !graph.meeting.isCapturingAudio {
+                    Button("Record Voice Note", systemImage: "mic.circle") {
+                        Task { await graph.startVoiceNote() }
+                    }
+                    .accessibilityHint(
+                        "Starts a long-form voice note using the reliable meeting recorder"
+                    )
+                }
             }
-            .buttonStyle(.borderedProminent)
-            .tint(graph.meeting.isCapturingAudio ? .red : nil)
-            .accessibilityHint(
-                graph.meeting.isCapturingAudio
-                    ? "Stops recording immediately, then saves the final transcript"
-                    : "Starts microphone and computer audio recording"
-            )
         }
     }
 
     private var meetingButtonTitle: String {
-        graph.meeting.isCapturingAudio ? "Stop Meeting" : "Start Meeting"
+        guard graph.meeting.isCapturingAudio else { return "Start Meeting" }
+        return graph.meeting.currentMeeting?.title == "Voice note"
+            ? "Stop Voice Note"
+            : "Stop Meeting"
     }
 
     private var meetingTitle: String {

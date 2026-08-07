@@ -410,11 +410,11 @@ struct MeetingTimelineAudioTests {
     }
 
     @Test
-    func splitsLongGroupsAtAvailableSilenceAndNeverExceedsTenSeconds() throws {
+    func splitsLongGroupsAndNeverExceedsThirtySeconds() throws {
         let fixture = try MeetingTimelineAudioFixture()
         let samples = voicedSamples(
-            durationMilliseconds: 13_000,
-            rangesMilliseconds: [0..<7_500, 7_800..<13_000]
+            durationMilliseconds: 35_000,
+            rangesMilliseconds: [0..<29_000, 29_300..<35_000]
         )
         let capture = try fixture.capture(tracks: [TrackFixture(
             source: .microphone,
@@ -424,12 +424,12 @@ struct MeetingTimelineAudioTests {
 
         let spans = try MeetingTimelineAudio(capture: capture).speechSpans()
 
+        let first = try #require(spans.first)
+        let last = try #require(spans.last)
         #expect(spans.count == 2)
-        #expect(spans[0].startMilliseconds == 0)
-        #expect(spans[0].endMilliseconds == 7_650)
-        #expect(spans[1].startMilliseconds == 7_650)
-        #expect(spans[1].endMilliseconds == 13_200)
-        #expect(spans.allSatisfy { $0.endMilliseconds - $0.startMilliseconds <= 10_000 })
+        #expect(first.startMilliseconds == 0)
+        #expect(last.endMilliseconds == 35_200)
+        #expect(spans.allSatisfy { $0.endMilliseconds - $0.startMilliseconds <= 30_000 })
     }
 }
 

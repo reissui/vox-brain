@@ -136,6 +136,7 @@ final class BrainAppControllerGraph {
     private(set) var meetingSavedNotice: MeetingSavedNotice?
 
     @ObservationIgnored private let meetingAudioOwnership: MeetingAudioOwnership
+    @ObservationIgnored private let meetingTranscription: MeetingTranscriptionCoordinator?
     @ObservationIgnored private let actionRouter: BrainAppActionRouter
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var automaticMeetingAnalysisTask: Task<Void, Never>?
@@ -151,11 +152,23 @@ final class BrainAppControllerGraph {
 
     var activity: BrainAppActivity {
         _ = activityRevision
+        if meeting.state == .completed,
+           meeting.currentMeeting?.transcriptionState == .processing {
+            return .transcribing("Transcribing saved recording")
+        }
         switch meeting.state {
         case .finalizing:
             return .transcribing("Finalizing meeting")
         case .starting, .recording, .paused, .stopSuggested:
             if let startedAt = meeting.currentMeeting?.startedAt {
+                if meeting.currentMeeting?.title == "Voice note" {
+                    return .dictation(
+                        label: meeting.state == .paused
+                            ? "Voice note paused"
+                            : "Recording voice note",
+                        startedAt: startedAt
+                    )
+                }
                 return .meeting(
                     label: meeting.state == .paused ? "Meeting paused" : "Recording meeting",
                     startedAt: startedAt
@@ -226,13 +239,16 @@ final class BrainAppControllerGraph {
         let nativeMeeting: MeetingController
         if let meeting {
             nativeMeeting = meeting
+            meetingTranscription = nil
         } else {
-            nativeMeeting = Self.makeMeetingController(
+            let built = Self.makeMeetingController(
                 audioRetention: audioRetention,
                 ownership: ownership,
                 microphoneSelections: microphoneSelections,
                 microphoneInventory: microphoneInventory
             )
+            nativeMeeting = built.controller
+            meetingTranscription = built.transcription
         }
         self.meeting = nativeMeeting
         meetingHotkey = MeetingHotkeyController(
@@ -296,6 +312,9 @@ final class BrainAppControllerGraph {
         dictation.startMonitoring()
         observeMeetingAudio()
         syncActivityClock()
+        if meetingTranscription?.reconcileInterruptedJobs().isEmpty == false {
+            meetings.load()
+        }
         Task {
             await onboarding.refresh()
             await speechSettings.refresh()
@@ -331,10 +350,19 @@ final class BrainAppControllerGraph {
         case .idle, .completed, .failed, .startSuggested:
             meetingSavedNotice = nil
             if meeting.state == .completed { meeting.resetCompletedMeeting() }
+            if meeting.state == .failed { meeting.resetFailedMeeting() }
             await meeting.startRecording(application: nil)
         case .finalizing:
             return
         }
+    }
+
+    func startVoiceNote() async {
+        guard [.idle, .completed, .failed, .startSuggested].contains(meeting.state) else { return }
+        meetingSavedNotice = nil
+        if meeting.state == .completed { meeting.resetCompletedMeeting() }
+        if meeting.state == .failed { meeting.resetFailedMeeting() }
+        await meeting.startVoiceNote()
     }
 
     func dismissMeetingSavedNotice() {
@@ -511,7 +539,10 @@ final class BrainAppControllerGraph {
         ownership: MeetingAudioOwnership,
         microphoneSelections: MeetingMicrophoneSelectionStore,
         microphoneInventory: any MeetingMicrophoneInventoryProviding
-    ) -> MeetingController {
+    ) -> (
+        controller: MeetingController,
+        transcription: MeetingTranscriptionCoordinator
+    ) {
         let store = MeetingStore()
         let audioMonitor = MeetingAudioMonitor()
         let uploader = MeetingUploadController(meetingStore: store)
@@ -530,13 +561,14 @@ final class BrainAppControllerGraph {
             speechEngine: SpeechEngineID.whisper.rawValue,
             speechModel: OnboardingController.defaultMeetingModelID
         )
-        return MeetingController(
+        let controller = MeetingController(
             detector: MeetingDetector(),
             recorder: recorder,
             speechEngine: SpeechEngineID.whisper.rawValue,
             speechModel: OnboardingController.defaultMeetingModelID,
             audioMonitor: audioMonitor
         )
+        return (controller, transcription)
     }
 
     private static func makeSpeechSettings(
@@ -632,6 +664,52 @@ private enum BrainNativeMeetingRecorderError: LocalizedError {
     }
 }
 
+private actor BrainMeetingAudioWritePipeline {
+    private let writer: MeetingAudioWriter
+
+    init(writer: MeetingAudioWriter) {
+        self.writer = writer
+    }
+
+    func append(_ buffer: MeetingAudioSampleBuffer) throws -> MeetingAudioAppendResult {
+        try writer.append(buffer)
+    }
+
+    func recordDiscontinuity(
+        source: MeetingAudioSource,
+        reason: MeetingAudioDiscontinuityReason,
+        sourceTimestamp: TimeInterval? = nil,
+        hostTimestamp: TimeInterval,
+        detail: String? = nil
+    ) throws {
+        _ = try writer.recordDiscontinuity(
+            source: source,
+            reason: reason,
+            sourceTimestamp: sourceTimestamp,
+            hostTimestamp: hostTimestamp,
+            detail: detail
+        )
+    }
+
+    func recordFailure(
+        source: MeetingAudioSource?,
+        reason: MeetingAudioFailureReason,
+        hostTimestamp: TimeInterval,
+        message: String
+    ) throws {
+        _ = try writer.recordFailure(
+            source: source,
+            reason: reason,
+            hostTimestamp: hostTimestamp,
+            message: message
+        )
+    }
+
+    func finalize() throws -> MeetingAudioCaptureSummary {
+        try writer.finalize()
+    }
+}
+
 @MainActor
 private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicrophoneSwitching {
     private let store: MeetingStore
@@ -645,6 +723,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
 
     private var request: MeetingRecordingRequest?
     private var writer: MeetingAudioWriter?
+    private var writePipeline: BrainMeetingAudioWritePipeline?
     private var transcript: LiveTranscriptController?
     private var systemAudio: (any MeetingAudioSourceCapturing)?
     private var microphone: (any MeetingAudioSourceCapturing)?
@@ -721,8 +800,30 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             meetingDirectory: store.directoryURL(for: request.meetingID),
             origin: request.startedAt
         )
+        try store.save(
+            record(
+                for: request,
+                endedAt: nil,
+                lifecycleState: .starting,
+                transcriptionState: .pending,
+                errorMessage: nil
+            ),
+            utterances: []
+        )
         let systemAudio = ScreenCaptureKitMeetingAudioSource()
-        let inventory = try microphoneInventory.snapshot()
+        let inventory: MeetingMicrophoneInventorySnapshot
+        do {
+            inventory = try microphoneInventory.snapshot()
+        } catch {
+            await transcript.cancel()
+            try? persistRetryableRecord(
+                for: request,
+                at: Date(),
+                lifecycleState: .failed,
+                message: "Meeting capture could not inspect the available microphones: \(error.localizedDescription)"
+            )
+            throw error
+        }
         let microphoneSelection = resolvedMicrophoneSelection(
             microphoneSelections.selection,
             inventory: inventory
@@ -742,6 +843,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         let gate = BrainMeetingEventGate()
         self.request = request
         self.writer = writer
+        writePipeline = BrainMeetingAudioWritePipeline(writer: writer)
         self.transcript = transcript
         self.systemAudio = systemAudio
         self.microphone = microphone
@@ -791,6 +893,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
                 throw BrainNativeMeetingRecorderError.startupFailure(startupFailureMessage)
             }
             sessionIsReady = true
+            try persistActiveRecord(lifecycleState: .recording)
             startMicrophoneInventoryRefresh()
         } catch {
             gate.stopAccepting()
@@ -800,6 +903,12 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             await systemAudio.stop()
             await gate.waitUntilIdle()
             await transcript.cancel()
+            try? persistRetryableRecord(
+                for: request,
+                at: Date(),
+                lifecycleState: .failed,
+                message: "Meeting capture could not start: \(error.localizedDescription)"
+            )
             clearSession()
             ownership.set(false)
             throw error
@@ -808,6 +917,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
 
     func pause(at date: Date) async throws {
         eventGate?.setPaused(true)
+        try persistActiveRecord(lifecycleState: .paused)
     }
 
     func selectMicrophone(_ selection: MeetingMicrophoneSelection) async {
@@ -914,7 +1024,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             microphone = candidate
             currentMicrophoneSelection = selection
             microphoneSelections.select(selection)
-            _ = try? writer?.recordDiscontinuity(
+            try? await writePipeline?.recordDiscontinuity(
                 source: .microphone,
                 reason: .deviceChanged,
                 hostTimestamp: ProcessInfo.processInfo.systemUptime,
@@ -983,10 +1093,11 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
 
     func resume(with discontinuity: MeetingRecordingDiscontinuity) async throws {
         eventGate?.setPaused(false)
+        try persistActiveRecord(lifecycleState: .recording)
     }
 
     func stop(at date: Date) async throws -> MeetingRecord? {
-        guard let writer, let request, let transcript else { return nil }
+        guard let writePipeline, let request, let transcript else { return nil }
         defer {
             clearSession()
             ownership.set(false)
@@ -997,11 +1108,22 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         await microphone?.stop()
         await systemAudio?.stop()
         await eventGate?.waitUntilIdle()
-        let summary = try writer.finalize()
+        let summary: MeetingAudioCaptureSummary
+        do {
+            summary = try await writePipeline.finalize()
+        } catch {
+            try? persistRetryableRecord(
+                for: request,
+                at: date,
+                lifecycleState: .failed,
+                message: "Brain could not finalize this recording: \(error.localizedDescription)"
+            )
+            throw error
+        }
         let completed = MeetingRecord(
             id: request.meetingID,
-            title: request.application.map { "Meeting in \($0.displayName)" } ?? "Meeting",
-            titleSource: .application,
+            title: request.title,
+            titleSource: request.titleSource,
             detectedApplication: request.application?.displayName,
             startedAt: request.startedAt,
             endedAt: date,
@@ -1009,7 +1131,18 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             speechEngine: speechEngine,
             speechModel: speechModel
         )
-        let processing = try transcription.stage(meeting: completed, capture: summary)
+        let processing: MeetingRecord
+        do {
+            processing = try transcription.stage(meeting: completed, capture: summary)
+        } catch {
+            try? persistRetryableRecord(
+                for: request,
+                at: date,
+                lifecycleState: .completed,
+                message: "The recording was saved, but transcription could not start: \(error.localizedDescription)"
+            )
+            throw error
+        }
         let completion = postProcessingHandler
         Task { [transcription, store] in
             let result = await transcription.complete(
@@ -1031,8 +1164,13 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         await systemAudio?.stop()
         await eventGate?.waitUntilIdle()
         await transcript?.cancel()
-        // Releasing the writer closes its private tracks without creating the
-        // normal final manifest or deleting partial recovery data.
+        if let request {
+            _ = await finalizeAsRetryable(
+                request: request,
+                at: date,
+                message: "Recording reached Brain's eight-hour safety limit. Retry the saved transcript when ready."
+            )
+        }
         clearSession()
         ownership.set(false)
     }
@@ -1150,7 +1288,19 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
                 case .discontinuity: break
                 }
             }
-            guard gate.beginEvent() else { return }
+            switch gate.beginEvent() {
+            case .accepted:
+                break
+            case .ignored:
+                return
+            case .overloaded:
+                let message = "Meeting audio processing fell behind and was stopped before memory could grow without bound."
+                gate.recordStartupFailure(message)
+                Task { @MainActor [weak self] in
+                    self?.scheduleRuntimeFailure(message)
+                }
+                return
+            }
             Task { @MainActor [weak self, gate] in
                 defer { gate.endEvent() }
                 await self?.receive(event, source: source)
@@ -1162,11 +1312,11 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         _ event: MeetingAudioSourceEvent,
         source: MeetingAudioSource
     ) async {
-        guard let writer else { return }
+        guard let writePipeline else { return }
         switch event {
         case .samples(let buffer):
             guard buffer.source == source else {
-                _ = try? writer.recordFailure(
+                try? await writePipeline.recordFailure(
                     source: source,
                     reason: .sourceFailed,
                     hostTimestamp: buffer.hostTimestamp,
@@ -1175,14 +1325,14 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
                 return
             }
             do {
-                let result = try writer.append(buffer)
+                let result = try await writePipeline.append(buffer)
                 if let level = result.level { audioMonitor.receive(level) }
                 await transcript?.append(buffer)
             } catch {
                 eventGate?.recordStartupFailure(
                     "Meeting audio could not be written: \(error.localizedDescription)"
                 )
-                _ = try? writer.recordFailure(
+                try? await writePipeline.recordFailure(
                     source: source,
                     reason: .writerFailed,
                     hostTimestamp: buffer.hostTimestamp,
@@ -1196,7 +1346,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             }
 
         case .discontinuity(let value):
-            _ = try? writer.recordDiscontinuity(
+            try? await writePipeline.recordDiscontinuity(
                 source: source,
                 reason: value.reason,
                 sourceTimestamp: value.sourceTimestamp,
@@ -1220,13 +1370,13 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
                 }
                 return
             }
-            _ = try? writer.recordDiscontinuity(
+            try? await writePipeline.recordDiscontinuity(
                 source: source,
                 reason: value.reason == .permissionRevoked ? .permissionRevoked : .sourceFailure,
                 hostTimestamp: value.hostTimestamp,
                 detail: value.message
             )
-            _ = try? writer.recordFailure(
+            try? await writePipeline.recordFailure(
                 source: source,
                 reason: value.reason,
                 hostTimestamp: value.hostTimestamp,
@@ -1249,7 +1399,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
     }
 
     private func stopForRuntimeFailure(_ message: String) async {
-        guard writer != nil else { return }
+        guard writer != nil, let request else { return }
         eventGate?.stopAccepting()
         let activeSwitch = beginSessionShutdown()
         await activeSwitch?.value
@@ -1257,9 +1407,102 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         await systemAudio?.stop()
         await eventGate?.waitUntilIdle()
         await transcript?.cancel()
+        _ = await finalizeAsRetryable(
+            request: request,
+            at: Date(),
+            message: "Recording stopped after an audio failure: \(message)"
+        )
         clearSession()
         ownership.set(false)
         runtimeFailureHandler?(message)
+    }
+
+    private func persistActiveRecord(lifecycleState: MeetingLifecycleState) throws {
+        guard let request else { return }
+        let existing = try? store.load(request.meetingID)
+        try store.save(
+            record(
+                for: request,
+                endedAt: nil,
+                lifecycleState: lifecycleState,
+                transcriptionState: .pending,
+                errorMessage: nil
+            ),
+            utterances: existing?.utterances ?? []
+        )
+    }
+
+    @discardableResult
+    private func finalizeAsRetryable(
+        request: MeetingRecordingRequest,
+        at date: Date,
+        message: String
+    ) async -> MeetingRecord {
+        let finalizationError: String?
+        do {
+            guard let writePipeline else {
+                throw MeetingAudioWriterError.fileWriteFailed
+            }
+            _ = try await writePipeline.finalize()
+            finalizationError = nil
+        } catch {
+            finalizationError = error.localizedDescription
+        }
+        let combinedMessage = [message, finalizationError]
+            .compactMap { $0 }
+            .joined(separator: " ")
+        let lifecycleState: MeetingLifecycleState = finalizationError == nil ? .completed : .failed
+        let failed = record(
+            for: request,
+            endedAt: date,
+            lifecycleState: lifecycleState,
+            transcriptionState: .failed,
+            errorMessage: combinedMessage
+        )
+        let utterances = (try? store.load(request.meetingID).utterances) ?? []
+        try? store.save(failed, utterances: utterances)
+        return failed
+    }
+
+    private func persistRetryableRecord(
+        for request: MeetingRecordingRequest,
+        at date: Date,
+        lifecycleState: MeetingLifecycleState,
+        message: String
+    ) throws {
+        let utterances = (try? store.load(request.meetingID).utterances) ?? []
+        try store.save(
+            record(
+                for: request,
+                endedAt: date,
+                lifecycleState: lifecycleState,
+                transcriptionState: .failed,
+                errorMessage: message
+            ),
+            utterances: utterances
+        )
+    }
+
+    private func record(
+        for request: MeetingRecordingRequest,
+        endedAt: Date?,
+        lifecycleState: MeetingLifecycleState,
+        transcriptionState: MeetingTranscriptionState,
+        errorMessage: String?
+    ) -> MeetingRecord {
+        MeetingRecord(
+            id: request.meetingID,
+            title: request.title,
+            titleSource: request.titleSource,
+            detectedApplication: request.application?.displayName,
+            startedAt: request.startedAt,
+            endedAt: endedAt,
+            lifecycleState: lifecycleState,
+            speechEngine: speechEngine,
+            speechModel: speechModel,
+            transcriptionState: transcriptionState,
+            transcriptionErrorMessage: errorMessage
+        )
     }
 
     private func isCurrentMicrophoneSwitch(
@@ -1292,6 +1535,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         activeMicrophoneSwitchID = nil
         request = nil
         writer = nil
+        writePipeline = nil
         transcript = nil
         systemAudio = nil
         microphone = nil
@@ -1305,6 +1549,13 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
 /// Bounds source callbacks during pause/stop and gives finalization one exact
 /// point at which every admitted buffer has reached the writer/transcriber.
 private final class BrainMeetingEventGate: @unchecked Sendable {
+    enum Admission {
+        case accepted
+        case ignored
+        case overloaded
+    }
+
+    private static let maximumPendingEvents = 512
     private let lock = NSLock()
     private var accepting = true
     private var paused = false
@@ -1322,11 +1573,15 @@ private final class BrainMeetingEventGate: @unchecked Sendable {
         }
     }
 
-    func beginEvent() -> Bool {
+    func beginEvent() -> Admission {
         lock.withLock {
-            guard accepting, !paused else { return false }
+            guard accepting, !paused else { return .ignored }
+            guard pendingEvents < Self.maximumPendingEvents else {
+                accepting = false
+                return .overloaded
+            }
             pendingEvents += 1
-            return true
+            return .accepted
         }
     }
 

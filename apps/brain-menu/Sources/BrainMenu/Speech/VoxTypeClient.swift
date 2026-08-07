@@ -644,6 +644,7 @@ private struct UnavailableVoxTypeStatusProcessRunner: VoxTypeStatusProcessRunnin
 struct VoxTypeClient: VoxTypeControlling, VoxTypeStatusObserving, Sendable {
     static let maximumOutputBytes = 1 * 1_024 * 1_024
     static let commandTimeout: TimeInterval = 30
+    static let transcriptionTimeout: TimeInterval = 120
     static let modelInstallTimeout: TimeInterval = 60 * 60
     static let maximumStatusFieldBytes = 256
     static let maximumStatusLineBytes = 16 * 1_024
@@ -818,6 +819,7 @@ struct VoxTypeClient: VoxTypeControlling, VoxTypeStatusObserving, Sendable {
                 "--engine",
                 engine,
             ],
+            timeout: Self.transcriptionTimeout,
             requestedEngine: engine
         )
         guard let transcript = Self.transcriptText(from: output.stdout) else {

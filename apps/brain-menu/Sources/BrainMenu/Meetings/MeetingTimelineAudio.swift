@@ -66,7 +66,7 @@ struct MeetingTimelineAudio: Sendable {
     // the other source, which is handled as an explicit interruption below.
     private static let maximumMergeSilenceFrames = 1_200 * sampleRate / 1_000
     private static let paddingFrames = 200 * sampleRate / 1_000
-    private static let maximumSpanFrames = 10 * sampleRate
+    private static let maximumSpanFrames = 30 * sampleRate
     private static let minimumPreferredSplitFrames = 3 * sampleRate
     private static let maximumRoundingOverlapFrames = 2 * sampleRate / 1_000
     private static let voiceRMSThreshold: Float = 0.005

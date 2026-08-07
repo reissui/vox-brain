@@ -27,6 +27,8 @@ struct MeetingRecordingRequest: Equatable, Sendable {
     let meetingID: UUID
     let application: MeetingDetectedApplication?
     let startedAt: Date
+    let title: String
+    let titleSource: MeetingTitleSource
 }
 
 enum MeetingRecordingDiscontinuity: Equatable, Sendable {
@@ -264,11 +266,34 @@ final class MeetingController {
     /// Manual Start is accepted from idle for any application (or no detected
     /// application at all); recognition is deliberately not a prerequisite.
     func startRecording(application: MeetingDetectedApplication?) async {
+        await startRecording(
+            application: application,
+            title: Self.defaultTitle(application: application),
+            titleSource: .application
+        )
+    }
+
+    /// Long-form solo speech deliberately uses the meeting reliability path.
+    /// It is a presentation mode, not a second recorder or transcript store.
+    func startVoiceNote() async {
+        await startRecording(
+            application: nil,
+            title: "Voice note",
+            titleSource: .manual
+        )
+    }
+
+    private func startRecording(
+        application: MeetingDetectedApplication?,
+        title: String,
+        titleSource: MeetingTitleSource
+    ) async {
         guard state == .idle || state == .startSuggested else { return }
 
         let date = clock.now
         let meeting = MeetingRecord(
-            title: Self.defaultTitle(application: application),
+            title: title,
+            titleSource: titleSource,
             detectedApplication: application?.displayName,
             startedAt: date,
             lifecycleState: .starting,
@@ -293,7 +318,9 @@ final class MeetingController {
             try await recorder.start(MeetingRecordingRequest(
                 meetingID: meeting.id,
                 application: application,
-                startedAt: date
+                startedAt: date,
+                title: title,
+                titleSource: titleSource
             ))
             detector.beginTracking(application)
             if stopRequestedWhileStarting {
@@ -397,6 +424,22 @@ final class MeetingController {
     /// remains available until the caller has dealt with its recovery data.
     func resetCompletedMeeting() {
         guard state == .completed else { return }
+        currentMeeting = nil
+        startSuggestion = nil
+        stopSuggestion = nil
+        failure = nil
+        endSuggestionsSuppressedUntil = nil
+        pausedAt = nil
+        stopRequestedWhileStarting = false
+        detector.reset()
+        state = .idle
+        transitionHandler?()
+    }
+
+    /// A failed in-memory session must not block the next recording. Its durable
+    /// record remains in Meetings for recovery and explicit transcript retry.
+    func resetFailedMeeting() {
+        guard state == .failed else { return }
         currentMeeting = nil
         startSuggestion = nil
         stopSuggestion = nil
