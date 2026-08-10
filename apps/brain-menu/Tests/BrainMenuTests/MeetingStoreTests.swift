@@ -531,6 +531,70 @@ struct MeetingStoreTests {
     }
 
     @Test
+    func audioDeletionCannotBeUndoneByALateSave() throws {
+        let temp = try StoreTestDirectory()
+        let store = MeetingStore(rootURL: temp.url)
+        let record = makeRecord(title: "Delete audio permanently", startedAt: 100)
+        try store.save(record, utterances: [])
+        var deleted = record
+        deleted.audioRetentionState = .deleted
+        try store.save(deleted, utterances: [])
+
+        #expect(throws: MeetingStoreError.audioDeletionCommitted(record.id)) {
+            try MeetingStore(rootURL: temp.url).save(record, utterances: [])
+        }
+        #expect(try store.load(record.id).meeting == deleted)
+    }
+
+    @Test
+    func wholeItemDeletionRejectsLateSidecarWrites() throws {
+        let temp = try StoreTestDirectory()
+        let store = MeetingStore(rootURL: temp.url)
+        let record = makeRecord(title: "Delete sidecars permanently", startedAt: 100)
+        try store.save(record, utterances: [])
+        try store.delete(record.id, confirmed: true)
+
+        let revision = MeetingUploadRevision(
+            meetingID: record.id,
+            revision: 1,
+            transcriptDigest: "digest",
+            idempotencyKey: UUID(),
+            request: BrainCaptureRequest(type: .transcript, transcript: "Transcript"),
+            state: .failed,
+            captureID: nil,
+            retryable: true,
+            retryMode: .post,
+            lastError: "Retry later",
+            updatedAt: Date(timeIntervalSince1970: 100)
+        )
+        let analysis = StoredMeetingAnalysis(
+            analysis: MeetingAnalysis(
+                title: "Analysis",
+                summary: "Summary",
+                topics: [],
+                decisions: [],
+                actionItems: [],
+                risks: [],
+                quotes: [],
+                speakerSuggestions: [],
+                followUp: MeetingFollowUpDraft(subject: "Follow up", body: "Body")
+            ),
+            speakerState: SpeakerEditingState()
+        )
+
+        #expect(throws: MeetingUploadStoreError.writeFailed) {
+            try FileMeetingUploadStore(rootURL: temp.url).save(revision)
+        }
+        #expect(throws: MeetingAnalysisStoreError.atomicWriteFailed) {
+            try FileMeetingAnalysisStore(rootURL: temp.url).replace(
+                analysis,
+                meetingID: record.id
+            )
+        }
+        #expect(!FileManager.default.fileExists(atPath: store.directoryURL(for: record.id).path))
+    }
+
+    @Test
     func deletionAtomicallyHidesTheMeetingBeforeCleanup() throws {
         let temp = try StoreTestDirectory()
         let record = makeRecord(title: "Delete durably", startedAt: 100)

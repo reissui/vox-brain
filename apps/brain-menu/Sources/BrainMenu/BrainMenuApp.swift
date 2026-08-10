@@ -1167,6 +1167,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         await microphone?.stop()
         await systemAudio?.stop()
         await eventGate?.waitUntilIdle()
+        await transcript.waitForPendingPreview()
         let summary: MeetingAudioCaptureSummary
         do {
             summary = try await writePipeline.finalize()
@@ -1193,7 +1194,11 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         )
         let processing: MeetingRecord
         do {
-            processing = try transcription.stage(meeting: completed, capture: summary)
+            processing = try transcription.stage(
+                meeting: completed,
+                capture: summary,
+                utterances: transcript.utterances
+            )
         } catch {
             try? persistRetryableRecord(
                 for: request,

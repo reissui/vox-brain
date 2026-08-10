@@ -40,6 +40,7 @@ enum MeetingListEntry: Equatable, Sendable {
 
 enum MeetingStoreError: Error, Equatable, LocalizedError, Sendable {
     case meetingNotFound(UUID)
+    case audioDeletionCommitted(UUID)
     case deletionRequiresConfirmation
     case unsafeStorePath(String)
     case corruptMeeting(UUID, UnavailableMeetingReason)
@@ -50,6 +51,8 @@ enum MeetingStoreError: Error, Equatable, LocalizedError, Sendable {
         switch self {
         case .meetingNotFound:
             "The meeting is not available on this Mac."
+        case .audioDeletionCommitted:
+            "The meeting audio was deleted and cannot be restored by a stale update."
         case .deletionRequiresConfirmation:
             "Deleting a meeting requires explicit confirmation."
         case .unsafeStorePath:
@@ -97,14 +100,10 @@ final class MeetingStore: @unchecked Sendable {
     }
 
     func save(_ meeting: MeetingRecord, utterances: [MeetingUtterance]) throws {
-        try Self.mutationRegistry.withSave(
-            rootPath: rootURL.path,
+        try Self.withDeletionPrecedence(
+            rootURL: rootURL,
             meetingID: meeting.id,
-            durableDeletionExists: {
-                self.withLock {
-                    self.hasDeletionTombstoneLocked(for: meeting.id)
-                }
-            }
+            fileManager: fileManager
         ) {
             try withLock {
                 try saveLocked(meeting, utterances: utterances)
@@ -116,69 +115,75 @@ final class MeetingStore: @unchecked Sendable {
         _ meeting: MeetingRecord,
         utterances: [MeetingUtterance]
     ) throws {
-            let meetingData = try Self.encoder().encode(meeting)
-            let transcriptData = try Self.encoder().encode(
-                utterances.sorted(by: MeetingUtterance.chronologicallyPrecedes)
-            )
-            try ensureDirectory(rootURL, permissions: 0o700)
+        try ensureDirectory(rootURL, permissions: 0o700)
 
-            let directory = directoryURL(for: meeting.id)
-            let createdDirectory = !fileManager.fileExists(atPath: directory.path)
-            try ensureDirectory(directory, permissions: 0o700)
+        let directory = directoryURL(for: meeting.id)
+        let createdDirectory = !fileManager.fileExists(atPath: directory.path)
+        try ensureDirectory(directory, permissions: 0o700)
 
-            let meetingURL = directory.appendingPathComponent(Self.meetingFilename)
-            let transcriptURL = directory.appendingPathComponent(Self.transcriptFilename)
-            _ = try existingData(at: meetingURL)
-            let oldTranscript = try existingData(at: transcriptURL)
-            if fileManager.fileExists(atPath: transcriptURL.path), !isRegularFile(transcriptURL) {
-                throw MeetingStoreError.unsafeStorePath(transcriptURL.lastPathComponent)
+        let meetingURL = directory.appendingPathComponent(Self.meetingFilename)
+        let transcriptURL = directory.appendingPathComponent(Self.transcriptFilename)
+        let oldMeeting = try existingData(at: meetingURL)
+        if meeting.audioRetentionState != .deleted,
+           let oldMeeting,
+           (try? Self.decoder().decode(MeetingRecord.self, from: oldMeeting))?
+            .audioRetentionState == .deleted {
+            throw MeetingStoreError.audioDeletionCommitted(meeting.id)
+        }
+        let oldTranscript = try existingData(at: transcriptURL)
+        if fileManager.fileExists(atPath: transcriptURL.path), !isRegularFile(transcriptURL) {
+            throw MeetingStoreError.unsafeStorePath(transcriptURL.lastPathComponent)
+        }
+        let meetingData = try Self.encoder().encode(meeting)
+        let transcriptData = try Self.encoder().encode(
+            utterances.sorted(by: MeetingUtterance.chronologicallyPrecedes)
+        )
+        let stagedMeeting = try stage(meetingData, for: .meeting, in: directory)
+        var stagedTranscript: URL?
+
+        do {
+            stagedTranscript = try stage(transcriptData, for: .transcript, in: directory)
+        } catch {
+            try? fileManager.removeItem(at: stagedMeeting)
+            if createdDirectory {
+                try? fileManager.removeItem(at: directory)
             }
-            let stagedMeeting = try stage(meetingData, for: .meeting, in: directory)
-            var stagedTranscript: URL?
+            throw error
+        }
+
+        var replacedTranscript = false
+        do {
+            if let stagedTranscript {
+                try replace(stagedTranscript, at: transcriptURL, file: .transcript, injectFailure: true)
+                replacedTranscript = true
+            }
+            // meeting.json is the visible commit marker. It is replaced
+            // last so a completed state can never point at older transcript
+            // bytes after an interrupted two-file update.
+            try replace(stagedMeeting, at: meetingURL, file: .meeting, injectFailure: true)
+        } catch {
+            try? fileManager.removeItem(at: stagedMeeting)
+            if let stagedTranscript {
+                try? fileManager.removeItem(at: stagedTranscript)
+            }
 
             do {
-                stagedTranscript = try stage(transcriptData, for: .transcript, in: directory)
-            } catch {
-                try? fileManager.removeItem(at: stagedMeeting)
+                if replacedTranscript {
+                    try restore(
+                        oldTranscript,
+                        at: transcriptURL,
+                        file: .transcript,
+                        in: directory
+                    )
+                }
                 if createdDirectory {
                     try? fileManager.removeItem(at: directory)
                 }
-                throw error
-            }
-
-            var replacedTranscript = false
-            do {
-                if let stagedTranscript {
-                    try replace(stagedTranscript, at: transcriptURL, file: .transcript, injectFailure: true)
-                    replacedTranscript = true
-                }
-                // meeting.json is the visible commit marker. It is replaced
-                // last so a completed state can never point at older transcript
-                // bytes after an interrupted two-file update.
-                try replace(stagedMeeting, at: meetingURL, file: .meeting, injectFailure: true)
             } catch {
-                try? fileManager.removeItem(at: stagedMeeting)
-                if let stagedTranscript {
-                    try? fileManager.removeItem(at: stagedTranscript)
-                }
-
-                do {
-                    if replacedTranscript {
-                        try restore(
-                            oldTranscript,
-                            at: transcriptURL,
-                            file: .transcript,
-                            in: directory
-                        )
-                    }
-                    if createdDirectory {
-                        try? fileManager.removeItem(at: directory)
-                    }
-                } catch {
-                    throw MeetingStoreError.rollbackFailed
-                }
-                throw error
+                throw MeetingStoreError.rollbackFailed
             }
+            throw error
+        }
     }
 
     func save(meeting: MeetingRecord, transcript: [MeetingUtterance]) throws {
@@ -525,7 +530,32 @@ final class MeetingStore: @unchecked Sendable {
         )
     }
 
-    private func hasDeletionTombstoneLocked(for id: UUID) -> Bool {
+    static func withDeletionPrecedence<T>(
+        rootURL: URL,
+        meetingID: UUID,
+        fileManager: FileManager,
+        _ operation: () throws -> T
+    ) throws -> T {
+        let rootURL = rootURL.standardizedFileURL
+        return try mutationRegistry.withSave(
+            rootPath: rootURL.path,
+            meetingID: meetingID,
+            durableDeletionExists: {
+                hasDeletionTombstone(
+                    for: meetingID,
+                    rootURL: rootURL,
+                    fileManager: fileManager
+                )
+            },
+            operation
+        )
+    }
+
+    private static func hasDeletionTombstone(
+        for id: UUID,
+        rootURL: URL,
+        fileManager: FileManager
+    ) -> Bool {
         guard fileManager.fileExists(atPath: rootURL.path),
               let children = try? fileManager.contentsOfDirectory(
                   at: rootURL,
@@ -535,7 +565,7 @@ final class MeetingStore: @unchecked Sendable {
         }
         return children.contains { child in
             Self.deletionTombstoneMeetingID(child.lastPathComponent) == id
-                && isDirectoryOrSymbolicLink(child)
+                && isDirectoryOrSymbolicLink(child, fileManager: fileManager)
         }
     }
 
@@ -556,6 +586,13 @@ final class MeetingStore: @unchecked Sendable {
     }
 
     private func isDirectoryOrSymbolicLink(_ url: URL) -> Bool {
+        Self.isDirectoryOrSymbolicLink(url, fileManager: fileManager)
+    }
+
+    private static func isDirectoryOrSymbolicLink(
+        _ url: URL,
+        fileManager: FileManager
+    ) -> Bool {
         guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
               let type = attributes[.type] as? FileAttributeType else {
             return false

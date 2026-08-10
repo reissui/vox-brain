@@ -247,6 +247,7 @@ final class AudioRetentionController: @unchecked Sendable {
 
     func hasDeletableRecording(for meetingID: UUID) -> Bool {
         guard let stored = try? store.load(meetingID),
+              Self.allowsAudioDeletion(stored.meeting.lifecycleState),
               stored.meeting.audioRetentionState != .deleted,
               let artifacts = try? audioArtifacts(
                   in: store.directoryURL(for: meetingID).standardizedFileURL
@@ -267,6 +268,10 @@ final class AudioRetentionController: @unchecked Sendable {
             stored = try store.load(meetingID)
         } catch {
             throw AudioRetentionControllerError.retainedAudioUnavailable
+        }
+        guard Self.allowsAudioDeletion(stored.meeting.lifecycleState),
+              stored.meeting.audioRetentionState != .deleted else {
+            throw AudioRetentionControllerError.deleteFailed
         }
         let directory = store.directoryURL(for: meetingID).standardizedFileURL
         let quarantine = directory.appendingPathComponent(
@@ -311,21 +316,19 @@ final class AudioRetentionController: @unchecked Sendable {
             throw AudioRetentionControllerError.deleteFailed
         }
 
-        do {
-            try fileSystem.removeItem(at: quarantine)
-            return updated
-        } catch {
-            restore(moves, quarantine: quarantine)
-            if moves.contains(where: { fileSystem.fileExists(at: $0.original) }) {
-                try? store.save(stored.meeting, utterances: stored.utterances)
-            }
-            throw AudioRetentionControllerError.deleteFailed
-        }
+        try? fileSystem.removeItem(at: quarantine)
+        return updated
     }
 
     @discardableResult
     func reconcileInterruptedDeletions() -> [MeetingRecord] {
         guard let entries = try? store.list() else { return [] }
+        return reconcileInterruptedDeletions(in: entries)
+    }
+
+    func reconcileInterruptedDeletions(
+        in entries: [MeetingListEntry]
+    ) -> [MeetingRecord] {
         var reconciled: [MeetingRecord] = []
 
         for entry in entries {
@@ -648,6 +651,10 @@ final class AudioRetentionController: @unchecked Sendable {
                 ?? "Transcription stopped because its local audio was deleted."
         }
         return updated
+    }
+
+    private static func allowsAudioDeletion(_ lifecycleState: MeetingLifecycleState) -> Bool {
+        lifecycleState == .completed || lifecycleState == .failed
     }
 
     private func restore(_ moves: [AudioArtifactMove], quarantine: URL) {

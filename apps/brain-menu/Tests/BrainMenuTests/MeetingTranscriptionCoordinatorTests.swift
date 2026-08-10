@@ -7,13 +7,24 @@ import Testing
 @MainActor
 struct MeetingTranscriptionCoordinatorTests {
     @Test
-    func stagePersistsProcessingAttemptWithEmptyTranscriptAndPreservesAudio() throws {
+    func stagePersistsProcessingAttemptWithPartialTranscriptAndPreservesAudio() throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()
         let rawURLs = fixture.rawURLs(for: capture)
+        let partialTranscript = [try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 800,
+            text: "Keep this live preview.",
+            baseSpeakerID: "you"
+        )]
 
         let processing = try fixture.coordinator(client: CoordinatorSuccessClient())
-            .stage(meeting: fixture.meeting, capture: capture)
+            .stage(
+                meeting: fixture.meeting,
+                capture: capture,
+                utterances: partialTranscript
+            )
         let stored = try fixture.store.load(fixture.meeting.id)
 
         #expect(processing.lifecycleState == .completed)
@@ -23,10 +34,43 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(processing.analysisState == .notRequested)
         #expect(processing.uploadState == .notUploaded)
         #expect(stored.meeting == processing)
-        #expect(stored.utterances.isEmpty)
+        #expect(stored.utterances == partialTranscript)
         #expect(rawURLs.allSatisfy {
             FileManager.default.fileExists(atPath: $0.path)
         })
+    }
+
+    @Test
+    func cancellationPreservesStagedPartialTranscript() async throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        let capture = try fixture.makeCapture()
+        let partialTranscript = [try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 800,
+            text: "Keep this preview after cancellation.",
+            baseSpeakerID: "you"
+        )]
+        let client = CoordinatorCancellableClient()
+        let coordinator = fixture.coordinator(client: client)
+        let processing = try coordinator.stage(
+            meeting: fixture.meeting,
+            capture: capture,
+            utterances: partialTranscript
+        )
+        let completion = Task {
+            await coordinator.complete(
+                meeting: processing,
+                capture: capture,
+                transcript: try fixture.transcript(client: client, capture: capture)
+            )
+        }
+        await client.waitUntilCallCount(atLeast: 1)
+
+        try await coordinator.cancelAndWaitForDeletion(meetingID: processing.id) {}
+        _ = try await completion.value
+
+        #expect(try fixture.store.load(processing.id).utterances == partialTranscript)
     }
 
     @Test
@@ -778,6 +822,21 @@ struct MeetingTranscriptionCoordinatorTests {
     }
 
     @Test
+    func launchReconciliationReusesThePrimaryStoreListing() throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        try fixture.store.save(fixture.meeting, utterances: [])
+        let countingStore = CoordinatorCountingRetentionStore(store: fixture.store)
+        let retention = AudioRetentionController(store: countingStore)
+
+        _ = fixture.coordinator(
+            client: CoordinatorSuccessClient(),
+            retention: retention
+        ).reconcileInterruptedJobs(at: fixture.meeting.startedAt)
+
+        #expect(countingStore.listCallCount == 0)
+    }
+
+    @Test
     func launchReconciliationPreservesDurableRetryMetadata() throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let transcript = [try MeetingUtterance(
@@ -1351,6 +1410,32 @@ private actor CoordinatorCancellableClient: LiveTranscriptionClient {
         await withCheckedContinuation { continuation in
             countContinuations.append((expected, continuation))
         }
+    }
+}
+
+private final class CoordinatorCountingRetentionStore: AudioRetentionMeetingStoring {
+    let store: MeetingStore
+    private(set) var listCallCount = 0
+
+    init(store: MeetingStore) {
+        self.store = store
+    }
+
+    func save(_ meeting: MeetingRecord, utterances: [MeetingUtterance]) throws {
+        try store.save(meeting, utterances: utterances)
+    }
+
+    func load(_ id: UUID) throws -> StoredMeeting {
+        try store.load(id)
+    }
+
+    func list() throws -> [MeetingListEntry] {
+        listCallCount += 1
+        return try store.list()
+    }
+
+    func directoryURL(for id: UUID) -> URL {
+        store.directoryURL(for: id)
     }
 }
 

@@ -87,7 +87,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     /// `audio-capture.json` into a saved item that waits for explicit retry.
     func stage(
         meeting: MeetingRecord,
-        capture: MeetingAudioCaptureSummary
+        capture: MeetingAudioCaptureSummary,
+        utterances: [MeetingUtterance] = []
     ) throws -> MeetingRecord {
         guard !Self.registry.contains(key(for: meeting.id)) else {
             throw MeetingTranscriptionCoordinatorError.transcriptionAlreadyRunning
@@ -100,7 +101,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         processing.transcriptionErrorMessage = nil
         processing.analysisState = .notRequested
         processing.uploadState = .notUploaded
-        try store.save(processing, utterances: [])
+        try store.save(processing, utterances: utterances)
         return processing
     }
 
@@ -475,8 +476,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     /// before its idempotent upload was scheduled. Failed transcription attempts
     /// still wait for the user's explicit Retry action.
     func resumeInterruptedJobs() async -> [MeetingRecord] {
-        var results = retention.reconcileInterruptedDeletions()
-        guard let entries = try? store.list() else { return results }
+        guard let entries = try? store.list() else { return [] }
+        var results = retention.reconcileInterruptedDeletions(in: entries)
         for entry in entries {
             guard case .available(let meeting) = entry,
                   !retention.hasInterruptedDeletion(for: meeting.id) else { continue }
@@ -498,8 +499,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     /// without the user's explicit Retry action.
     @discardableResult
     func reconcileInterruptedJobs(at date: Date = Date()) -> [MeetingRecord] {
-        var reconciled = retention.reconcileInterruptedDeletions()
-        guard let entries = try? store.list() else { return reconciled }
+        guard let entries = try? store.list() else { return [] }
+        var reconciled = retention.reconcileInterruptedDeletions(in: entries)
         for entry in entries {
             if let meetingID = entry.id,
                retention.hasInterruptedDeletion(for: meetingID) {

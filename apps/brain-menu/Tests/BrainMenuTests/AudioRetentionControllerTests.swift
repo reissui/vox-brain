@@ -352,13 +352,13 @@ struct AudioRetentionControllerTests {
 
         let deleteFailure = FailingAudioRetentionFileSystem(failure: .deleteRemoval)
         let deleteFailingController = fixture.controller(fileSystem: deleteFailure)
-        #expect(throws: AudioRetentionControllerError.deleteFailed) {
-            try deleteFailingController.deleteRecording(for: fixture.meeting.id, confirmed: true)
-        }
-        #expect(FileManager.default.fileExists(atPath: fixture.recordingURL.path))
-        #expect(try fixture.store.load(fixture.meeting.id).meeting.retainedAudio != nil)
-
-        let deleted = try controller.deleteRecording(for: fixture.meeting.id, confirmed: true)
+        let deleted = try deleteFailingController.deleteRecording(
+            for: fixture.meeting.id,
+            confirmed: true
+        )
+        #expect(deleted.audioRetentionState == .deleted)
+        #expect(deleteFailingController.hasInterruptedDeletion(for: fixture.meeting.id))
+        _ = controller.reconcileInterruptedDeletions()
         #expect(deleted.retainedAudio == nil)
         #expect(!FileManager.default.fileExists(atPath: fixture.recordingURL.path))
         for url in [microphoneURL, manifestURL, backupURL, recoveryURL, wavURL] {
@@ -544,6 +544,26 @@ struct AudioRetentionControllerTests {
             !FileManager.default.fileExists(atPath: $0.fileURL.path)
         })
         #expect(!controller.hasDeletableRecording(for: failed.id))
+    }
+
+    @Test
+    func activeRecordingAudioCannotBeDeleted() throws {
+        let fixture = try AudioRetentionFixture()
+        let controller = fixture.controller()
+        let capture = try fixture.makeAudio()
+        var active = fixture.meeting
+        active.endedAt = nil
+        active.lifecycleState = .recording
+        try fixture.store.save(active, utterances: fixture.utterances)
+
+        #expect(!controller.hasDeletableRecording(for: active.id))
+        #expect(throws: AudioRetentionControllerError.deleteFailed) {
+            try controller.deleteRecording(for: active.id, confirmed: true)
+        }
+        #expect(capture.tracks.allSatisfy {
+            FileManager.default.fileExists(atPath: $0.fileURL.path)
+        })
+        #expect(try fixture.store.load(active.id).meeting == active)
     }
 
     @Test
