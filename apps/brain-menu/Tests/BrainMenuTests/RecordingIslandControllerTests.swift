@@ -411,7 +411,8 @@ struct RecordingIslandControllerTests {
             sleep: { _ in }
         )
         let record = MeetingRecord(
-            title: "Voice note",
+            title: "Field note",
+            recordingKind: .voiceNote,
             titleSource: .manual,
             startedAt: Date(timeIntervalSince1970: 1_000),
             endedAt: Date(timeIntervalSince1970: 1_100),
@@ -430,7 +431,7 @@ struct RecordingIslandControllerTests {
         #expect(saved.phaseTitle == "Voice note added")
         #expect(saved.audioStatusText.contains("Voice Notes"))
         #expect(announcements == [
-            "Voice note added. Voice note. It is now at the top of Voice Notes.",
+            "Voice note added. Field note. It is now at the top of Voice Notes.",
         ])
     }
 

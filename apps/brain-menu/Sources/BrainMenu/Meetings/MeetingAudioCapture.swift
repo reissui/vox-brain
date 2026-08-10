@@ -1002,7 +1002,8 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
     private var terminalFailureReported = false
     private var tapIsInstalled = false
     private var engineStartCompleted = false
-    private var configurationRecoveryPending = false
+    private var lifecycleGeneration: UInt64 = 0
+    private var configurationRecoveryTask: Task<Void, Never>?
 
     init(
         selection: MeetingMicrophoneSelection = .systemDefault,
@@ -1035,13 +1036,18 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
         guard authorizationStatus() == .authorized else {
             throw NativeMeetingAudioSourceError.permissionDenied
         }
-        lock.withLock {
+        let (generation, previousRecoveryTask) = lock.withLock {
+            lifecycleGeneration &+= 1
+            let previousRecoveryTask = configurationRecoveryTask
+            configurationRecoveryTask = nil
             self.eventHandler = eventHandler
             lastSampleRate = nil
             terminalFailureReported = false
             engineStartCompleted = false
-            configurationRecoveryPending = false
+            return (lifecycleGeneration, previousRecoveryTask)
         }
+        previousRecoveryTask?.cancel()
+        await previousRecoveryTask?.value
 
         let environmentObservers = MeetingAudioEnvironmentObservers(
             source: .microphone,
@@ -1061,7 +1067,8 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
         }
 
         do {
-            try await startEngineWithRetries()
+            try await startEngineWithRetries(generation: generation)
+            try ensureSessionIsActive(generation)
             lock.withLock { engineStartCompleted = true }
             scheduleConfigurationRecoveryIfNeeded()
             let timer = makeHealthTimer()
@@ -1077,7 +1084,6 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
                 configurationObserver = nil
                 healthTimer = nil
                 engineStartCompleted = false
-                configurationRecoveryPending = false
             }
             if let nativeError = error as? NativeMeetingAudioSourceError {
                 throw nativeError
@@ -1088,22 +1094,30 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
 
     func stop() async {
         let values = lock.withLock {
-            let values = (configurationObserver, environmentObservers, healthTimer, tapIsInstalled)
+            lifecycleGeneration &+= 1
+            let values = (
+                configurationObserver,
+                environmentObservers,
+                healthTimer,
+                configurationRecoveryTask
+            )
             configurationObserver = nil
             environmentObservers = nil
             healthTimer = nil
+            configurationRecoveryTask = nil
             eventHandler = nil
             lastSampleRate = nil
-            tapIsInstalled = false
             engineStartCompleted = false
-            configurationRecoveryPending = false
             return values
         }
         values.2?.cancel()
         if let observer = values.0 { NotificationCenter.default.removeObserver(observer) }
         values.1?.stop()
+        values.3?.cancel()
+        await values.3?.value
         engineLifecycleLock.withLock {
-            if values.3 { engine.removeTap() }
+            if tapIsInstalled { engine.removeTap() }
+            tapIsInstalled = false
             engine.stop()
         }
     }
@@ -1142,7 +1156,9 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
     }
 
     private func configurationChanged() {
-        let rate = (try? engine.validatedInputFormat().sampleRate) ?? 0
+        let rate = (try? engineLifecycleLock.withLock {
+            try engine.validatedInputFormat().sampleRate
+        }) ?? 0
         let priorRate = lock.withLock { () -> Double? in
             defer { lastSampleRate = rate }
             return lastSampleRate
@@ -1166,7 +1182,7 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
     /// Core Audio applies CurrentDevice asynchronously. Require several
     /// consecutive native-format observations before constructing the graph so
     /// a transient 44.1 kHz value cannot race a device settling at 48 kHz.
-    private func settledInputFormat() async throws -> AVAudioFormat {
+    private func settledInputFormat(generation: UInt64) async throws -> AVAudioFormat {
         let maximumAttempts = 20
         let requiredStableSamples = 4
         var priorSampleRate: Double?
@@ -1174,7 +1190,10 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
         var stableSamples = 0
 
         for attempt in 0..<maximumAttempts {
-            let format = try engine.validatedInputFormat()
+            try ensureSessionIsActive(generation)
+            let format = try engineLifecycleLock.withLock {
+                try engine.validatedInputFormat()
+            }
             if let priorSampleRate,
                let priorChannelCount,
                abs(priorSampleRate - format.sampleRate) < 0.001,
@@ -1194,31 +1213,43 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
     }
 
     private func scheduleConfigurationRecoveryIfNeeded() {
-        let shouldRecover = lock.withLock { () -> Bool in
+        let engineIsRunning = engineLifecycleLock.withLock { engine.isRunning }
+        lock.withLock {
             guard engineStartCompleted,
-                  !configurationRecoveryPending,
-                  !engine.isRunning else { return false }
-            configurationRecoveryPending = true
-            return true
+                  configurationRecoveryTask == nil,
+                  !engineIsRunning else { return }
+            let generation = lifecycleGeneration
+            configurationRecoveryTask = Task { [weak self] in
+                await self?.recoverFromConfigurationChange(generation: generation)
+            }
         }
-        guard shouldRecover else { return }
-        Task { [weak self] in await self?.recoverFromConfigurationChange() }
     }
 
-    private func recoverFromConfigurationChange() async {
+    private func recoverFromConfigurationChange(generation: UInt64) async {
         defer {
-            lock.withLock { configurationRecoveryPending = false }
+            lock.withLock {
+                if lifecycleGeneration == generation {
+                    configurationRecoveryTask = nil
+                }
+            }
         }
-        guard lock.withLock({ engineStartCompleted }) else { return }
+        guard lock.withLock({
+            lifecycleGeneration == generation && engineStartCompleted
+        }) else { return }
         do {
+            try ensureSessionIsActive(generation)
             resetEngineGraph()
-            try await startEngineWithRetries()
-            if !lock.withLock({ engineStartCompleted }) {
-                resetEngineGraph()
-            } else if !engine.isRunning {
+            try await startEngineWithRetries(generation: generation)
+            try ensureSessionIsActive(generation)
+            if !engineLifecycleLock.withLock({ engine.isRunning }) {
                 throw NativeMeetingAudioSourceError.startFailed
             }
+        } catch is CancellationError {
+            return
         } catch {
+            guard lock.withLock({
+                lifecycleGeneration == generation && engineStartCompleted
+            }) else { return }
             reportTerminalFailure(
                 reason: .interrupted,
                 message: "The microphone stream could not recover after its device format changed."
@@ -1226,10 +1257,12 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
         }
     }
 
-    private func startEngineWithRetries() async throws {
+    private func startEngineWithRetries(generation: UInt64) async throws {
         for attempt in 0...Self.startupRetryDelays.count {
+            try ensureSessionIsActive(generation)
             if attempt > 0 {
                 try await Task.sleep(for: Self.startupRetryDelays[attempt - 1])
+                try ensureSessionIsActive(generation)
             }
 
             do {
@@ -1239,41 +1272,55 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
                 }
                 let format: AVAudioFormat
                 if case .device = selection {
-                    try engine.selectDevice(deviceID)
-                    format = try await settledInputFormat()
+                    try engineLifecycleLock.withLock {
+                        try engine.selectDevice(deviceID)
+                    }
+                    format = try await settledInputFormat(generation: generation)
                 } else {
-                    format = try engine.validatedInputFormat()
+                    format = try engineLifecycleLock.withLock {
+                        try engine.validatedInputFormat()
+                    }
                 }
+                try ensureSessionIsActive(generation)
                 lock.withLock { lastSampleRate = format.sampleRate }
 
                 // A non-nil tap format is applied to the input bus. External
                 // devices can finish switching sample rates asynchronously,
                 // which makes a just-read explicit format stale. Follow the
                 // native bus format and rebuild the tap for every retry.
-                engine.installTap(format: nil) { [weak self] buffer, time in
-                    self?.receive(buffer: buffer, time: time)
-                }
-                lock.withLock { tapIsInstalled = true }
                 try engineLifecycleLock.withLock {
+                    try ensureSessionIsActive(generation)
+                    engine.installTap(format: nil) { [weak self] buffer, time in
+                        self?.receive(buffer: buffer, time: time)
+                    }
+                    tapIsInstalled = true
                     engine.prepare()
                     try engine.start()
                 }
                 return
             } catch {
                 resetEngineGraph()
+                if error is CancellationError { throw error }
+                try ensureSessionIsActive(generation)
                 guard attempt < Self.startupRetryDelays.count else { throw error }
             }
         }
     }
 
     private func resetEngineGraph() {
-        let shouldRemoveTap = lock.withLock { () -> Bool in
-            defer { tapIsInstalled = false }
-            return tapIsInstalled
-        }
         engineLifecycleLock.withLock {
-            if shouldRemoveTap { engine.removeTap() }
-            if shouldRemoveTap || engine.isRunning { engine.stop() }
+            if tapIsInstalled { engine.removeTap() }
+            if tapIsInstalled || engine.isRunning { engine.stop() }
+            tapIsInstalled = false
+        }
+    }
+
+    private func ensureSessionIsActive(_ generation: UInt64) throws {
+        guard !Task.isCancelled,
+              lock.withLock({
+                  lifecycleGeneration == generation && eventHandler != nil
+              }) else {
+            throw CancellationError()
         }
     }
 

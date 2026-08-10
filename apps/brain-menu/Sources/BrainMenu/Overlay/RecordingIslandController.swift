@@ -149,6 +149,7 @@ struct RecordingIslandMicrophonePresentation: Equatable, Sendable {
 struct RecordingIslandMeetingPresentation: Equatable, Sendable {
     var phase: RecordingIslandMeetingPhase
     var title: String
+    var recordingKind: MeetingRecordingKind
     var applicationName: String?
     var startedAt: Date
     var microphone: RecordingIslandMicrophonePresentation?
@@ -161,14 +162,15 @@ struct RecordingIslandMeetingPresentation: Equatable, Sendable {
     var latestTranscriptLine: String?
     var guidance: String?
 
-    var isVoiceNote: Bool {
-        title.trimmingCharacters(in: .whitespacesAndNewlines)
-            .caseInsensitiveCompare("Voice note") == .orderedSame
-            && applicationName == nil
-    }
+    var isVoiceNote: Bool { recordingKind == .voiceNote }
 
     var phaseTitle: String {
-        phase == .saved && isVoiceNote ? "Voice note added" : phase.title
+        guard isVoiceNote else { return phase.title }
+        return switch phase {
+        case .stopSuggested: "Finish this voice note?"
+        case .saved: "Voice note added"
+        default: phase.title
+        }
     }
 
     var libraryName: String { isVoiceNote ? "Voice Notes" : "Meetings" }
@@ -206,6 +208,7 @@ struct RecordingIslandMeetingPresentation: Equatable, Sendable {
     init(
         phase: RecordingIslandMeetingPhase,
         title: String,
+        recordingKind: MeetingRecordingKind = .meeting,
         applicationName: String? = nil,
         startedAt: Date,
         microphone: RecordingIslandMicrophonePresentation? = nil,
@@ -220,6 +223,7 @@ struct RecordingIslandMeetingPresentation: Equatable, Sendable {
     ) {
         self.phase = phase
         self.title = title
+        self.recordingKind = recordingKind
         self.applicationName = applicationName
         self.startedAt = startedAt
         self.microphone = microphone
@@ -308,7 +312,12 @@ enum RecordingIslandPresentation: Equatable, Sendable {
                 return "\(item) added. \(presentation.title). It is now at the top of \(presentation.libraryName)."
             }
             let item = presentation.isVoiceNote ? "Voice note" : "Meeting"
-            return "\(item) \(presentation.phase.title.lowercased())."
+            if presentation.phase == .stopSuggested {
+                return presentation.isVoiceNote
+                    ? "Voice note may be ready to finish."
+                    : "Meeting may have ended."
+            }
+            return "\(item) \(presentation.phaseTitle.lowercased())."
         }
     }
 }
@@ -557,6 +566,7 @@ final class RecordingIslandController: NSObject, NSWindowDelegate {
         present(.meeting(RecordingIslandMeetingPresentation(
             phase: phase,
             title: record?.title ?? previous?.title ?? "Meeting",
+            recordingKind: record?.recordingKind ?? previous?.recordingKind ?? .meeting,
             applicationName: record?.detectedApplication ?? previous?.applicationName,
             startedAt: record?.startedAt ?? previous?.startedAt ?? now,
             microphone: microphone ?? previous?.microphone,
@@ -575,6 +585,7 @@ final class RecordingIslandController: NSObject, NSWindowDelegate {
         present(.meeting(RecordingIslandMeetingPresentation(
             phase: .saved,
             title: meeting.title,
+            recordingKind: meeting.recordingKind,
             applicationName: meeting.detectedApplication,
             startedAt: meeting.startedAt
         )))

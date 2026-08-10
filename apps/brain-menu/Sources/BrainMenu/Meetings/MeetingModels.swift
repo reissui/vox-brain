@@ -41,6 +41,11 @@ enum MeetingTitleSource: String, Codable, CaseIterable, Sendable {
     case manual
 }
 
+enum MeetingRecordingKind: String, Codable, CaseIterable, Sendable {
+    case meeting
+    case voiceNote
+}
+
 struct RetainedAudioMetadata: Codable, Equatable, Sendable {
     var filename: String
     var format: String
@@ -66,6 +71,7 @@ struct RetainedAudioMetadata: Codable, Equatable, Sendable {
 struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     var id: UUID
     var title: String
+    var recordingKind: MeetingRecordingKind
     var titleSource: MeetingTitleSource
     var detectedApplication: String?
     var startedAt: Date
@@ -82,12 +88,13 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     var isUnread: Bool
 
     var isVoiceNote: Bool {
-        titleSource == .manual && detectedApplication == nil
+        recordingKind == .voiceNote
     }
 
     init(
         id: UUID = UUID(),
         title: String,
+        recordingKind: MeetingRecordingKind = .meeting,
         titleSource: MeetingTitleSource? = nil,
         detectedApplication: String? = nil,
         startedAt: Date,
@@ -105,6 +112,7 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     ) {
         self.id = id
         self.title = title
+        self.recordingKind = recordingKind
         self.titleSource = titleSource ?? Self.inferredTitleSource(for: title)
         self.detectedApplication = detectedApplication
         self.startedAt = startedAt
@@ -125,6 +133,7 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id
         case title
+        case recordingKind
         case titleSource
         case detectedApplication
         case startedAt
@@ -144,15 +153,25 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let title = try container.decode(String.self, forKey: .title)
+        let titleSource = try container.decodeIfPresent(MeetingTitleSource.self, forKey: .titleSource)
+            ?? Self.inferredTitleSource(for: title)
+        let detectedApplication = try container.decodeIfPresent(
+            String.self,
+            forKey: .detectedApplication
+        )
         self.init(
             id: try container.decode(UUID.self, forKey: .id),
             title: title,
-            titleSource: try container.decodeIfPresent(MeetingTitleSource.self, forKey: .titleSource)
-                ?? Self.inferredTitleSource(for: title),
-            detectedApplication: try container.decodeIfPresent(
-                String.self,
-                forKey: .detectedApplication
+            recordingKind: try container.decodeIfPresent(
+                MeetingRecordingKind.self,
+                forKey: .recordingKind
+            ) ?? Self.inferredLegacyRecordingKind(
+                title: title,
+                titleSource: titleSource,
+                detectedApplication: detectedApplication
             ),
+            titleSource: titleSource,
+            detectedApplication: detectedApplication,
             startedAt: try container.decode(Date.self, forKey: .startedAt),
             endedAt: try container.decodeIfPresent(Date.self, forKey: .endedAt),
             lifecycleState: try container.decode(MeetingLifecycleState.self, forKey: .lifecycleState),
@@ -187,6 +206,18 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         return normalized == "meeting" || normalized.hasPrefix("meeting in ")
             ? .application
             : .manual
+    }
+
+    private static func inferredLegacyRecordingKind(
+        title: String,
+        titleSource: MeetingTitleSource,
+        detectedApplication: String?
+    ) -> MeetingRecordingKind {
+        guard titleSource == .manual, detectedApplication == nil else { return .meeting }
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.caseInsensitiveCompare("Voice note") == .orderedSame
+            ? .voiceNote
+            : .meeting
     }
 }
 

@@ -79,6 +79,7 @@ struct MeetingViewsTests {
         let voiceNote = MeetingRecord(
             id: voiceNoteID,
             title: "Voice note",
+            recordingKind: .voiceNote,
             titleSource: .manual,
             startedAt: Date(timeIntervalSince1970: 2_000),
             endedAt: Date(timeIntervalSince1970: 2_060),
@@ -206,6 +207,14 @@ struct MeetingViewsTests {
         )
         #expect(microphoneOnly.isReceivingAudio)
         #expect(microphoneOnly.audioStatusText == "Receiving microphone audio…")
+
+        let voiceNoteStop = RecordingIslandMeetingPresentation(
+            phase: .stopSuggested,
+            title: "Field note",
+            recordingKind: .voiceNote,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+        #expect(voiceNoteStop.phaseTitle == "Finish this voice note?")
     }
 
     @Test
@@ -512,6 +521,47 @@ struct MeetingViewsTests {
             return
         }
         #expect(message.contains("test failure"))
+    }
+
+    @Test
+    func voiceNoteDetailKeepsItsKindThroughRenameValidationAndDeletion() async throws {
+        let id = UUID()
+        let record = MeetingRecord(
+            id: id,
+            title: "Field note",
+            recordingKind: .voiceNote,
+            titleSource: .manual,
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            endedAt: Date(timeIntervalSince1970: 1_060),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+        let store = MemoryMeetingViewStore(values: [
+            id: StoredMeeting(meeting: record, utterances: []),
+        ])
+        let controller = MeetingDetailController(
+            meetingID: id,
+            store: store,
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: MeetingDetailAudioSpy(meeting: record),
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: MeetingClipboardSpy()
+        )
+
+        controller.load()
+        await controller.perform(.saveTitle("Renamed thought"))
+        #expect(store.values[id]?.meeting.recordingKind == .voiceNote)
+        #expect(controller.viewModel.isVoiceNote)
+
+        await controller.perform(.saveTitle("   "))
+        #expect(controller.viewModel.errorMessage == "A voice note title cannot be empty.")
+
+        await controller.perform(.requestMeetingDeletion)
+        await controller.perform(.confirmMeetingDeletion)
+        #expect(controller.state == .deleted)
+        #expect(controller.viewModel.isVoiceNote)
     }
 
     @Test

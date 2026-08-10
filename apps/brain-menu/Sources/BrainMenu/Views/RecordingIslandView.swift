@@ -155,7 +155,7 @@ struct RecordingIslandView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityLabel(
                         value.latestTranscriptLine?.nilIfBlank == nil
-                            ? "Meeting audio status"
+                            ? (value.isVoiceNote ? "Voice note audio status" : "Meeting audio status")
                             : "Latest transcript"
                     )
                     .accessibilityValue(value.latestTranscriptLine?.nilIfBlank ?? value.audioStatusText)
@@ -165,7 +165,9 @@ struct RecordingIslandView: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityLabel("Meeting audio warning. \(guidance)")
+                        .accessibilityLabel(
+                            "\(value.isVoiceNote ? "Voice note" : "Meeting") audio warning. \(guidance)"
+                        )
                 }
 
                 if let message = value.microphone?.switchErrorMessage {

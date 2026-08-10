@@ -535,6 +535,42 @@ struct MeetingAudioCaptureTests {
     }
 
     @Test
+    func stoppingDuringConfigurationRecoveryCancelsDelayedRestart() async throws {
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 48_000,
+            channels: 2
+        ))
+        let engine = RecordingMicrophoneAudioEngine(format: format)
+        let source = AVAudioEngineMeetingAudioSource(
+            selection: .systemDefault,
+            inventory: FixedMicrophoneInventory(devices: [
+                MeetingMicrophoneDevice(
+                    id: "default-microphone",
+                    name: "Default microphone",
+                    coreAudioID: 42,
+                    isSystemDefault: true
+                ),
+            ], defaultDeviceUID: "default-microphone"),
+            engine: engine,
+            authorizationStatus: { .authorized }
+        )
+        try await source.start { _ in }
+
+        engine.failNextStarts(1)
+        engine.interruptForConfigurationChange()
+        for _ in 0..<50 where engine.startCount < 2 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(engine.startCount == 2)
+
+        await source.stop()
+        try await Task.sleep(for: .milliseconds(180))
+
+        #expect(engine.startCount == 2)
+        #expect(!engine.isRunning)
+    }
+
+    @Test
     func pinnedSelectionPersistsAndDoesNotFallBackWhenDeviceDisappears() throws {
         let suite = "MeetingAudioCaptureTests.Selection.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
@@ -837,6 +873,10 @@ private final class RecordingMicrophoneAudioEngine: MeetingMicrophoneAudioEngine
     func stop() {
         isRunning = false
         stopCount += 1
+    }
+
+    func failNextStarts(_ count: Int) {
+        transientStartFailureCount = count
     }
 
     func interruptForConfigurationChange() {

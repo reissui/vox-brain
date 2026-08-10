@@ -25,6 +25,7 @@ struct MeetingStopSuggestion: Equatable, Sendable {
 
 struct MeetingRecordingRequest: Equatable, Sendable {
     let meetingID: UUID
+    let recordingKind: MeetingRecordingKind
     let application: MeetingDetectedApplication?
     let startedAt: Date
     let title: String
@@ -269,6 +270,7 @@ final class MeetingController {
         await startRecording(
             application: application,
             title: Self.defaultTitle(application: application),
+            recordingKind: .meeting,
             titleSource: .application
         )
     }
@@ -279,6 +281,7 @@ final class MeetingController {
         await startRecording(
             application: nil,
             title: "Voice note",
+            recordingKind: .voiceNote,
             titleSource: .manual
         )
     }
@@ -286,6 +289,7 @@ final class MeetingController {
     private func startRecording(
         application: MeetingDetectedApplication?,
         title: String,
+        recordingKind: MeetingRecordingKind,
         titleSource: MeetingTitleSource
     ) async {
         guard state == .idle || state == .startSuggested else { return }
@@ -293,6 +297,7 @@ final class MeetingController {
         let date = clock.now
         let meeting = MeetingRecord(
             title: title,
+            recordingKind: recordingKind,
             titleSource: titleSource,
             detectedApplication: application?.displayName,
             startedAt: date,
@@ -317,6 +322,7 @@ final class MeetingController {
             }
             try await recorder.start(MeetingRecordingRequest(
                 meetingID: meeting.id,
+                recordingKind: recordingKind,
                 application: application,
                 startedAt: date,
                 title: title,

@@ -88,12 +88,10 @@ struct BrainMenuBarPresentation: Equatable, Sendable {
 struct MeetingSavedNotice: Equatable, Identifiable, Sendable {
     let meetingID: UUID
     let title: String
+    let recordingKind: MeetingRecordingKind
 
     var id: UUID { meetingID }
-    var isVoiceNote: Bool {
-        title.trimmingCharacters(in: .whitespacesAndNewlines)
-            .caseInsensitiveCompare("Voice note") == .orderedSame
-    }
+    var isVoiceNote: Bool { recordingKind == .voiceNote }
     var message: String {
         isVoiceNote
             ? "Added to Voice Notes. It is now at the top of the list."
@@ -485,7 +483,8 @@ final class BrainAppControllerGraph {
                 if meetingSavedNotice?.meetingID == meetingID {
                     meetingSavedNotice = MeetingSavedNotice(
                         meetingID: meetingID,
-                        title: record.title
+                        title: record.title,
+                        recordingKind: record.recordingKind
                     )
                 }
                 startAutomaticMeetingAnalysisIfReady(for: record)
@@ -500,7 +499,8 @@ final class BrainAppControllerGraph {
         meetings.load()
         meetingSavedNotice = MeetingSavedNotice(
             meetingID: record.id,
-            title: record.title
+            title: record.title,
+            recordingKind: record.recordingKind
         )
         recordingIsland.meetingSaved(record)
         startAutomaticMeetingAnalysisIfReady(for: record)
@@ -536,7 +536,8 @@ final class BrainAppControllerGraph {
             if self.meetingSavedNotice?.meetingID == merged.id {
                 self.meetingSavedNotice = MeetingSavedNotice(
                     meetingID: merged.id,
-                    title: merged.title
+                    title: merged.title,
+                    recordingKind: merged.recordingKind
                 )
             }
         }
@@ -1131,6 +1132,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         let completed = MeetingRecord(
             id: request.meetingID,
             title: request.title,
+            recordingKind: request.recordingKind,
             titleSource: request.titleSource,
             detectedApplication: request.application?.displayName,
             startedAt: request.startedAt,
@@ -1501,6 +1503,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         MeetingRecord(
             id: request.meetingID,
             title: request.title,
+            recordingKind: request.recordingKind,
             titleSource: request.titleSource,
             detectedApplication: request.application?.displayName,
             startedAt: request.startedAt,

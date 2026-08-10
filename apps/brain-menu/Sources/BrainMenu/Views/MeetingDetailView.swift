@@ -242,6 +242,7 @@ final class MeetingDetailController {
     @ObservationIgnored private let audioChecker: any MeetingLocalAudioChecking
     @ObservationIgnored private let clipboard: any MeetingClipboardWriting
     @ObservationIgnored private let transcriptionController: any MeetingTranscriptionRetrying
+    @ObservationIgnored private var lastKnownRecordingKind: MeetingRecordingKind = .meeting
 
     init(
         meetingID: UUID,
@@ -313,7 +314,7 @@ final class MeetingDetailController {
         return MeetingDetailViewModel(
             state: state,
             meetingID: meeting?.id,
-            isVoiceNote: meeting?.isVoiceNote == true,
+            isVoiceNote: (meeting?.recordingKind ?? lastKnownRecordingKind) == .voiceNote,
             title: meeting?.title ?? "Meeting",
             dateText: meeting.map { Self.dateFormatter.string(from: $0.startedAt) } ?? "",
             durationText: meeting.map {
@@ -378,6 +379,7 @@ final class MeetingDetailController {
                 stored = StoredMeeting(meeting: stored.meeting, utterances: cleanedUtterances)
             }
             meeting = stored.meeting
+            lastKnownRecordingKind = stored.meeting.recordingKind
             utterances = stored.utterances
             titleDraft = stored.meeting.title
             loadUploadRevision()
@@ -510,7 +512,9 @@ final class MeetingDetailController {
         guard var meeting else { return }
         let title = proposed.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else {
-            errorMessage = "A meeting title cannot be empty."
+            errorMessage = meeting.isVoiceNote
+                ? "A voice note title cannot be empty."
+                : "A meeting title cannot be empty."
             titleDraft = meeting.title
             return
         }
@@ -548,7 +552,9 @@ final class MeetingDetailController {
 
     private func acceptSpeakerSuggestion(_ utteranceID: UUID) {
         guard let analysisController else {
-            errorMessage = "Meeting analysis is not configured."
+            errorMessage = meeting?.isVoiceNote == true
+                ? "Voice note analysis is not configured."
+                : "Meeting analysis is not configured."
             return
         }
         var candidate = editor
@@ -593,7 +599,8 @@ final class MeetingDetailController {
         do {
             try store.save(result.meeting, utterances: result.utterances)
         } catch {
-            errorMessage = "Analysis finished, but its meeting state was not saved: \(Self.bounded(error))"
+            let item = result.meeting.isVoiceNote ? "voice note" : "meeting"
+            errorMessage = "Analysis finished, but its \(item) state was not saved: \(Self.bounded(error))"
             return
         }
         errorMessage = result.failure.map(Self.analysisFailureMessage)
@@ -725,7 +732,7 @@ final class MeetingDetailController {
         case .providerNotReady: "The configured local AI provider is not ready."
         case .providerFailure(let failure): failure.localizedDescription
         case .cancelled: "Analysis was cancelled."
-        case .schemaFailure: "The AI response did not match the meeting analysis schema."
+        case .schemaFailure: "The AI response did not match the expected analysis schema."
         case .persistenceFailure: "The previous analysis remains because the new result could not be saved."
         }
     }
@@ -755,7 +762,9 @@ struct MeetingDetailView: View {
                 unavailable(title: "Meeting unavailable", message: message)
             case .deleted:
                 ContentUnavailableView(
-                    "Meeting deleted locally",
+                    controller.viewModel.isVoiceNote
+                        ? "Voice note deleted locally"
+                        : "Meeting deleted locally",
                     systemImage: "trash",
                     description: Text("A previously delivered vault capture was not retracted.")
                 )
