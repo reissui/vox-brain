@@ -25,6 +25,56 @@ struct AudioRetentionControllerTests {
     }
 
     @Test
+    func voiceNoteRecordingPersistsUntilConfirmedDeletion() throws {
+        let fixture = try AudioRetentionFixture(recordingKind: .voiceNote)
+        let controller = fixture.controller()
+        let completed = try controller.finalize(
+            meeting: fixture.meeting,
+            utterances: fixture.utterances,
+            audio: fixture.makeAudio()
+        )
+        let beforeDeletion = try fixture.store.load(fixture.meeting.id)
+        let beforeFiles = try FileManager.default.contentsOfDirectory(
+            atPath: fixture.meetingDirectory.path
+        ).sorted()
+
+        #expect(completed.isVoiceNote)
+        #expect(completed.retainedAudio?.filename == AudioRetentionController.retainedFilename)
+        #expect(FileManager.default.fileExists(atPath: fixture.recordingURL.path))
+        #expect(throws: AudioRetentionControllerError.deletionRequiresConfirmation) {
+            try controller.deleteRecording(for: completed.id, confirmed: false)
+        }
+        let survivedUnconfirmedDeletion = FileManager.default.fileExists(
+            atPath: fixture.recordingURL.path
+        )
+
+        let deleted = try controller.deleteRecording(for: completed.id, confirmed: true)
+        let afterDeletion = try fixture.store.load(fixture.meeting.id)
+        let afterFiles = try FileManager.default.contentsOfDirectory(
+            atPath: fixture.meetingDirectory.path
+        ).sorted()
+
+        #expect(survivedUnconfirmedDeletion)
+        #expect(deleted.retainedAudio == nil)
+        #expect(afterDeletion.utterances == fixture.utterances)
+        #expect(!FileManager.default.fileExists(atPath: fixture.recordingURL.path))
+        try writeEvidence([
+            "scenario": "Voice Note retained until explicit confirmed deletion",
+            "recordingKind": beforeDeletion.meeting.recordingKind.rawValue,
+            "retainedFilenameBeforeDeletion": completed.retainedAudio?.filename ?? "missing",
+            "retainedFormatBeforeDeletion": completed.retainedAudio?.format ?? "missing",
+            "directoryFilesBeforeDeletion": beforeFiles,
+            "survivedUnconfirmedDeletion": survivedUnconfirmedDeletion,
+            "recordingExistsAfterConfirmedDeletion": FileManager.default.fileExists(
+                atPath: fixture.recordingURL.path
+            ),
+            "retainedMetadataClearedAfterConfirmedDeletion": afterDeletion.meeting.retainedAudio == nil,
+            "transcriptPreservedAfterConfirmedDeletion": afterDeletion.utterances == fixture.utterances,
+            "directoryFilesAfterDeletion": afterFiles,
+        ], named: "voice-note-retention-deletion.json")
+    }
+
+    @Test
     func transcriptPersistenceFailurePreservesEveryTemporaryAudioFile() throws {
         let fixture = try AudioRetentionFixture()
         let summary = try fixture.makeAudio()
@@ -129,6 +179,24 @@ struct AudioRetentionControllerTests {
         let midpoint = frameCount / 2
         #expect(abs(channels[AudioRetentionController.microphoneChannel - 1][midpoint] - 0.25) < 0.05)
         #expect(abs(channels[AudioRetentionController.systemAudioChannel - 1][midpoint] + 0.5) < 0.05)
+        try writeEvidence([
+            "scenario": "Completed Meeting archived as private compact local audio",
+            "recordingKind": completed.recordingKind.rawValue,
+            "retainedFilename": metadata.filename,
+            "retainedFormat": metadata.format,
+            "retainedSizeBytes": metadata.sizeBytes,
+            "retainedDurationMilliseconds": metadata.durationMilliseconds,
+            "channelCount": metadata.channelCount,
+            "sampleRate": Int(recording.fileFormat.sampleRate.rounded()),
+            "audioFormatID": recording.fileFormat.streamDescription.pointee.mFormatID,
+            "recordingPermissions": String(try permissions(of: fixture.recordingURL), radix: 8),
+            "directoryPermissions": String(try permissions(of: fixture.meetingDirectory), radix: 8),
+            "temporarySourceAudioRemoved": summary.tracks.allSatisfy {
+                !FileManager.default.fileExists(atPath: $0.fileURL.path)
+            },
+            "persistedMeetingMatches": try fixture.store.load(fixture.meeting.id).meeting == completed,
+            "directoryFiles": files,
+        ], named: "meeting-retained-audio.json")
     }
 
     @Test
@@ -362,6 +430,21 @@ struct AudioRetentionControllerTests {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         return try #require((attributes[.posixPermissions] as? NSNumber)?.intValue) & 0o777
     }
+
+    private func writeEvidence(_ object: [String: Any], named filename: String) throws {
+        guard let directory = ProcessInfo.processInfo.environment["BRAIN_TEST_EVIDENCE_DIR"] else {
+            return
+        }
+        let data = try JSONSerialization.data(
+            withJSONObject: object,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try data.write(
+            to: URL(fileURLWithPath: directory, isDirectory: true)
+                .appendingPathComponent(filename),
+            options: .atomic
+        )
+    }
 }
 
 private final class AudioRetentionFixture {
@@ -385,7 +468,7 @@ private final class AudioRetentionFixture {
         meetingDirectory.appendingPathComponent(AudioRetentionController.retainedFilename)
     }
 
-    init() throws {
+    init(recordingKind: MeetingRecordingKind = .meeting) throws {
         rootURL = FileManager.default.temporaryDirectory.appendingPathComponent(
             "BrainAudioRetentionTests-\(UUID().uuidString)",
             isDirectory: true
@@ -394,6 +477,7 @@ private final class AudioRetentionFixture {
         store = MeetingStore(rootURL: rootURL)
         meeting = MeetingRecord(
             title: "Private planning",
+            recordingKind: recordingKind,
             detectedApplication: "com.example.meeting",
             startedAt: Date(timeIntervalSince1970: 1_784_112_400),
             endedAt: Date(timeIntervalSince1970: 1_784_112_401),

@@ -47,9 +47,7 @@ Audio never enters either capture request.
 4. In **Audio Tests**, speak for the full microphone test and require visible
    input. A pinned input uses its persistent Core Audio UID and never silently
    switches when missing.
-5. Brain keeps every Meeting and Voice Note recording as compact private AAC on
-   this Mac until you explicitly delete the recording or its item.
-6. Keep meeting and Voice Note AI disabled or select and test a local CLI
+5. Keep meeting and Voice Note AI disabled or select and test a local CLI
    provider. Brain discloses that transcript text goes to that provider and may
    consume its billing or credits.
 
@@ -76,16 +74,22 @@ starts or stops recording automatically.
    once. Voice Notes remain in the Voice Notes list even after they are renamed.
 6. Upload the finalized transcript. Later edits require an explicit revision.
 
-Brain archives each completed recording locally as compact AAC and exposes
-reveal, export, and explicit delete controls. Failed or interrupted transcripts
-keep their private source audio available for recovery. Short or empty
-transcripts are saved too; Brain never auto-deletes their recordings. Capture
-payloads still contain no audio.
+After successful transcription, Brain archives the recording locally as compact
+AAC and exposes reveal, export, and explicit delete controls. Failed or
+interrupted transcripts keep their private source audio available for recovery.
+Short or empty items remain saved, and Brain never auto-deletes their
+recordings. Capture payloads still contain no audio. Existing retained CAF
+recordings remain available for reveal, export, deletion, and transcription
+retry; a successful retry replaces the legacy recording with compact AAC.
+
+Deleting a saved recording—or its entire item—removes both its playable archive
+and retry source audio. Brain cancels an in-flight retry first, and launch
+recovery does not recreate audio after that explicit deletion.
 
 Recording and transcription work is bounded. A failing speech source stops
 after repeated errors, partial transcripts remain reviewable, and interrupted
 capture or processing is surfaced as a retryable saved recording at the next
-launch.
+launch; Brain does not restart transcription automatically.
 
 ## Delivery behavior
 

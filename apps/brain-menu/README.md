@@ -48,10 +48,7 @@ VoxType's configuration untouched.
 For meetings, Brain records microphone plus system audio. Voice Notes are
 single-speaker microphone-only recordings, so they do not depend on Screen &
 System Audio permission or a second source. VoxType transcribes both workflows
-locally. Every Meeting and Voice Note recording remains private on this Mac
-until the user explicitly deletes the recording or its item. Failed or
-interrupted jobs retain their source audio for explicit retry and never resume
-automatically when Brain launches.
+locally.
 The app checks **Microphone**, **Screen & System Audio
 Recording**, and **Accessibility** permissions only when their related features
 are used.
@@ -166,9 +163,10 @@ The included VoxType login item requests its own macOS permissions when the
 speech engine first needs them; Brain cannot grant those permissions on the
 user's behalf.
 
-Local and remote modes always keep compact AAC Meeting and Voice Note audio on
-the recording Mac until the user explicitly deletes it. Only finalized
-transcript text can enter the configured Brain vault.
+Meeting and Voice Note audio never leaves the recording Mac; see the
+[native capture guide](../../integrations/meetings.md) for retention, recovery,
+and deletion behavior.
+Only finalized transcript text can enter the configured Brain vault.
 
 ## Development verification
 

@@ -670,6 +670,12 @@ struct MeetingViewsTests {
             speechModel: "model"
         )
         voiceNote.transcriptionState = .completed
+        voiceNote.retainedAudio = RetainedAudioMetadata(
+            filename: AudioRetentionController.retainedFilename,
+            format: AudioRetentionController.retainedFormat,
+            sizeBytes: 24_000,
+            durationMilliseconds: 66_000
+        )
         let voiceNoteUtterances = [
             try MeetingUtterance(
                 source: .microphone,
@@ -705,7 +711,7 @@ struct MeetingViewsTests {
             analysisStore: MemoryMeetingViewAnalysisStore(),
             uploadController: MeetingDetailUploadSpy(),
             audioController: MeetingDetailAudioSpy(meeting: voiceNote),
-            audioChecker: FixedAudioChecker(value: false),
+            audioChecker: FixedAudioChecker(value: true),
             clipboard: voiceNoteClipboard
         )
         voiceNoteController.load()
@@ -738,6 +744,12 @@ struct MeetingViewsTests {
             speechModel: "model"
         )
         meetingRecord.transcriptionState = .completed
+        meetingRecord.retainedAudio = RetainedAudioMetadata(
+            filename: AudioRetentionController.retainedFilename,
+            format: AudioRetentionController.retainedFormat,
+            sizeBytes: 24_000,
+            durationMilliseconds: 66_000
+        )
         let meetingUtterances = [
             try MeetingUtterance(
                 id: ownerUtteranceID,
@@ -788,7 +800,7 @@ struct MeetingViewsTests {
             ]),
             uploadController: MeetingDetailUploadSpy(),
             audioController: MeetingDetailAudioSpy(meeting: meetingRecord),
-            audioChecker: FixedAudioChecker(value: false),
+            audioChecker: FixedAudioChecker(value: true),
             clipboard: MeetingClipboardSpy()
         )
         meetingController.load()
@@ -799,6 +811,14 @@ struct MeetingViewsTests {
         try renderEvidence(
             MeetingDetailView(controller: meetingController),
             named: "meeting-speaker-transcript.png"
+        )
+    }
+
+    @Test
+    func privacySettingsRenderAlwaysRetainedPolicy() throws {
+        try renderEvidence(
+            SettingsView(selection: .constant(.audioPrivacy)),
+            named: "audio-privacy-settings.png"
         )
     }
 
