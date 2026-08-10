@@ -367,7 +367,7 @@ private struct AudioPrivacySettingsView: View {
     var body: some View {
         Form {
             Section("Audio/Privacy") {
-                Toggle("Keep meeting recordings", isOn: $keepRecordings)
+                Toggle("Keep Meeting and Voice Note recordings", isOn: $keepRecordings)
                     .onChange(of: keepRecordings) { _, value in
                         retention.keepMeetingRecordings = value
                     }

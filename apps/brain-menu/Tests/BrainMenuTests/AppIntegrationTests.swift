@@ -551,7 +551,7 @@ struct AppIntegrationTests {
         )
         #expect(
             info["NSScreenCaptureUsageDescription"] as? String
-                == "Brain records system audio during meetings and captures only screenshots you explicitly select; it never records video."
+                == "Brain records system audio for Meetings and Voice Notes, and captures only screenshots you explicitly select; it never records video."
         )
         for prohibited in [
             "NSCameraUsageDescription",

@@ -84,8 +84,9 @@ struct DictationControllerTests {
         #expect(controller.state == .unavailable(.meetingOwnsAudioCapture))
         #expect(controller.canRetry)
         #expect(DictationUnavailableReason.meetingOwnsAudioCapture.title
-            == "Dictation unavailable during a meeting")
-        #expect(!DictationUnavailableReason.meetingOwnsAudioCapture.detail.isEmpty)
+            == "Dictation unavailable while recording")
+        #expect(DictationUnavailableReason.meetingOwnsAudioCapture.detail
+            == "Stop the active Meeting or Voice Note before starting dictation.")
         #expect(await voxType.commands.isEmpty)
 
         ownership.owned = false

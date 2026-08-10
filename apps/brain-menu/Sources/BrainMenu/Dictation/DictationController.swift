@@ -7,14 +7,14 @@ enum DictationUnavailableReason: Equatable, Sendable {
     var title: String {
         switch self {
         case .meetingOwnsAudioCapture:
-            "Dictation unavailable during a meeting"
+            "Dictation unavailable while recording"
         }
     }
 
     var detail: String {
         switch self {
         case .meetingOwnsAudioCapture:
-            "Stop the meeting recording before starting dictation."
+            "Stop the active Meeting or Voice Note before starting dictation."
         }
     }
 }

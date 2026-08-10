@@ -37,8 +37,8 @@ Audio never enters either capture request.
 4. In **Audio Tests**, speak for the full microphone test and require visible
    input. A pinned input uses its persistent Core Audio UID and never silently
    switches when missing.
-5. Leave **Keep meeting recordings** off unless local retention is an explicit
-   choice. This setting also governs Voice Note audio.
+5. Leave **Keep Meeting and Voice Note recordings** off unless local retention
+   is an explicit choice.
 6. Keep meeting and Voice Note AI disabled or select and test a local CLI
    provider. Brain discloses that transcript text goes to that provider and may
    consume its billing or credits.
