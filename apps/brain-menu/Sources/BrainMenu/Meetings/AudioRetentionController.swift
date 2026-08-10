@@ -5,6 +5,7 @@ import Foundation
 protocol AudioRetentionMeetingStoring {
     func save(_ meeting: MeetingRecord, utterances: [MeetingUtterance]) throws
     func load(_ id: UUID) throws -> StoredMeeting
+    func list() throws -> [MeetingListEntry]
     func directoryURL(for id: UUID) -> URL
 }
 
@@ -251,7 +252,10 @@ final class AudioRetentionController: @unchecked Sendable {
         )
         let artifacts: [URL]
         do {
-            artifacts = try audioArtifacts(in: directory, retainedURL: source)
+            artifacts = try audioArtifacts(in: directory)
+            guard artifacts.contains(source.standardizedFileURL) else {
+                throw AudioRetentionControllerError.deleteFailed
+            }
             try fileSystem.createOwnerOnlyDirectory(at: quarantine)
         } catch {
             throw AudioRetentionControllerError.deleteFailed
@@ -266,8 +270,7 @@ final class AudioRetentionController: @unchecked Sendable {
             )
         }
 
-        var updated = stored.meeting
-        updated.retainedAudio = nil
+        let updated = Self.recordAfterDeletingAudio(stored.meeting)
 
         do {
             for move in moves {
@@ -294,6 +297,44 @@ final class AudioRetentionController: @unchecked Sendable {
                 try? store.save(stored.meeting, utterances: stored.utterances)
             }
             throw AudioRetentionControllerError.deleteFailed
+        }
+    }
+
+    @discardableResult
+    func reconcileInterruptedDeletions() -> [MeetingRecord] {
+        guard let entries = try? store.list() else { return [] }
+        var reconciled: [MeetingRecord] = []
+
+        for entry in entries {
+            guard let meetingID = entry.id else { continue }
+            let directory = store.directoryURL(for: meetingID).standardizedFileURL
+            guard let quarantines = try? deletionQuarantines(in: directory),
+                  !quarantines.isEmpty else { continue }
+
+            switch entry {
+            case .available:
+                guard let stored = try? store.load(meetingID) else { continue }
+                let updated = Self.recordAfterDeletingAudio(stored.meeting)
+                guard (try? store.save(updated, utterances: stored.utterances)) != nil else {
+                    continue
+                }
+                finishInterruptedDeletion(in: directory, quarantines: quarantines)
+                reconciled.append(updated)
+            case .unavailable:
+                restoreQuarantines(quarantines, in: directory)
+            }
+        }
+
+        return reconciled
+    }
+
+    func hasInterruptedDeletion(for meetingID: UUID) -> Bool {
+        let directory = store.directoryURL(for: meetingID).standardizedFileURL
+        guard let entries = try? fileSystem.contentsOfDirectory(at: directory) else {
+            return false
+        }
+        return entries.contains {
+            Self.isDeletionQuarantineName($0.lastPathComponent)
         }
     }
 
@@ -464,7 +505,7 @@ final class AudioRetentionController: @unchecked Sendable {
         )
     }
 
-    private func audioArtifacts(in directory: URL, retainedURL: URL) throws -> [URL] {
+    private func audioArtifacts(in directory: URL) throws -> [URL] {
         let directory = directory.standardizedFileURL
         let transcriptionDirectory = directory.appendingPathComponent(
             ".transcription",
@@ -508,10 +549,88 @@ final class AudioRetentionController: @unchecked Sendable {
                 }
             }
         }
-        guard artifacts.contains(retainedURL.standardizedFileURL) else {
-            throw AudioRetentionControllerError.deleteFailed
-        }
         return artifacts.sorted { $0.path < $1.path }
+    }
+
+    private func deletionQuarantines(in directory: URL) throws -> [URL] {
+        let directory = directory.standardizedFileURL
+        return try fileSystem.contentsOfDirectory(at: directory)
+            .filter { Self.isDeletionQuarantineName($0.lastPathComponent) }
+            .map { quarantine in
+                let quarantine = quarantine.standardizedFileURL
+                guard quarantine.deletingLastPathComponent() == directory,
+                      try fileSystem.attributes(at: quarantine)[.type] as? FileAttributeType
+                        == .typeDirectory else {
+                    throw AudioRetentionControllerError.deleteFailed
+                }
+                return quarantine
+            }
+            .sorted { $0.path < $1.path }
+    }
+
+    private func finishInterruptedDeletion(in directory: URL, quarantines: [URL]) {
+        guard let artifacts = try? audioArtifacts(in: directory) else { return }
+        let quarantinePaths = Set(quarantines.map(\.standardizedFileURL))
+        var removalFailed = false
+
+        for artifact in artifacts where !quarantinePaths.contains(artifact.standardizedFileURL) {
+            do {
+                try fileSystem.removeItem(at: artifact)
+            } catch {
+                removalFailed = true
+            }
+        }
+        guard !removalFailed else { return }
+        for quarantine in quarantines {
+            try? fileSystem.removeItem(at: quarantine)
+        }
+    }
+
+    private func restoreQuarantines(_ quarantines: [URL], in directory: URL) {
+        for quarantine in quarantines {
+            guard let items = try? fileSystem.contentsOfDirectory(at: quarantine) else { continue }
+            var restoredAll = true
+            for item in items {
+                guard let originalName = Self.originalArtifactName(
+                    from: item.lastPathComponent
+                ), let destination = restorationURL(
+                    for: originalName,
+                    in: directory
+                ), !fileSystem.fileExists(at: destination) else {
+                    restoredAll = false
+                    continue
+                }
+                do {
+                    try fileSystem.moveItem(at: item, to: destination)
+                } catch {
+                    restoredAll = false
+                }
+            }
+            if restoredAll,
+               (try? fileSystem.contentsOfDirectory(at: quarantine).isEmpty) == true {
+                try? fileSystem.removeItem(at: quarantine)
+            }
+        }
+    }
+
+    private func restorationURL(for name: String, in directory: URL) -> URL? {
+        if name.hasSuffix(".wav"),
+           name.hasPrefix("preview-") || name.hasPrefix("final-") {
+            let transcriptionDirectory = directory.appendingPathComponent(
+                ".transcription",
+                isDirectory: true
+            )
+            if !fileSystem.fileExists(at: transcriptionDirectory) {
+                try? fileSystem.createOwnerOnlyDirectory(at: transcriptionDirectory)
+            }
+            guard fileSystem.fileExists(at: transcriptionDirectory) else { return nil }
+            return transcriptionDirectory.appendingPathComponent(name, isDirectory: false)
+        }
+        guard Self.isTopLevelAudioArtifact(name) else { return nil }
+        return directory.appendingPathComponent(
+            name,
+            isDirectory: Self.isDeletionQuarantineName(name)
+        )
     }
 
     private static func isTopLevelAudioArtifact(_ name: String) -> Bool {
@@ -531,6 +650,28 @@ final class AudioRetentionController: @unchecked Sendable {
         }
         return name.hasPrefix(".recovery-")
             && [".pcm", ".json"].contains { name.hasSuffix($0) }
+    }
+
+    private static func isDeletionQuarantineName(_ name: String) -> Bool {
+        name.hasPrefix(".recording.") && name.hasSuffix(".deleting")
+    }
+
+    private static func originalArtifactName(from quarantinedName: String) -> String? {
+        guard let separator = quarantinedName.firstIndex(of: "-") else { return nil }
+        let index = quarantinedName[..<separator]
+        let name = quarantinedName[quarantinedName.index(after: separator)...]
+        guard !index.isEmpty,
+              index.allSatisfy(\.isNumber),
+              !name.isEmpty else { return nil }
+        return String(name)
+    }
+
+    private static func recordAfterDeletingAudio(_ meeting: MeetingRecord) -> MeetingRecord {
+        var updated = meeting
+        updated.retainedAudio = nil
+        updated.transcriptionState = .completed
+        updated.transcriptionErrorMessage = nil
+        return updated
     }
 
     private func restore(_ moves: [AudioArtifactMove], quarantine: URL) {

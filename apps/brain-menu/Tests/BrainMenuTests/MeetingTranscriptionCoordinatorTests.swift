@@ -247,6 +247,56 @@ struct MeetingTranscriptionCoordinatorTests {
     }
 
     @Test
+    func explicitAudioDeletionCancelsRetryAndPreservesStableTranscript() async throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        let originalTranscript = [try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 1_000,
+            text: "Keep this durable transcript.",
+            baseSpeakerID: "you"
+        )]
+        var completed = fixture.meeting
+        completed.transcriptionAttemptCount = 1
+        completed.transcriptionState = .completed
+        let archived = try fixture.retention.finalize(
+            meeting: completed,
+            utterances: originalTranscript,
+            audio: fixture.makeCapture()
+        )
+        var failed = archived
+        failed.transcriptionState = .failed
+        failed.transcriptionErrorMessage = "Retry requested."
+        try fixture.store.save(failed, utterances: originalTranscript)
+        let client = CoordinatorCancellableClient()
+        let coordinator = fixture.coordinator(client: client)
+        let retry = Task {
+            try await coordinator.retry(meetingID: fixture.meeting.id)
+        }
+        await client.waitUntilCallCount(atLeast: 1)
+
+        let inFlight = try fixture.store.load(fixture.meeting.id)
+        #expect(inFlight.meeting.transcriptionState == .processing)
+        #expect(inFlight.utterances == originalTranscript)
+
+        await coordinator.cancelAndWait(meetingID: fixture.meeting.id)
+        _ = try await retry.value
+        let deleted = try fixture.retention.deleteRecording(
+            for: fixture.meeting.id,
+            confirmed: true
+        )
+        let stored = try fixture.store.load(fixture.meeting.id)
+        let launchReconciled = coordinator.reconcileInterruptedJobs(at: failed.startedAt)
+
+        #expect(deleted.transcriptionState == .completed)
+        #expect(deleted.transcriptionErrorMessage == nil)
+        #expect(deleted.retainedAudio == nil)
+        #expect(stored.meeting == deleted)
+        #expect(stored.utterances == originalTranscript)
+        #expect(launchReconciled.isEmpty)
+    }
+
+    @Test
     func staleCompletionCannotOverwriteANewerSuccessfulGeneration() async throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()
@@ -892,6 +942,27 @@ private actor CoordinatorBlockingSuccessClient: LiveTranscriptionClient {
         let continuations = releaseContinuations
         releaseContinuations.removeAll()
         for continuation in continuations { continuation.resume() }
+    }
+}
+
+private actor CoordinatorCancellableClient: LiveTranscriptionClient {
+    private(set) var callCount = 0
+    private var countContinuations: [(Int, CheckedContinuation<Void, Never>)] = []
+
+    func transcribe(wavURL: URL, engine: String) async throws -> String {
+        callCount += 1
+        let ready = countContinuations.filter { callCount >= $0.0 }
+        countContinuations.removeAll { callCount >= $0.0 }
+        for value in ready { value.1.resume() }
+        try await Task.sleep(for: .seconds(30))
+        return "This retry should be cancelled."
+    }
+
+    func waitUntilCallCount(atLeast expected: Int) async {
+        guard callCount < expected else { return }
+        await withCheckedContinuation { continuation in
+            countContinuations.append((expected, continuation))
+        }
     }
 }
 

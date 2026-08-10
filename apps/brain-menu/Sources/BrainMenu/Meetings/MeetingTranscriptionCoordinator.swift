@@ -125,7 +125,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         processing.transcriptionErrorMessage = nil
         processing.analysisState = .notRequested
         processing.uploadState = .notUploaded
-        try store.save(processing, utterances: [])
+        try store.save(processing, utterances: current.utterances)
         return processing
     }
 
@@ -394,10 +394,11 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     /// before its idempotent upload was scheduled. Failed transcription attempts
     /// still wait for the user's explicit Retry action.
     func resumeInterruptedJobs() async -> [MeetingRecord] {
-        guard let entries = try? store.list() else { return [] }
-        var results: [MeetingRecord] = []
+        var results = retention.reconcileInterruptedDeletions()
+        guard let entries = try? store.list() else { return results }
         for entry in entries {
-            guard case .available(let meeting) = entry else { continue }
+            guard case .available(let meeting) = entry,
+                  !retention.hasInterruptedDeletion(for: meeting.id) else { continue }
             if [.pending, .processing].contains(meeting.transcriptionState),
                let retried = try? await retry(meetingID: meeting.id) {
                 results.append(retried)
@@ -416,9 +417,13 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     /// without the user's explicit Retry action.
     @discardableResult
     func reconcileInterruptedJobs(at date: Date = Date()) -> [MeetingRecord] {
-        guard let entries = try? store.list() else { return [] }
-        var reconciled: [MeetingRecord] = []
+        var reconciled = retention.reconcileInterruptedDeletions()
+        guard let entries = try? store.list() else { return reconciled }
         for entry in entries {
+            if let meetingID = entry.id,
+               retention.hasInterruptedDeletion(for: meetingID) {
+                continue
+            }
             if case .unavailable(let unavailable) = entry,
                unavailable.reason == .missingMeeting,
                let id = unavailable.id,

@@ -252,6 +252,71 @@ struct AudioRetentionControllerTests {
     }
 
     @Test
+    func launchReconciliationCompletesDurableAudioDeletionIntent() throws {
+        let fixture = try AudioRetentionFixture()
+        let controller = fixture.controller()
+        let completed = try controller.finalize(
+            meeting: fixture.meeting,
+            utterances: fixture.utterances,
+            audio: fixture.makeAudio()
+        )
+        var processing = completed
+        processing.transcriptionState = .processing
+        try fixture.store.save(processing, utterances: fixture.utterances)
+        let quarantine = fixture.meetingDirectory.appendingPathComponent(
+            ".recording.\(UUID().uuidString).deleting",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: quarantine, withIntermediateDirectories: false)
+        try FileManager.default.moveItem(
+            at: fixture.recordingURL,
+            to: quarantine.appendingPathComponent("0-\(fixture.recordingURL.lastPathComponent)")
+        )
+
+        let reconciled = controller.reconcileInterruptedDeletions()
+        let stored = try fixture.store.load(fixture.meeting.id)
+
+        #expect(reconciled.map(\.id) == [fixture.meeting.id])
+        #expect(stored.meeting.transcriptionState == .completed)
+        #expect(stored.meeting.transcriptionErrorMessage == nil)
+        #expect(stored.meeting.retainedAudio == nil)
+        #expect(stored.utterances == fixture.utterances)
+        #expect(!FileManager.default.fileExists(atPath: fixture.recordingURL.path))
+        #expect(!FileManager.default.fileExists(atPath: quarantine.path))
+        #expect(!controller.hasInterruptedDeletion(for: fixture.meeting.id))
+    }
+
+    @Test
+    func launchReconciliationRollsBackQuarantineWithoutUsableMetadata() throws {
+        let fixture = try AudioRetentionFixture()
+        let controller = fixture.controller()
+        _ = try controller.finalize(
+            meeting: fixture.meeting,
+            utterances: fixture.utterances,
+            audio: fixture.makeAudio()
+        )
+        let quarantine = fixture.meetingDirectory.appendingPathComponent(
+            ".recording.\(UUID().uuidString).deleting",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: quarantine, withIntermediateDirectories: false)
+        try FileManager.default.moveItem(
+            at: fixture.recordingURL,
+            to: quarantine.appendingPathComponent("0-\(fixture.recordingURL.lastPathComponent)")
+        )
+        try FileManager.default.removeItem(at: fixture.meetingDirectory.appendingPathComponent(
+            MeetingStore.meetingFilename
+        ))
+
+        let reconciled = controller.reconcileInterruptedDeletions()
+
+        #expect(reconciled.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: fixture.recordingURL.path))
+        #expect(!FileManager.default.fileExists(atPath: quarantine.path))
+        #expect(!controller.hasInterruptedDeletion(for: fixture.meeting.id))
+    }
+
+    @Test
     func retainedAudioNeverEntersCaptureRequestOrUploadSpy() async throws {
         let fixture = try AudioRetentionFixture()
         let controller = fixture.controller()
