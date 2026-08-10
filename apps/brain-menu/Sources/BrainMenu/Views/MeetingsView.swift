@@ -357,6 +357,7 @@ final class MeetingsController {
         case .idle: "Idle"
         case .startSuggested: "Start suggested"
         case .starting: "Starting"
+        case .sourceSelectionRequired: "Choose microphone"
         case .recording: "Recording"
         case .paused: "Paused"
         case .stopSuggested: "Stop suggested"
@@ -370,6 +371,7 @@ final class MeetingsController {
         switch state {
         case .recording: "record.circle.fill"
         case .paused: "pause.circle.fill"
+        case .sourceSelectionRequired: "mic.badge.xmark"
         case .failed: "xmark.octagon.fill"
         case .completed: "checkmark.circle.fill"
         default: "clock"

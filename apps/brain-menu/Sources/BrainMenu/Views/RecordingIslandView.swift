@@ -187,7 +187,7 @@ struct RecordingIslandView: View {
         _ microphone: RecordingIslandMicrophonePresentation,
         phase: RecordingIslandMeetingPhase
     ) -> some View {
-        let canChange = [.recording, .paused, .stopSuggested].contains(phase)
+        let canChange = [.chooseMicrophone, .recording, .paused, .stopSuggested].contains(phase)
             && !microphone.switchState.isSwitching
             && !microphone.availableDevices.isEmpty
         return Menu {
@@ -329,7 +329,7 @@ struct RecordingIslandView: View {
 
     private func meetingPhaseColor(_ phase: RecordingIslandMeetingPhase) -> Color {
         switch phase {
-        case .paused: .orange
+        case .chooseMicrophone, .paused: .orange
         case .saved: .green
         case .starting, .recording, .stopSuggested, .finalizing: .red
         }

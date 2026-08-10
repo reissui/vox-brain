@@ -332,6 +332,7 @@ private struct MeetingsWorkspaceView: View {
         case .idle, .completed: "Start manually; Brain never starts or stops a meeting automatically."
         case .startSuggested: "Brain noticed a possible meeting. Starting still requires your action."
         case .starting: "Starting microphone and system audio capture…"
+        case .sourceSelectionRequired: "Choose another microphone before starting again."
         case .recording: "Recording microphone and system audio locally."
         case .paused: "Meeting is paused."
         case .stopSuggested: "Brain thinks the meeting may have ended; choose Stop or keep recording."
@@ -345,6 +346,8 @@ private struct MeetingsWorkspaceView: View {
         switch graph.meeting.state {
         case .starting:
             return signalStatus(for: source, waiting: "Connecting…")
+        case .sourceSelectionRequired:
+            return source == .microphone ? "Choose input" : "Off"
         case .recording, .stopSuggested:
             return signalStatus(for: source, waiting: "Waiting…")
         case .paused: return "Paused"
@@ -493,6 +496,7 @@ private struct VoiceNotesWorkspaceView: View {
         }
         return switch graph.meeting.state {
         case .starting: "Starting audio capture…"
+        case .sourceSelectionRequired: "Choose another microphone before starting again."
         case .recording: "Recording locally on this Mac."
         case .paused: "Voice note is paused."
         case .stopSuggested: "Voice note is still recording."
@@ -507,6 +511,7 @@ private struct VoiceNotesWorkspaceView: View {
         switch graph.meeting.state {
         case .starting:
             return signalStatus(waiting: "Connecting…")
+        case .sourceSelectionRequired: return "Choose input"
         case .recording, .stopSuggested:
             return signalStatus(waiting: "Waiting…")
         case .paused: return "Paused"

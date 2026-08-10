@@ -32,6 +32,21 @@ struct MeetingRecordingRequest: Equatable, Sendable {
     let titleSource: MeetingTitleSource
 }
 
+enum MeetingRecordingStartError: Error, Equatable, LocalizedError, Sendable {
+    case microphoneSelectionRequired(deviceName: String?)
+
+    var errorDescription: String? {
+        switch self {
+        case .microphoneSelectionRequired(let deviceName):
+            if let deviceName, !deviceName.isEmpty {
+                "\(deviceName) could not be used for recording. Choose a different microphone."
+            } else {
+                "The selected microphone could not be used for recording. Choose a different microphone."
+            }
+        }
+    }
+}
+
 enum MeetingRecordingDiscontinuity: Equatable, Sendable {
     case resumedAfterPause(pausedAt: Date, resumedAt: Date)
 }
@@ -169,6 +184,7 @@ final class SystemMeetingClock: MeetingControllingClock {
 
 enum MeetingControllerFailure: Error, Equatable, Sendable {
     case startFailed(String)
+    case microphoneSelectionRequired(String)
     case pauseFailed(String)
     case resumeFailed(String)
     case stopFailed(String)
@@ -231,6 +247,8 @@ final class MeetingController {
 
     func selectMicrophone(_ selection: MeetingMicrophoneSelection) async {
         await (recorder as? any MeetingMicrophoneSwitching)?.selectMicrophone(selection)
+        guard state == .sourceSelectionRequired else { return }
+        resetSourceSelectionRequest()
     }
 
     /// Consumes detector evidence and checks the safety deadline. No recording
@@ -335,6 +353,10 @@ final class MeetingController {
             } else {
                 transition(to: .recording)
             }
+        } catch let error as MeetingRecordingStartError {
+            stopRequestedWhileStarting = false
+            failure = .microphoneSelectionRequired(error.localizedDescription)
+            transition(to: .sourceSelectionRequired)
         } catch {
             stopRequestedWhileStarting = false
             failure = .startFailed(error.localizedDescription)
@@ -446,6 +468,15 @@ final class MeetingController {
     /// record remains in Meetings for recovery and explicit transcript retry.
     func resetFailedMeeting() {
         guard state == .failed else { return }
+        clearFailedMeeting()
+    }
+
+    private func resetSourceSelectionRequest() {
+        guard state == .sourceSelectionRequired else { return }
+        clearFailedMeeting()
+    }
+
+    private func clearFailedMeeting() {
         currentMeeting = nil
         startSuggestion = nil
         stopSuggestion = nil

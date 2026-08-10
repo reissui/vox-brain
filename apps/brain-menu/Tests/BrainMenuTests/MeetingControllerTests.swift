@@ -459,6 +459,27 @@ struct MeetingControllerTests {
     }
 
     @Test
+    func unavailableSelectedMicrophoneRequestsAnotherSourceAndRecoversAfterSelection() async {
+        let fixture = makeFixture()
+        fixture.recorder.startError = MeetingRecordingStartError
+            .microphoneSelectionRequired(deviceName: "Wireless microphone")
+
+        await fixture.controller.startVoiceNote()
+
+        #expect(fixture.controller.state == .sourceSelectionRequired)
+        #expect(fixture.controller.failure == .microphoneSelectionRequired(
+            "Wireless microphone could not be used for recording. Choose a different microphone."
+        ))
+
+        await fixture.controller.selectMicrophone(.systemDefault)
+
+        #expect(fixture.recorder.microphoneSelections == [.systemDefault])
+        #expect(fixture.controller.state == .idle)
+        #expect(fixture.controller.failure == nil)
+        #expect(fixture.controller.currentMeeting == nil)
+    }
+
+    @Test
     func microphonePresentationAndChangesDelegateThroughTheMeetingController() async {
         let fixture = makeFixture()
         let device = MeetingMicrophoneDevice(
@@ -574,6 +595,7 @@ private final class VirtualMeetingRecorder: MeetingRecording, MeetingMicrophoneS
     private(set) var stopCount = 0
     var shouldSuspendStart = false
     var shouldSuspendStop = false
+    var startError: Error?
     private var startContinuation: CheckedContinuation<Void, Never>?
     private var stopContinuation: CheckedContinuation<Void, Never>?
     private var runtimeFailureHandler: (@MainActor @Sendable (String) -> Void)?
@@ -583,6 +605,7 @@ private final class VirtualMeetingRecorder: MeetingRecording, MeetingMicrophoneS
 
     func start(_ request: MeetingRecordingRequest) async throws {
         actions.append(.start(request))
+        if let startError { throw startError }
         if shouldSuspendStart {
             await withCheckedContinuation { continuation in
                 startContinuation = continuation
