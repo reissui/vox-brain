@@ -168,6 +168,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         let entry = MeetingTranscriptionJobRegistry.Entry(
             token: token,
             generation: meeting.transcriptionAttemptCount,
+            retrySnapshot: nil,
             task: task,
             cancel: {
                 await cancellation.cancel()
@@ -337,6 +338,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         let entry = MeetingTranscriptionJobRegistry.Entry(
             token: token,
             generation: generation,
+            retrySnapshot: stored.meeting,
             task: task,
             cancel: {
                 await cancellation.cancel()
@@ -404,11 +406,15 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     ) async throws {
         let jobKey = key(for: meetingID)
         let reservationToken: UUID
+        var cancelledRetrySnapshot: MeetingRecord?
         while true {
             if let entry = Self.registry.entry(for: jobKey) {
                 entry.task.cancel()
                 await entry.cancel()
-                _ = await entry.task.value
+                let result = await entry.task.value
+                if result.transcriptionState == .processing {
+                    cancelledRetrySnapshot = entry.retrySnapshot
+                }
                 if let token = Self.registry.reserveDeletion(
                     jobKey,
                     replacingEntryWithToken: entry.token
@@ -434,7 +440,30 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         defer {
             Self.registry.releaseDeletion(jobKey, token: reservationToken)
         }
+        if let cancelledRetrySnapshot {
+            try restoreCancelledRetry(
+                cancelledRetrySnapshot,
+                meetingID: meetingID
+            )
+        }
         try operation()
+    }
+
+    private func restoreCancelledRetry(
+        _ snapshot: MeetingRecord,
+        meetingID: UUID
+    ) throws {
+        let stored = try store.load(meetingID)
+        guard stored.meeting.transcriptionState == .processing,
+              stored.meeting.transcriptionAttemptCount
+                == snapshot.transcriptionAttemptCount + 1 else { return }
+        var restored = stored.meeting
+        restored.transcriptionState = snapshot.transcriptionState
+        restored.transcriptionAttemptCount = snapshot.transcriptionAttemptCount
+        restored.transcriptionErrorMessage = snapshot.transcriptionErrorMessage
+        restored.analysisState = snapshot.analysisState
+        restored.uploadState = snapshot.uploadState
+        try store.save(restored, utterances: stored.utterances)
     }
 
     /// Resumes jobs interrupted while pending/processing. It also closes the
@@ -1263,6 +1292,7 @@ private final class MeetingTranscriptionJobRegistry {
     struct Entry {
         let token: UUID
         let generation: Int
+        let retrySnapshot: MeetingRecord?
         let task: Task<MeetingRecord, Never>
         let cancel: @MainActor () async -> Void
     }

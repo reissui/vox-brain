@@ -321,7 +321,8 @@ struct MeetingTranscriptionCoordinatorTests {
         let stored = try fixture.store.load(fixture.meeting.id)
         let launchReconciled = coordinator.reconcileInterruptedJobs(at: failed.startedAt)
 
-        #expect(deleted.transcriptionState == .processing)
+        #expect(deleted.transcriptionState == .failed)
+        #expect(deleted.transcriptionAttemptCount == 1)
         #expect(deleted.transcriptionErrorMessage == "Retry requested.")
         #expect(deleted.retainedAudio == nil)
         #expect(deleted.audioRetentionState == .deleted)
