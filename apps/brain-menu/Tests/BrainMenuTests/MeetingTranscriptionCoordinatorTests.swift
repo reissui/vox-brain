@@ -1025,6 +1025,24 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(FileManager.default.fileExists(atPath: system.fileURL.path))
     }
 
+    @Test
+    func launchReconciliationDoesNotRecoverCommittedWholeItemDeletion() throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        _ = try fixture.makeCapture()
+        let tombstone = fixture.rootURL.appendingPathComponent(
+            ".\(fixture.meeting.id.uuidString).\(UUID().uuidString).deleting",
+            isDirectory: true
+        )
+        try FileManager.default.moveItem(at: fixture.meetingDirectory, to: tombstone)
+
+        let recovered = fixture.coordinator(client: CoordinatorSuccessClient())
+            .reconcileInterruptedJobs(at: fixture.meeting.startedAt)
+
+        #expect(recovered.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: fixture.meetingDirectory.path))
+        #expect(!FileManager.default.fileExists(atPath: tombstone.path))
+    }
+
     private func writeEvidence(_ object: [String: Any], named filename: String) throws {
         guard let directory = ProcessInfo.processInfo.environment["BRAIN_TEST_EVIDENCE_DIR"] else {
             return

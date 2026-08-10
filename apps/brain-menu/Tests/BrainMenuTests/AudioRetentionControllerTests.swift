@@ -521,6 +521,32 @@ struct AudioRetentionControllerTests {
     }
 
     @Test
+    func sourceOnlyRecordingIsDiscoverableAndDeletable() throws {
+        let fixture = try AudioRetentionFixture()
+        let controller = fixture.controller()
+        let capture = try fixture.makeAudio()
+        var failed = fixture.meeting
+        failed.transcriptionState = .failed
+        failed.transcriptionAttemptCount = 1
+        failed.transcriptionErrorMessage = "Keep this terminal failure."
+        try fixture.store.save(failed, utterances: fixture.utterances)
+
+        #expect(controller.hasDeletableRecording(for: failed.id))
+
+        let deleted = try controller.deleteRecording(for: failed.id, confirmed: true)
+        let stored = try fixture.store.load(failed.id)
+
+        #expect(deleted.audioRetentionState == .deleted)
+        #expect(deleted.transcriptionState == .failed)
+        #expect(deleted.transcriptionErrorMessage == failed.transcriptionErrorMessage)
+        #expect(stored.utterances == fixture.utterances)
+        #expect(capture.tracks.allSatisfy {
+            !FileManager.default.fileExists(atPath: $0.fileURL.path)
+        })
+        #expect(!controller.hasDeletableRecording(for: failed.id))
+    }
+
+    @Test
     func launchReconciliationFinishesDeletionWithoutUsableMetadata() throws {
         let fixture = try AudioRetentionFixture()
         let controller = fixture.controller()

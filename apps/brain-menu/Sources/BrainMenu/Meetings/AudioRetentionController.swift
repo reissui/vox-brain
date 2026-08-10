@@ -245,6 +245,17 @@ final class AudioRetentionController: @unchecked Sendable {
         }
     }
 
+    func hasDeletableRecording(for meetingID: UUID) -> Bool {
+        guard let stored = try? store.load(meetingID),
+              stored.meeting.audioRetentionState != .deleted,
+              let artifacts = try? audioArtifacts(
+                  in: store.directoryURL(for: meetingID).standardizedFileURL
+              ) else {
+            return false
+        }
+        return !artifacts.isEmpty
+    }
+
     @discardableResult
     func deleteRecording(for meetingID: UUID, confirmed: Bool) throws -> MeetingRecord {
         guard confirmed else {

@@ -530,6 +530,54 @@ struct MeetingStoreTests {
         ))
     }
 
+    @Test
+    func deletionAtomicallyHidesTheMeetingBeforeCleanup() throws {
+        let temp = try StoreTestDirectory()
+        let record = makeRecord(title: "Delete durably", startedAt: 100)
+        let store = MeetingStore(rootURL: temp.url)
+        try store.save(record, utterances: [])
+        let interruptedStore = MeetingStore(rootURL: temp.url) { event in
+            if event == .afterAtomicDeletionRename {
+                throw InjectedMeetingStoreFailure()
+            }
+        }
+
+        #expect(throws: InjectedMeetingStoreFailure.self) {
+            try interruptedStore.delete(record.id, confirmed: true)
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: store.directoryURL(for: record.id).path))
+        let tombstones = try FileManager.default.contentsOfDirectory(
+            at: temp.url,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasSuffix(".deleting") }
+        #expect(tombstones.count == 1)
+    }
+
+    @Test
+    func listingReconcilesCommittedDeletionBeforeOrphanRecovery() throws {
+        let temp = try StoreTestDirectory()
+        let record = makeRecord(title: "Do not recover", startedAt: 100)
+        let store = MeetingStore(rootURL: temp.url)
+        try store.save(record, utterances: [])
+        let tombstone = temp.url.appendingPathComponent(
+            ".\(record.id.uuidString).\(UUID().uuidString).deleting",
+            isDirectory: true
+        )
+        try FileManager.default.moveItem(
+            at: store.directoryURL(for: record.id),
+            to: tombstone
+        )
+
+        let entries = try MeetingStore(rootURL: temp.url).list()
+
+        #expect(entries.allSatisfy { $0.id != record.id })
+        #expect(!FileManager.default.fileExists(atPath: tombstone.path))
+        #expect(throws: MeetingStoreError.meetingNotFound(record.id)) {
+            try MeetingStore(rootURL: temp.url).save(record, utterances: [])
+        }
+    }
+
     private func makeRecord(title: String, startedAt: TimeInterval) -> MeetingRecord {
         MeetingRecord(
             title: title,

@@ -358,7 +358,7 @@ private struct AudioPrivacySettingsView: View {
         Form {
             Section("Audio/Privacy") {
                 Label("Recordings stay on this Mac", systemImage: "internaldrive.fill")
-                Text("Brain always saves compact Meeting and Voice Note audio until you explicitly delete the recording or its item. Audio never leaves this Mac; only the final transcript is saved to your vault.")
+                Text("After successful transcription, Brain saves compact AAC audio. Failed or interrupted attempts keep larger raw recovery audio until you retry or explicitly delete the recording or its item. Audio never leaves this Mac; only the final transcript is saved to your vault.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

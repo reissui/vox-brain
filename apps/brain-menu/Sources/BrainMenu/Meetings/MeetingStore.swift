@@ -8,6 +8,7 @@ enum MeetingStoreFile: String, Equatable, Sendable {
 
 enum MeetingStoreWriteEvent: Equatable, Sendable {
     case beforeAtomicReplacement(MeetingStoreFile)
+    case afterAtomicDeletionRename
 }
 
 enum UnavailableMeetingReason: String, Equatable, Sendable {
@@ -98,7 +99,12 @@ final class MeetingStore: @unchecked Sendable {
     func save(_ meeting: MeetingRecord, utterances: [MeetingUtterance]) throws {
         try Self.mutationRegistry.withSave(
             rootPath: rootURL.path,
-            meetingID: meeting.id
+            meetingID: meeting.id,
+            durableDeletionExists: {
+                self.withLock {
+                    self.hasDeletionTombstoneLocked(for: meeting.id)
+                }
+            }
         ) {
             try withLock {
                 try saveLocked(meeting, utterances: utterances)
@@ -194,76 +200,83 @@ final class MeetingStore: @unchecked Sendable {
     }
 
     func list() throws -> [MeetingListEntry] {
-        try withLock {
-            guard fileManager.fileExists(atPath: rootURL.path) else { return [] }
-            try requireSafeDirectory(rootURL)
+        try Self.mutationRegistry.withReconciliation(rootPath: rootURL.path) {
+            try withLock {
+                guard fileManager.fileExists(atPath: rootURL.path) else {
+                    return ([], [])
+                }
+                try requireSafeDirectory(rootURL)
+                let deletedMeetingIDs = try cleanupDeletionTombstonesLocked()
 
-            let children = try fileManager.contentsOfDirectory(
-                at: rootURL,
-                includingPropertiesForKeys: [.contentModificationDateKey],
-                options: [.skipsHiddenFiles]
-            )
+                let children = try fileManager.contentsOfDirectory(
+                    at: rootURL,
+                    includingPropertiesForKeys: [.contentModificationDateKey],
+                    options: [.skipsHiddenFiles]
+                )
 
-            let candidates = children.map { child -> ListingCandidate in
-                let directoryName = child.lastPathComponent
-                let id = UUID(uuidString: directoryName)
-                let modifiedAt = (try? child.resourceValues(
-                    forKeys: [.contentModificationDateKey]
-                ).contentModificationDate) ?? .distantPast
+                let candidates = children.map { child -> ListingCandidate in
+                    let directoryName = child.lastPathComponent
+                    let id = UUID(uuidString: directoryName)
+                    let modifiedAt = (try? child.resourceValues(
+                        forKeys: [.contentModificationDateKey]
+                    ).contentModificationDate) ?? .distantPast
 
-                guard let id else {
-                    return ListingCandidate(
-                        entry: .unavailable(UnavailableMeeting(
-                            id: nil,
-                            directoryName: directoryName,
-                            reason: .unsafeEntry
-                        )),
-                        sortDate: modifiedAt,
-                        directoryName: directoryName
-                    )
+                    guard let id else {
+                        return ListingCandidate(
+                            entry: .unavailable(UnavailableMeeting(
+                                id: nil,
+                                directoryName: directoryName,
+                                reason: .unsafeEntry
+                            )),
+                            sortDate: modifiedAt,
+                            directoryName: directoryName
+                        )
+                    }
+
+                    do {
+                        let stored = try load(id: id, from: child)
+                        return ListingCandidate(
+                            entry: .available(stored.meeting),
+                            sortDate: stored.meeting.startedAt,
+                            directoryName: directoryName
+                        )
+                    } catch let error as ClassifiedLoadError {
+                        return ListingCandidate(
+                            entry: .unavailable(UnavailableMeeting(
+                                id: id,
+                                directoryName: directoryName,
+                                reason: error.reason
+                            )),
+                            sortDate: modifiedAt,
+                            directoryName: directoryName
+                        )
+                    } catch {
+                        return ListingCandidate(
+                            entry: .unavailable(UnavailableMeeting(
+                                id: id,
+                                directoryName: directoryName,
+                                reason: .unsafeEntry
+                            )),
+                            sortDate: modifiedAt,
+                            directoryName: directoryName
+                        )
+                    }
                 }
 
-                do {
-                    let stored = try load(id: id, from: child)
-                    return ListingCandidate(
-                        entry: .available(stored.meeting),
-                        sortDate: stored.meeting.startedAt,
-                        directoryName: directoryName
-                    )
-                } catch let error as ClassifiedLoadError {
-                    return ListingCandidate(
-                        entry: .unavailable(UnavailableMeeting(
-                            id: id,
-                            directoryName: directoryName,
-                            reason: error.reason
-                        )),
-                        sortDate: modifiedAt,
-                        directoryName: directoryName
-                    )
-                } catch {
-                    return ListingCandidate(
-                        entry: .unavailable(UnavailableMeeting(
-                            id: id,
-                            directoryName: directoryName,
-                            reason: .unsafeEntry
-                        )),
-                        sortDate: modifiedAt,
-                        directoryName: directoryName
-                    )
-                }
+                let entries = candidates
+                    .sorted {
+                        if $0.sortDate != $1.sortDate { return $0.sortDate > $1.sortDate }
+                        return $0.directoryName < $1.directoryName
+                    }
+                    .prefix(Self.maximumRecords)
+                    .map(\.entry)
+                return (entries, deletedMeetingIDs)
             }
-
-            return candidates
-                .sorted {
-                    if $0.sortDate != $1.sortDate { return $0.sortDate > $1.sortDate }
-                    return $0.directoryName < $1.directoryName
-                }
-                .prefix(Self.maximumRecords)
-                .map(\.entry)
         }
     }
 
     func delete(_ id: UUID, confirmed: Bool) throws {
+        var tombstone: URL?
         try Self.mutationRegistry.withDelete(rootPath: rootURL.path, meetingID: id) {
             try withLock {
                 guard confirmed else {
@@ -280,8 +293,14 @@ final class MeetingStore: @unchecked Sendable {
                 guard type == .typeDirectory || type == .typeSymbolicLink else {
                     throw MeetingStoreError.unsafeStorePath(directory.lastPathComponent)
                 }
-                try fileManager.removeItem(at: directory)
+                let deletionTombstone = deletionTombstoneURL(for: id)
+                try fileManager.moveItem(at: directory, to: deletionTombstone)
+                tombstone = deletionTombstone
             }
+        }
+        try failureInjector?(.afterAtomicDeletionRename)
+        if let tombstone {
+            try? fileManager.removeItem(at: tombstone)
         }
     }
 
@@ -499,6 +518,62 @@ final class MeetingStore: @unchecked Sendable {
         return attributes[.type] as? FileAttributeType == .typeRegular
     }
 
+    private func deletionTombstoneURL(for id: UUID) -> URL {
+        rootURL.appendingPathComponent(
+            ".\(id.uuidString).\(UUID().uuidString).deleting",
+            isDirectory: true
+        )
+    }
+
+    private func hasDeletionTombstoneLocked(for id: UUID) -> Bool {
+        guard fileManager.fileExists(atPath: rootURL.path),
+              let children = try? fileManager.contentsOfDirectory(
+                  at: rootURL,
+                  includingPropertiesForKeys: nil
+              ) else {
+            return false
+        }
+        return children.contains { child in
+            Self.deletionTombstoneMeetingID(child.lastPathComponent) == id
+                && isDirectoryOrSymbolicLink(child)
+        }
+    }
+
+    private func cleanupDeletionTombstonesLocked() throws -> Set<UUID> {
+        var deletedMeetingIDs = Set<UUID>()
+        for child in try fileManager.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: nil
+        ) {
+            guard let meetingID = Self.deletionTombstoneMeetingID(child.lastPathComponent),
+                  isDirectoryOrSymbolicLink(child) else {
+                continue
+            }
+            deletedMeetingIDs.insert(meetingID)
+            try? fileManager.removeItem(at: child)
+        }
+        return deletedMeetingIDs
+    }
+
+    private func isDirectoryOrSymbolicLink(_ url: URL) -> Bool {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              let type = attributes[.type] as? FileAttributeType else {
+            return false
+        }
+        return type == .typeDirectory || type == .typeSymbolicLink
+    }
+
+    private static func deletionTombstoneMeetingID(_ name: String) -> UUID? {
+        let components = name.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 4,
+              components[0].isEmpty,
+              components[3] == "deleting",
+              UUID(uuidString: String(components[2])) != nil else {
+            return nil
+        }
+        return UUID(uuidString: String(components[1]))
+    }
+
     private func stage(_ data: Data, for file: MeetingStoreFile, in directory: URL) throws -> URL {
         let temporary = directory.appendingPathComponent(
             ".\(file.rawValue).\(UUID().uuidString).tmp",
@@ -597,10 +672,14 @@ private final class MeetingStoreMutationRegistry: @unchecked Sendable {
     func withSave<T>(
         rootPath: String,
         meetingID: UUID,
+        durableDeletionExists: () -> Bool,
         _ operation: () throws -> T
     ) throws -> T {
         try lock.withLock {
             let key = Key(rootPath: rootPath, meetingID: meetingID)
+            if durableDeletionExists() {
+                deleted.insert(key)
+            }
             guard !deleted.contains(key) else {
                 throw MeetingStoreError.meetingNotFound(meetingID)
             }
@@ -616,6 +695,19 @@ private final class MeetingStoreMutationRegistry: @unchecked Sendable {
         try lock.withLock {
             let result = try operation()
             deleted.insert(Key(rootPath: rootPath, meetingID: meetingID))
+            return result
+        }
+    }
+
+    func withReconciliation<T>(
+        rootPath: String,
+        _ operation: () throws -> (T, Set<UUID>)
+    ) throws -> T {
+        try lock.withLock {
+            let (result, meetingIDs) = try operation()
+            deleted.formUnion(meetingIDs.map {
+                Key(rootPath: rootPath, meetingID: $0)
+            })
             return result
         }
     }

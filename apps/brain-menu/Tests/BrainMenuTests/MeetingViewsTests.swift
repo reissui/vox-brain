@@ -1183,6 +1183,39 @@ struct MeetingViewsTests {
             options: .atomic
         )
     }
+
+    @Test
+    func detailOffersTranscriptPreservingDeletionForSourceOnlyAudio() async throws {
+        let id = UUID()
+        var record = meeting(id: id, title: "Failed archive", start: .now)
+        record.transcriptionState = .failed
+        record.transcriptionAttemptCount = 1
+        record.transcriptionErrorMessage = "Archival was interrupted."
+        let transcript = try utterances()
+        let audio = MeetingDetailAudioSpy(meeting: record, deletableAudio: true)
+        let controller = MeetingDetailController(
+            meetingID: id,
+            store: MemoryMeetingViewStore(values: [
+                id: StoredMeeting(meeting: record, utterances: transcript),
+            ]),
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: audio,
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: MeetingClipboardSpy()
+        )
+
+        controller.load()
+
+        #expect(controller.viewModel.audioControls == [.delete])
+        #expect(controller.viewModel.hasTranscript)
+        await controller.perform(.requestAudioDeletion)
+        #expect(controller.isAudioDeletionPending)
+        await controller.perform(.confirmAudioDeletion)
+        #expect(audio.deleteCalls == 1)
+        #expect(controller.viewModel.hasTranscript)
+        #expect(controller.viewModel.audioRetentionState == .deleted)
+    }
 }
 
 private enum TestMeetingViewError: Error, LocalizedError {
@@ -1325,21 +1358,28 @@ private final class MeetingDetailUploadSpy: MeetingDetailUploadControlling {
 
 private final class MeetingDetailAudioSpy: MeetingDetailAudioControlling, @unchecked Sendable {
     private var meeting: MeetingRecord
+    private var deletableAudio: Bool
     private(set) var revealCalls = 0
     private(set) var exports: [URL] = []
     private(set) var deleteCalls = 0
 
-    init(meeting: MeetingRecord) { self.meeting = meeting }
+    init(meeting: MeetingRecord, deletableAudio: Bool? = nil) {
+        self.meeting = meeting
+        self.deletableAudio = deletableAudio ?? (meeting.retainedAudio != nil)
+    }
 
     func revealRecording(for meetingID: UUID) throws { revealCalls += 1 }
     func exportRecording(for meetingID: UUID, to destination: URL?) throws -> URL? {
         if let destination { exports.append(destination) }
         return destination
     }
+    func hasDeletableRecording(for meetingID: UUID) -> Bool { deletableAudio }
     func deleteRecording(for meetingID: UUID, confirmed: Bool) throws -> MeetingRecord {
         guard confirmed else { throw AudioRetentionControllerError.deletionRequiresConfirmation }
         deleteCalls += 1
         meeting.retainedAudio = nil
+        meeting.audioRetentionState = .deleted
+        deletableAudio = false
         return meeting
     }
 }
