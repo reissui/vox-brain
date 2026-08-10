@@ -1,6 +1,6 @@
 # Native Meetings and Voice Notes capture
 
-Brain.app records microphone plus system audio on the Mac where the meeting
+Brain.app records microphone plus system audio on the Mac where the recording
 occurs. Its included VoxType speech engine transcribes locally; a compatible
 standalone VoxType installation can be used instead and takes precedence. The
 user reviews the transcript before Brain sends finalized text to the active
@@ -65,9 +65,9 @@ starts or stops recording automatically.
 3. Pause/resume explicitly. Dictation cannot take the microphone during either
    kind of recording.
 4. Choose **End & Process**. Dismissing the prompt keeps recording.
-5. Review the saved item in its own section. Meetings include transcript,
-   speakers, talk-time totals, summary, action items, and any email draft;
-   Voice Notes remain in the Voice Notes list even after they are renamed.
+5. Review the saved item in its own section. Meetings and Voice Notes include
+   transcript, speakers, talk-time totals, summary, action items, and any email
+   draft. Voice Notes remain in the Voice Notes list even after they are renamed.
 6. Upload the finalized transcript. Later edits require an explicit revision.
 
 With retention off, Brain removes local audio after final transcript
