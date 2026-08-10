@@ -1207,8 +1207,12 @@ struct MeetingViewsTests {
 
         controller.load()
 
+        #expect(audio.deletionAvailabilityChecks == 1)
         #expect(controller.viewModel.audioControls == [.delete])
         #expect(controller.viewModel.hasTranscript)
+        _ = controller.viewModel
+        _ = controller.viewModel
+        #expect(audio.deletionAvailabilityChecks == 1)
         await controller.perform(.requestAudioDeletion)
         #expect(controller.isAudioDeletionPending)
         await controller.perform(.confirmAudioDeletion)
@@ -1362,6 +1366,7 @@ private final class MeetingDetailAudioSpy: MeetingDetailAudioControlling, @unche
     private(set) var revealCalls = 0
     private(set) var exports: [URL] = []
     private(set) var deleteCalls = 0
+    private(set) var deletionAvailabilityChecks = 0
 
     init(meeting: MeetingRecord, deletableAudio: Bool? = nil) {
         self.meeting = meeting
@@ -1373,7 +1378,10 @@ private final class MeetingDetailAudioSpy: MeetingDetailAudioControlling, @unche
         if let destination { exports.append(destination) }
         return destination
     }
-    func hasDeletableRecording(for meetingID: UUID) -> Bool { deletableAudio }
+    func hasDeletableRecording(for meetingID: UUID) -> Bool {
+        deletionAvailabilityChecks += 1
+        return deletableAudio
+    }
     func deleteRecording(for meetingID: UUID, confirmed: Bool) throws -> MeetingRecord {
         guard confirmed else { throw AudioRetentionControllerError.deletionRequiresConfirmation }
         deleteCalls += 1

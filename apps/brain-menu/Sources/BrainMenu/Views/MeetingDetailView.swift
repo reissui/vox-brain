@@ -287,6 +287,8 @@ final class MeetingDetailController {
     private(set) var isAudioDeletionInProgress = false
     private(set) var isTranscriptionRetryInProgress = false
     private(set) var isMeetingDeletionInProgress = false
+    private(set) var isPlayableAudioAvailable = false
+    private(set) var isAudioDeletionAvailable = false
     var selectedTab: MeetingDetailTab = .summary
     var selectedUtteranceIDs: Set<UUID> = []
     var titleDraft = ""
@@ -361,13 +363,10 @@ final class MeetingDetailController {
                 }
                 return $0.id < $1.id
             }
-        let playableAudioExists = meeting.map {
-            $0.retainedAudio != nil && audioChecker.hasLocalAudio(for: $0)
-        } ?? false
-        var audioControls: [MeetingAudioControl] = playableAudioExists
+        var audioControls: [MeetingAudioControl] = isPlayableAudioAvailable
             ? [.reveal, .export]
             : []
-        if meeting != nil, audioController.hasDeletableRecording(for: meetingID) {
+        if meeting != nil, isAudioDeletionAvailable {
             audioControls.append(.delete)
         }
         var effectiveMeeting = meeting
@@ -450,6 +449,7 @@ final class MeetingDetailController {
                 stored = StoredMeeting(meeting: stored.meeting, utterances: cleanedUtterances)
             }
             meeting = stored.meeting
+            refreshAudioCapabilities(for: stored.meeting)
             lastKnownRecordingKind = stored.meeting.recordingKind
             if isInitialLoad, stored.meeting.isVoiceNote {
                 selectedTab = .transcript
@@ -472,6 +472,7 @@ final class MeetingDetailController {
             state = .ready
         } catch let error as MeetingStoreError {
             meeting = nil
+            refreshAudioCapabilities(for: nil)
             utterances = []
             uploadRevision = nil
             editor = SpeakerEditor(utterances: [])
@@ -483,6 +484,7 @@ final class MeetingDetailController {
             }
         } catch {
             meeting = nil
+            refreshAudioCapabilities(for: nil)
             utterances = []
             uploadRevision = nil
             editor = SpeakerEditor(utterances: [])
@@ -542,7 +544,7 @@ final class MeetingDetailController {
         case .exportAudio(let destination):
             exportAudio(to: destination)
         case .requestAudioDeletion:
-            guard viewModel.audioControls.contains(.delete),
+            guard isAudioDeletionAvailable,
                   !isAudioDeletionInProgress,
                   !isMeetingDeletionInProgress else { return }
             isAudioDeletionPending = true
@@ -739,7 +741,7 @@ final class MeetingDetailController {
     }
 
     private func revealAudio() {
-        guard viewModel.audioControls.contains(.reveal) else { return }
+        guard isPlayableAudioAvailable else { return }
         do {
             try audioController.revealRecording(for: meetingID)
             errorMessage = nil
@@ -749,7 +751,7 @@ final class MeetingDetailController {
     }
 
     private func exportAudio(to destination: URL?) {
-        guard viewModel.audioControls.contains(.export) else { return }
+        guard isPlayableAudioAvailable else { return }
         do {
             _ = try audioController.exportRecording(for: meetingID, to: destination)
             errorMessage = nil
@@ -761,7 +763,7 @@ final class MeetingDetailController {
     private func deleteAudio() async {
         guard isAudioDeletionPending,
               !isAudioDeletionInProgress,
-              viewModel.audioControls.contains(.delete) else { return }
+              isAudioDeletionAvailable else { return }
         isAudioDeletionPending = false
         isAudioDeletionInProgress = true
         defer { isAudioDeletionInProgress = false }
@@ -779,6 +781,8 @@ final class MeetingDetailController {
             }
             if let deletedMeeting {
                 meeting = deletedMeeting
+                isPlayableAudioAvailable = false
+                isAudioDeletionAvailable = false
             }
             errorMessage = nil
         } catch {
@@ -797,6 +801,7 @@ final class MeetingDetailController {
             }
             isMeetingDeletionPending = false
             meeting = nil
+            refreshAudioCapabilities(for: nil)
             utterances = []
             analysis = nil
             uploadRevision = nil
@@ -820,6 +825,17 @@ final class MeetingDetailController {
         } catch {
             errorMessage = Self.bounded(error)
         }
+    }
+
+    private func refreshAudioCapabilities(for meeting: MeetingRecord?) {
+        guard let meeting else {
+            isPlayableAudioAvailable = false
+            isAudioDeletionAvailable = false
+            return
+        }
+        isPlayableAudioAvailable = meeting.retainedAudio != nil
+            && audioChecker.hasLocalAudio(for: meeting)
+        isAudioDeletionAvailable = audioController.hasDeletableRecording(for: meetingID)
     }
 
     private func loadUploadRevision() {
