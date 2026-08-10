@@ -439,9 +439,14 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             ].contains(meeting.lifecycleState)
             let interruptedTranscript = [.pending, .processing]
                 .contains(meeting.transcriptionState)
-            let interruptedArchive = meeting.transcriptionState == .completed
+            let missingArchive = meeting.transcriptionState == .completed
                 && meeting.transcriptionAttemptCount > 0
                 && meeting.retainedAudio == nil
+            let interruptedArchive = missingArchive
+                && Self.hasRecoverableSourceAudio(
+                    in: store.directoryURL(for: meeting.id),
+                    fileManager: fileManagerBox.value
+                )
 
             if interruptedCapture || interruptedTranscript || interruptedArchive {
                 meeting.endedAt = meeting.endedAt ?? date
@@ -778,6 +783,51 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             throw error
         } catch {
             throw MeetingTranscriptionCoordinatorError.unsafeAudioManifest
+        }
+    }
+
+    /// Distinguishes a recoverable archive crash from a legacy item or a
+    /// recording the user explicitly deleted. This check is read-only: launch
+    /// reconciliation must never manufacture recovery files for an item that
+    /// intentionally has no audio.
+    private nonisolated static func hasRecoverableSourceAudio(
+        in directory: URL,
+        fileManager: FileManager
+    ) -> Bool {
+        let directory = directory.standardizedFileURL
+        guard directory.isFileURL,
+              directory.path.hasPrefix("/"),
+              directory.resolvingSymlinksInPath().standardizedFileURL == directory,
+              let directoryAttributes = try? fileManager.attributesOfItem(
+                  atPath: directory.path
+              ),
+              directoryAttributes[.type] as? FileAttributeType == .typeDirectory,
+              (directoryAttributes[.ownerAccountID] as? NSNumber)?.uint32Value
+                == Darwin.geteuid(),
+              ((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue
+                ?? 0o777) & 0o077 == 0 else {
+            return false
+        }
+
+        if (try? loadCapture(directory: directory, fileManager: fileManager)) != nil {
+            return true
+        }
+
+        return MeetingAudioSource.allCases.contains { source in
+            let url = directory.appendingPathComponent("\(source.rawValue).f32le.pcm")
+                .standardizedFileURL
+            guard url.deletingLastPathComponent() == directory,
+                  url.resolvingSymlinksInPath().standardizedFileURL == url,
+                  let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+                  attributes[.type] as? FileAttributeType == .typeRegular,
+                  (attributes[.ownerAccountID] as? NSNumber)?.uint32Value
+                    == Darwin.geteuid(),
+                  ((attributes[.posixPermissions] as? NSNumber)?.intValue
+                    ?? 0o777) & 0o077 == 0,
+                  let size = (attributes[.size] as? NSNumber)?.int64Value else {
+                return false
+            }
+            return size > 0 && size % Int64(MemoryLayout<Float>.size) == 0
         }
     }
 

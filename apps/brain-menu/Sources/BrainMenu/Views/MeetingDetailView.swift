@@ -282,6 +282,7 @@ final class MeetingDetailController {
     private(set) var copiedMessage: String?
     private(set) var isMeetingDeletionPending = false
     private(set) var isAudioDeletionPending = false
+    private(set) var isAudioDeletionInProgress = false
     private(set) var isTranscriptionRetryInProgress = false
     private(set) var isMeetingDeletionInProgress = false
     var selectedTab: MeetingDetailTab = .summary
@@ -531,12 +532,14 @@ final class MeetingDetailController {
         case .exportAudio(let destination):
             exportAudio(to: destination)
         case .requestAudioDeletion:
-            guard !viewModel.audioControls.isEmpty else { return }
+            guard !viewModel.audioControls.isEmpty,
+                  !isAudioDeletionInProgress,
+                  !isMeetingDeletionInProgress else { return }
             isAudioDeletionPending = true
         case .confirmAudioDeletion:
-            deleteAudio()
+            await deleteAudio()
         case .cancelAudioDeletion:
-            isAudioDeletionPending = false
+            if !isAudioDeletionInProgress { isAudioDeletionPending = false }
         case .retryTranscription:
             await retryTranscription()
         case .retryUpload:
@@ -546,7 +549,7 @@ final class MeetingDetailController {
             await uploadController.reupload(meetingID: meetingID)
             reloadMeetingAfterTypedAction()
         case .requestMeetingDeletion:
-            guard meeting != nil else { return }
+            guard meeting != nil, !isAudioDeletionInProgress else { return }
             isMeetingDeletionPending = true
         case .confirmMeetingDeletion:
             await deleteMeeting()
@@ -557,6 +560,7 @@ final class MeetingDetailController {
 
     private func retryTranscription() async {
         guard !isTranscriptionRetryInProgress,
+              !isAudioDeletionInProgress,
               !isMeetingDeletionInProgress,
               !transcriptionController.isRunning(meetingID: meetingID) else {
             errorMessage = MeetingTranscriptionCoordinatorError
@@ -568,7 +572,9 @@ final class MeetingDetailController {
         errorMessage = nil
         do {
             _ = try await transcriptionController.retry(meetingID: meetingID)
-            guard !isMeetingDeletionInProgress, state != .deleted else { return }
+            guard !isAudioDeletionInProgress,
+                  !isMeetingDeletionInProgress,
+                  state != .deleted else { return }
             load()
         } catch {
             errorMessage = Self.bounded(error)
@@ -737,12 +743,18 @@ final class MeetingDetailController {
         }
     }
 
-    private func deleteAudio() {
+    private func deleteAudio() async {
         guard isAudioDeletionPending,
+              !isAudioDeletionInProgress,
               viewModel.audioControls.contains(.delete) else { return }
+        isAudioDeletionPending = false
+        isAudioDeletionInProgress = true
+        defer { isAudioDeletionInProgress = false }
+
+        await transcriptionController.cancelAndWait(meetingID: meetingID)
+        guard state != .deleted, !isMeetingDeletionInProgress else { return }
         do {
             meeting = try audioController.deleteRecording(for: meetingID, confirmed: true)
-            isAudioDeletionPending = false
             errorMessage = nil
         } catch {
             errorMessage = Self.bounded(error)

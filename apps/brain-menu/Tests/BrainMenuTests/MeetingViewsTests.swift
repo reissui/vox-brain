@@ -877,6 +877,45 @@ struct MeetingViewsTests {
     }
 
     @Test
+    func detailCancelsTranscriptionBeforeConfirmedAudioDeletion() async throws {
+        let id = UUID()
+        let record = meeting(
+            id: id,
+            title: "Retrying transcript",
+            start: .now,
+            retainedAudio: RetainedAudioMetadata(
+                filename: AudioRetentionController.retainedFilename,
+                format: AudioRetentionController.retainedFormat,
+                sizeBytes: 100,
+                durationMilliseconds: 3_000
+            )
+        )
+        let audio = MeetingDetailAudioSpy(meeting: record)
+        let transcription = MeetingDetailTranscriptionSpy(isRunning: true)
+        let controller = MeetingDetailController(
+            meetingID: id,
+            store: MemoryMeetingViewStore(values: [
+                id: StoredMeeting(meeting: record, utterances: []),
+            ]),
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: audio,
+            audioChecker: FixedAudioChecker(value: true),
+            clipboard: MeetingClipboardSpy(),
+            transcriptionController: transcription
+        )
+
+        controller.load()
+        await controller.perform(.requestAudioDeletion)
+        await controller.perform(.confirmAudioDeletion)
+
+        #expect(transcription.cancellations == [id])
+        #expect(audio.deleteCalls == 1)
+        #expect(controller.meeting?.retainedAudio == nil)
+        #expect(!controller.isAudioDeletionInProgress)
+    }
+
+    @Test
     func openingQueuedMeetingResumesItsDurableUpload() async throws {
         let id = UUID()
         let record = meeting(id: id, title: "Queued upload", start: .now)

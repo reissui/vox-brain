@@ -558,6 +558,49 @@ struct MeetingTranscriptionCoordinatorTests {
     }
 
     @Test
+    func launchReconciliationLeavesDeletedAndLegacyNoAudioItemsCompleted() throws {
+        let deletedFixture = try MeetingTranscriptionCoordinatorFixture()
+        let capture = try deletedFixture.makeCapture()
+        var completed = deletedFixture.meeting
+        completed.transcriptionState = .completed
+        completed.transcriptionAttemptCount = 1
+        let archived = try deletedFixture.retention.finalize(
+            meeting: completed,
+            utterances: [],
+            audio: capture
+        )
+        let deleted = try deletedFixture.retention.deleteRecording(
+            for: archived.id,
+            confirmed: true
+        )
+
+        let deletedReconciled = deletedFixture.coordinator(client: CoordinatorSuccessClient())
+            .reconcileInterruptedJobs(at: deleted.startedAt)
+        let deletedStored = try deletedFixture.store.load(deleted.id).meeting
+
+        #expect(deletedReconciled.isEmpty)
+        #expect(deletedStored == deleted)
+        #expect(deletedStored.transcriptionState == .completed)
+        #expect(deletedStored.retainedAudio == nil)
+
+        let legacyFixture = try MeetingTranscriptionCoordinatorFixture()
+        var legacy = legacyFixture.meeting
+        legacy.transcriptionState = .completed
+        legacy.transcriptionAttemptCount = 1
+        legacy.retainedAudio = nil
+        try legacyFixture.store.save(legacy, utterances: [])
+
+        let legacyReconciled = legacyFixture.coordinator(client: CoordinatorSuccessClient())
+            .reconcileInterruptedJobs(at: legacy.startedAt)
+        let legacyStored = try legacyFixture.store.load(legacy.id).meeting
+
+        #expect(legacyReconciled.isEmpty)
+        #expect(legacyStored == legacy)
+        #expect(legacyStored.transcriptionState == .completed)
+        #expect(legacyStored.retainedAudio == nil)
+    }
+
+    @Test
     func retryReconstructsManifestlessRawTracks() async throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         _ = try fixture.makeCapture()
