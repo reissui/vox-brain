@@ -424,6 +424,74 @@ struct MeetingAudioCaptureTests {
     }
 
     @Test
+    func microphoneStartupRecoversFromATransientAudioEngineFailure() async throws {
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 48_000,
+            channels: 1
+        ))
+        let engine = RecordingMicrophoneAudioEngine(
+            format: format,
+            transientStartFailureCount: 1
+        )
+        let inventory = FixedMicrophoneInventory(devices: [
+            MeetingMicrophoneDevice(
+                id: "default-microphone",
+                name: "Default microphone",
+                coreAudioID: 42,
+                isSystemDefault: true
+            ),
+        ], defaultDeviceUID: "default-microphone")
+        let source = AVAudioEngineMeetingAudioSource(
+            selection: .systemDefault,
+            inventory: inventory,
+            engine: engine,
+            authorizationStatus: { .authorized }
+        )
+
+        try await source.start { _ in }
+
+        #expect(engine.startCount == 2)
+        #expect(engine.isRunning)
+        #expect(engine.removeTapCount == 1)
+        #expect(engine.stopCount == 1)
+        await source.stop()
+    }
+
+    @Test
+    func microphoneStartupRetriesAreBoundedWhenTheDeviceCannotRecover() async throws {
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 48_000,
+            channels: 1
+        ))
+        let engine = RecordingMicrophoneAudioEngine(
+            format: format,
+            transientStartFailureCount: 10
+        )
+        let source = AVAudioEngineMeetingAudioSource(
+            selection: .systemDefault,
+            inventory: FixedMicrophoneInventory(devices: [
+                MeetingMicrophoneDevice(
+                    id: "default-microphone",
+                    name: "Default microphone",
+                    coreAudioID: 42,
+                    isSystemDefault: true
+                ),
+            ], defaultDeviceUID: "default-microphone"),
+            engine: engine,
+            authorizationStatus: { .authorized }
+        )
+
+        await #expect(throws: NativeMeetingAudioSourceError.startFailed) {
+            try await source.start { _ in }
+        }
+
+        #expect(engine.startCount == 4)
+        #expect(engine.removeTapCount == 4)
+        #expect(engine.stopCount == 4)
+        #expect(!engine.isRunning)
+    }
+
+    @Test
     func runningEngineRecoversAfterADeviceConfigurationChange() async throws {
         let format = try #require(AVAudioFormat(
             standardFormatWithSampleRate: 48_000,
@@ -724,12 +792,17 @@ private final class RecordingMicrophoneAudioEngine: MeetingMicrophoneAudioEngine
     private(set) var startCount = 0
     private(set) var isRunning = false
     private(set) var didSelectBeforeInstallingTap = false
+    private var transientStartFailureCount: Int
 
-    init(format: AVAudioFormat) { formats = [format] }
+    init(format: AVAudioFormat, transientStartFailureCount: Int = 0) {
+        formats = [format]
+        self.transientStartFailureCount = transientStartFailureCount
+    }
 
     init(formats: [AVAudioFormat]) {
         precondition(!formats.isEmpty)
         self.formats = formats
+        transientStartFailureCount = 0
     }
 
     func selectDevice(_ deviceID: AudioDeviceID) throws {
@@ -755,6 +828,10 @@ private final class RecordingMicrophoneAudioEngine: MeetingMicrophoneAudioEngine
     func prepare() {}
     func start() throws {
         startCount += 1
+        if transientStartFailureCount > 0 {
+            transientStartFailureCount -= 1
+            throw NativeMeetingAudioSourceError.startFailed
+        }
         isRunning = true
     }
     func stop() {

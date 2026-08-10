@@ -81,6 +81,10 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     var retainedAudio: RetainedAudioMetadata?
     var isUnread: Bool
 
+    var isVoiceNote: Bool {
+        titleSource == .manual && detectedApplication == nil
+    }
+
     init(
         id: UUID = UUID(),
         title: String,

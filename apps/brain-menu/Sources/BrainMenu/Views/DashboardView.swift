@@ -21,6 +21,7 @@ enum BrainRemoteKnowledgeNavigation {
 enum DashboardSection: String, CaseIterable, Identifiable {
     case activity = "Activity"
     case dictation = "Dictation"
+    case voiceNotes = "Voice Notes"
     case meetings = "Meetings"
     case aiSetup = "AI Setup"
     case settings = "Settings"
@@ -31,6 +32,7 @@ enum DashboardSection: String, CaseIterable, Identifiable {
         switch self {
         case .activity: "waveform.path.ecg"
         case .dictation: "waveform.and.mic"
+        case .voiceNotes: "mic.circle"
         case .meetings: "person.2.wave.2"
         case .aiSetup: "sparkles"
         case .settings: "gearshape"
@@ -129,6 +131,12 @@ struct DashboardView: View {
                                 detail: "Use the shortcut configured in VoxType to dictate."
                             )
                         }
+                    case .voiceNotes:
+                        if let graph {
+                            VoiceNotesWorkspaceView(graph: graph)
+                        } else {
+                            MeetingsView(scope: .voiceNotes)
+                        }
                     case .meetings:
                         if let graph {
                             MeetingsWorkspaceView(graph: graph)
@@ -197,7 +205,7 @@ private struct MeetingsWorkspaceView: View {
                         meetingControl
                     }
 
-                    if graph.meeting.isCapturingAudio {
+                    if graph.meeting.isCapturingAudio && !isVoiceNoteActive {
                         HStack(spacing: 18) {
                             MeetingAudioChannelWaveform(
                                 source: .microphone,
@@ -220,7 +228,7 @@ private struct MeetingsWorkspaceView: View {
                 }
                 .padding()
 
-                if let notice = graph.meetingSavedNotice {
+                if let notice = graph.meetingSavedNotice, !notice.isVoiceNote {
                     HStack(spacing: 10) {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
@@ -246,7 +254,8 @@ private struct MeetingsWorkspaceView: View {
                     .accessibilityAddTraits(.updatesFrequently)
                 }
 
-                if graph.meeting.state == .finalizing {
+                if graph.meeting.state == .finalizing,
+                   graph.meeting.currentMeeting?.isVoiceNote != true {
                     MeetingProcessingPlaceholder(
                         title: "Preparing your meeting",
                         detail: "Brain is saving the recording and completing the local transcript. The meeting will appear below when it is ready."
@@ -255,7 +264,7 @@ private struct MeetingsWorkspaceView: View {
                     .padding(.bottom, 12)
                 }
                 Divider()
-                MeetingsView(controller: graph.meetings) { meetingID in
+                MeetingsView(controller: graph.meetings, scope: .meetings) { meetingID in
                     graph.meetings.markOpened(meetingID)
                     path.append(meetingID)
                 }
@@ -272,7 +281,11 @@ private struct MeetingsWorkspaceView: View {
 
     @ViewBuilder
     private var meetingControl: some View {
-        if graph.meeting.state == .finalizing {
+        if isVoiceNoteActive {
+            Label("Voice Note in progress", systemImage: "mic.circle.fill")
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.secondary)
+        } else if graph.meeting.state == .finalizing {
             HStack(spacing: 7) {
                 ProgressView().controlSize(.small)
                 Text("Saving Meeting…")
@@ -282,43 +295,40 @@ private struct MeetingsWorkspaceView: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Saving meeting and finalizing transcript")
         } else {
-            HStack {
-                Button(meetingButtonTitle) {
-                    Task { await graph.toggleMeeting() }
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(graph.meeting.isCapturingAudio ? .red : nil)
-                .accessibilityHint(
-                    graph.meeting.isCapturingAudio
-                        ? "Stops recording immediately, then saves the final transcript"
-                        : "Starts microphone and computer audio recording"
-                )
-
-                if !graph.meeting.isCapturingAudio {
-                    Button("Record Voice Note", systemImage: "mic.circle") {
-                        Task { await graph.startVoiceNote() }
-                    }
-                    .accessibilityHint(
-                        "Starts a long-form voice note using the reliable meeting recorder"
-                    )
-                }
+            Button(meetingButtonTitle) {
+                Task { await graph.toggleMeeting() }
             }
+            .buttonStyle(.borderedProminent)
+            .tint(graph.meeting.isCapturingAudio ? .red : nil)
+            .accessibilityHint(
+                graph.meeting.isCapturingAudio
+                    ? "Stops recording immediately, then saves the final transcript"
+                    : "Starts microphone and computer audio recording"
+            )
         }
     }
 
     private var meetingButtonTitle: String {
         guard graph.meeting.isCapturingAudio else { return "Start Meeting" }
-        return graph.meeting.currentMeeting?.title == "Voice note"
-            ? "Stop Voice Note"
-            : "Stop Meeting"
+        return "Stop Meeting"
+    }
+
+    private var isVoiceNoteActive: Bool {
+        graph.meeting.isCapturingAudio && graph.meeting.currentMeeting?.isVoiceNote == true
     }
 
     private var meetingTitle: String {
-        graph.meeting.currentMeeting?.title ?? "No active meeting"
+        guard graph.meeting.currentMeeting?.isVoiceNote != true else {
+            return "No active meeting"
+        }
+        return graph.meeting.currentMeeting?.title ?? "No active meeting"
     }
 
     private var meetingDetail: String {
-        switch graph.meeting.state {
+        if isVoiceNoteActive {
+            return "A voice note is active. Manage it from Voice Notes."
+        }
+        return switch graph.meeting.state {
         case .idle, .completed: "Start manually; Brain never starts or stops a meeting automatically."
         case .startSuggested: "Brain noticed a possible meeting. Starting still requires your action."
         case .starting: "Starting microphone and system audio capture…"
@@ -345,6 +355,168 @@ private struct MeetingsWorkspaceView: View {
 
     private func signalStatus(for source: MeetingAudioSource, waiting: String) -> String {
         switch graph.meeting.audioSignalStates[source] ?? .waiting {
+        case .waiting: waiting
+        case .quiet: "Connected — waiting for sound…"
+        case .active: "Live"
+        }
+    }
+}
+
+private struct VoiceNotesWorkspaceView: View {
+    let graph: BrainAppControllerGraph
+    @State private var path: [UUID] = []
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(voiceNoteTitle).font(.headline)
+                            Text(voiceNoteDetail).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        voiceNoteControl
+                    }
+
+                    if isVoiceNoteActive {
+                        MeetingAudioChannelWaveform(
+                            source: .microphone,
+                            level: graph.meeting.audioLevels[.microphone],
+                            samples: graph.meeting.audioHistories[.microphone] ?? [],
+                            signalState: graph.meeting.audioSignalStates[.microphone] ?? .waiting,
+                            status: microphoneStatus,
+                            reduceMotion: reduceMotion
+                        )
+                    }
+                }
+                .padding()
+
+                if let notice = graph.meetingSavedNotice, notice.isVoiceNote {
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Voice note added")
+                                .font(.callout.weight(.semibold))
+                            Text(notice.message)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Dismiss", systemImage: "xmark") {
+                            graph.dismissMeetingSavedNotice()
+                        }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Dismiss voice-note-added notification")
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 10)
+                    .background(Color.green.opacity(0.08))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.updatesFrequently)
+                }
+
+                if graph.meeting.state == .finalizing,
+                   graph.meeting.currentMeeting?.isVoiceNote == true {
+                    MeetingProcessingPlaceholder(
+                        title: "Preparing your voice note",
+                        detail: "Brain is saving the recording and completing the local transcript. The voice note will appear below when it is ready."
+                    )
+                    .padding(.horizontal)
+                    .padding(.bottom, 12)
+                }
+                Divider()
+                MeetingsView(controller: graph.meetings, scope: .voiceNotes) { meetingID in
+                    graph.meetings.markOpened(meetingID)
+                    path.append(meetingID)
+                }
+            }
+            .navigationDestination(for: UUID.self) { meetingID in
+                MeetingDetailView(controller: MeetingDetailController(
+                    meetingID: meetingID,
+                    analysisController: SavedMeetingAnalysisControllerFactory().make()
+                ))
+            }
+            .navigationTitle("Voice Notes")
+        }
+    }
+
+    @ViewBuilder
+    private var voiceNoteControl: some View {
+        if isMeetingActive {
+            Label("Meeting in progress", systemImage: "person.2.wave.2.fill")
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.secondary)
+        } else if graph.meeting.state == .finalizing {
+            HStack(spacing: 7) {
+                ProgressView().controlSize(.small)
+                Text("Saving Voice Note…")
+            }
+            .font(.callout.weight(.medium))
+            .foregroundStyle(.secondary)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Saving voice note and finalizing transcript")
+        } else if isVoiceNoteActive {
+            Button("Stop Voice Note") {
+                Task { await graph.toggleMeeting() }
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .accessibilityHint("Stops recording immediately, then saves the voice note")
+        } else {
+            Button("Record Voice Note", systemImage: "mic.circle") {
+                Task { await graph.startVoiceNote() }
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityHint("Starts a long-form voice note")
+        }
+    }
+
+    private var isVoiceNoteActive: Bool {
+        graph.meeting.isCapturingAudio && graph.meeting.currentMeeting?.isVoiceNote == true
+    }
+
+    private var isMeetingActive: Bool {
+        graph.meeting.isCapturingAudio && graph.meeting.currentMeeting?.isVoiceNote != true
+    }
+
+    private var voiceNoteTitle: String {
+        isVoiceNoteActive ? "Recording voice note" : "Voice Notes"
+    }
+
+    private var voiceNoteDetail: String {
+        if isMeetingActive {
+            return "Finish the active meeting before recording a voice note."
+        }
+        return switch graph.meeting.state {
+        case .starting: "Starting audio capture…"
+        case .recording: "Recording locally on this Mac."
+        case .paused: "Voice note is paused."
+        case .stopSuggested: "Voice note is still recording."
+        case .finalizing: "Recording stopped. Saving the transcript and voice note…"
+        case .idle, .startSuggested, .completed, .failed:
+            "Record a long-form thought and keep its transcript in Brain."
+        }
+    }
+
+    private var microphoneStatus: String {
+        if graph.meeting.audioGuidance[.microphone] != nil { return "Needs attention" }
+        switch graph.meeting.state {
+        case .starting:
+            return signalStatus(waiting: "Connecting…")
+        case .recording, .stopSuggested:
+            return signalStatus(waiting: "Waiting…")
+        case .paused: return "Paused"
+        case .finalizing: return "Saving…"
+        case .idle, .startSuggested, .completed, .failed: return "Off"
+        }
+    }
+
+    private func signalStatus(waiting: String) -> String {
+        switch graph.meeting.audioSignalStates[.microphone] ?? .waiting {
         case .waiting: waiting
         case .quiet: "Connected — waiting for sound…"
         case .active: "Live"

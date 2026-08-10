@@ -57,6 +57,7 @@ struct MeetingFollowUpViewModel: Equatable, Sendable {
 struct MeetingDetailViewModel: Equatable, Sendable {
     let state: MeetingDetailLoadState
     let meetingID: UUID?
+    let isVoiceNote: Bool
     let title: String
     let dateText: String
     let durationText: String
@@ -211,6 +212,7 @@ enum MeetingDetailAction: Equatable, Sendable {
 @Observable
 final class MeetingDetailController {
     static let meetingDeletionWarning = "Delete this meeting from this Mac? This removes only local application state. It does not retract a capture already delivered to the Brain vault."
+    static let voiceNoteDeletionWarning = "Delete this voice note from this Mac? This removes only local application state. It does not retract a capture already delivered to the Brain vault."
     static let audioDeletionWarning = "Delete this retained recording from this Mac? The transcript and any delivered vault capture remain available."
 
     private(set) var state: MeetingDetailLoadState = .idle
@@ -311,6 +313,7 @@ final class MeetingDetailController {
         return MeetingDetailViewModel(
             state: state,
             meetingID: meeting?.id,
+            isVoiceNote: meeting?.isVoiceNote == true,
             title: meeting?.title ?? "Meeting",
             dateText: meeting.map { Self.dateFormatter.string(from: $0.startedAt) } ?? "",
             durationText: meeting.map {
@@ -346,7 +349,9 @@ final class MeetingDetailController {
             errorMessage: errorMessage ?? uploadController.errorMessage,
             copiedMessage: copiedMessage,
             meetingDeletionWarning: isMeetingDeletionPending
-                ? Self.meetingDeletionWarning
+                ? (meeting?.isVoiceNote == true
+                    ? Self.voiceNoteDeletionWarning
+                    : Self.meetingDeletionWarning)
                 : nil,
             audioDeletionWarning: isAudioDeletionPending
                 ? Self.audioDeletionWarning
@@ -758,7 +763,7 @@ struct MeetingDetailView: View {
                 detail(controller.viewModel)
             }
         }
-        .navigationTitle("Meeting")
+        .navigationTitle(controller.viewModel.isVoiceNote ? "Voice Note" : "Meeting")
         .task {
             controller.load()
             await controller.resumeUploadIfNeeded()
@@ -781,11 +786,16 @@ struct MeetingDetailView: View {
             Text(controller.viewModel.audioDeletionWarning ?? "")
         }
         .confirmationDialog(
-            "Delete meeting from this Mac?",
+            controller.viewModel.isVoiceNote
+                ? "Delete voice note from this Mac?"
+                : "Delete meeting from this Mac?",
             isPresented: meetingConfirmationBinding,
             titleVisibility: .visible
         ) {
-            Button("Delete Local Meeting", role: .destructive) {
+            Button(
+                controller.viewModel.isVoiceNote ? "Delete Local Voice Note" : "Delete Local Meeting",
+                role: .destructive
+            ) {
                 Task { await controller.perform(.confirmMeetingDeletion) }
             }
             Button("Cancel", role: .cancel) {
@@ -809,7 +819,7 @@ struct MeetingDetailView: View {
         VStack(spacing: 0) {
             detailHeader(model)
             Divider()
-            Picker("Meeting section", selection: tabBinding) {
+            Picker(model.isVoiceNote ? "Voice note section" : "Meeting section", selection: tabBinding) {
                 ForEach(MeetingDetailTab.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
@@ -827,15 +837,19 @@ struct MeetingDetailView: View {
     private func detailHeader(_ model: MeetingDetailViewModel) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                TextField("Meeting title", text: $controller.titleDraft)
+                TextField(model.isVoiceNote ? "Voice note title" : "Meeting title", text: $controller.titleDraft)
                     .font(.title2.bold())
                     .onSubmit {
                         Task { await controller.perform(.saveTitle(controller.titleDraft)) }
                     }
-                    .accessibilityLabel("Meeting title")
+                    .accessibilityLabel(model.isVoiceNote ? "Voice note title" : "Meeting title")
                 Spacer()
-                Menu("Meeting actions", systemImage: "ellipsis.circle") {
-                    Button("Delete Local Meeting", systemImage: "trash", role: .destructive) {
+                Menu(model.isVoiceNote ? "Voice note actions" : "Meeting actions", systemImage: "ellipsis.circle") {
+                    Button(
+                        model.isVoiceNote ? "Delete Local Voice Note" : "Delete Local Meeting",
+                        systemImage: "trash",
+                        role: .destructive
+                    ) {
                         Task { await controller.perform(.requestMeetingDeletion) }
                     }
                     .keyboardShortcut(.delete, modifiers: [.command, .shift])
@@ -1059,7 +1073,10 @@ struct MeetingDetailView: View {
                     }
                 }
                 if model.uploadCanReupload {
-                    Button("Re-upload Changed Meeting", systemImage: "icloud.and.arrow.up") {
+                    Button(
+                        model.isVoiceNote ? "Re-upload Changed Voice Note" : "Re-upload Changed Meeting",
+                        systemImage: "icloud.and.arrow.up"
+                    ) {
                         Task { await controller.perform(.reupload) }
                     }
                 }
@@ -1072,7 +1089,7 @@ struct MeetingDetailView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Local audio").font(.title3.bold())
             if model.audioControls.isEmpty {
-                Text("No retained recording. Meeting audio retention is off by default.")
+                Text("No retained recording. Audio retention is off by default.")
                     .foregroundStyle(.secondary)
             } else {
                 HStack {
@@ -1096,7 +1113,7 @@ struct MeetingDetailView: View {
             if model.transcriptionState == .processing || model.transcriptionState == .pending {
                 MeetingWorkPlaceholder(
                     title: model.transcriptionState == .processing
-                        ? "Transcribing meeting"
+                        ? (model.isVoiceNote ? "Transcribing voice note" : "Transcribing meeting")
                         : "Transcript queued",
                     detail: model.transcriptionState == .processing
                         ? "Brain is processing the saved recording locally. The transcript will appear here when it is ready."
@@ -1112,7 +1129,9 @@ struct MeetingDetailView: View {
                         : "text.quote",
                     description: Text(
                         model.transcriptionMessage
-                            ?? "The meeting completed without visible utterances."
+                            ?? (model.isVoiceNote
+                                ? "The voice note completed without visible utterances."
+                                : "The meeting completed without visible utterances.")
                     )
                 )
             }

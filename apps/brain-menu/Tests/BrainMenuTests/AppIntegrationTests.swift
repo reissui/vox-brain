@@ -11,6 +11,7 @@ struct AppIntegrationTests {
         #expect(DashboardSection.allCases == [
             .activity,
             .dictation,
+            .voiceNotes,
             .meetings,
             .aiSetup,
             .settings,

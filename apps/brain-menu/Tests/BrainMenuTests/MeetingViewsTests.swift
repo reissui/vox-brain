@@ -68,6 +68,46 @@ struct MeetingViewsTests {
     }
 
     @Test
+    func voiceNotesAndMeetingsAppearOnlyInTheirOwnLibraries() {
+        let meetingID = UUID()
+        let voiceNoteID = UUID()
+        let meeting = meeting(
+            id: meetingID,
+            title: "Planning",
+            start: Date(timeIntervalSince1970: 1_000)
+        )
+        let voiceNote = MeetingRecord(
+            id: voiceNoteID,
+            title: "Voice note",
+            titleSource: .manual,
+            startedAt: Date(timeIntervalSince1970: 2_000),
+            endedAt: Date(timeIntervalSince1970: 2_060),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+        let controller = MeetingsController(
+            store: MemoryMeetingViewStore(values: [
+                meetingID: StoredMeeting(meeting: meeting, utterances: []),
+                voiceNoteID: StoredMeeting(meeting: voiceNote, utterances: []),
+            ], listOrder: [meetingID, voiceNoteID]),
+            analysisStore: MemoryMeetingViewAnalysisStore()
+        )
+
+        controller.load()
+
+        #expect(controller.viewModel.visibleRows(in: .meetings).map(\.id) == [meetingID])
+        #expect(controller.viewModel.visibleRows(in: .voiceNotes).map(\.id) == [voiceNoteID])
+        #expect(controller.viewModel.visibleRows(in: .voiceNotes).first?.accessibilityLabel
+            .contains("New voice note") == true)
+
+        controller.query = "planning"
+        #expect(controller.viewModel.visibleRows(in: .meetings).map(\.id) == [meetingID])
+        #expect(controller.viewModel.visibleRows(in: .voiceNotes).isEmpty)
+        #expect(controller.viewModel.hasNoSearchResults(in: .voiceNotes))
+    }
+
+    @Test
     func listRepresentsLoadingEmptyCorruptAndStoreFailure() {
         let empty = MeetingsController(
             store: MemoryMeetingViewStore(),

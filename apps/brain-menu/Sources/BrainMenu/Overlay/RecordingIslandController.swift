@@ -161,6 +161,18 @@ struct RecordingIslandMeetingPresentation: Equatable, Sendable {
     var latestTranscriptLine: String?
     var guidance: String?
 
+    var isVoiceNote: Bool {
+        title.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare("Voice note") == .orderedSame
+            && applicationName == nil
+    }
+
+    var phaseTitle: String {
+        phase == .saved && isVoiceNote ? "Voice note added" : phase.title
+    }
+
+    var libraryName: String { isVoiceNote ? "Voice Notes" : "Meetings" }
+
     var isReceivingAudio: Bool {
         guard phase == .starting || phase == .recording || phase == .stopSuggested else {
             return false
@@ -175,7 +187,7 @@ struct RecordingIslandMeetingPresentation: Equatable, Sendable {
         case .finalizing:
             return "Processing captured audio…"
         case .saved:
-            return "Added to Meetings. It is now at the top of the list."
+            return "Added to \(libraryName). It is now at the top of the list."
         case .starting, .recording, .stopSuggested:
             switch (microphoneSignalState == .active, systemSignalState == .active) {
             case (true, true):
@@ -292,9 +304,11 @@ enum RecordingIslandPresentation: Equatable, Sendable {
             return "Dictation \(presentation.phase.title.lowercased())."
         case .meeting(let presentation):
             if presentation.phase == .saved {
-                return "Meeting added. \(presentation.title). It is now at the top of Meetings."
+                let item = presentation.isVoiceNote ? "Voice note" : "Meeting"
+                return "\(item) added. \(presentation.title). It is now at the top of \(presentation.libraryName)."
             }
-            return "Meeting \(presentation.phase.title.lowercased())."
+            let item = presentation.isVoiceNote ? "Voice note" : "Meeting"
+            return "\(item) \(presentation.phase.title.lowercased())."
         }
     }
 }

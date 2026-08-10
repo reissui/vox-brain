@@ -90,7 +90,15 @@ struct MeetingSavedNotice: Equatable, Identifiable, Sendable {
     let title: String
 
     var id: UUID { meetingID }
-    var message: String { "Added to Meetings. It is now at the top of the list." }
+    var isVoiceNote: Bool {
+        title.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare("Voice note") == .orderedSame
+    }
+    var message: String {
+        isVoiceNote
+            ? "Added to Voice Notes. It is now at the top of the list."
+            : "Added to Meetings. It is now at the top of the list."
+    }
 }
 
 extension MeetingController {

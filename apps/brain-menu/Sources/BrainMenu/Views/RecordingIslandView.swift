@@ -103,7 +103,7 @@ struct RecordingIslandView: View {
                                 Text(application)
                                 Text("·")
                             }
-                            Text(value.phase.title)
+                            Text(value.phaseTitle)
                             Text("·")
                             Text(elapsed(from: value.startedAt, to: context.date))
                                 .monospacedDigit()
@@ -118,7 +118,7 @@ struct RecordingIslandView: View {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.title2)
                             .foregroundStyle(.green)
-                            .accessibilityLabel("Meeting saved")
+                            .accessibilityLabel(value.isVoiceNote ? "Voice note saved" : "Meeting saved")
                     } else {
                         VStack(alignment: .trailing, spacing: 4) {
                             if let microphone = value.microphone {

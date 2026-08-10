@@ -979,6 +979,15 @@ private final class NativeMeetingMicrophoneAudioEngine: MeetingMicrophoneAudioEn
 final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unchecked Sendable {
     let source: MeetingAudioSource = .microphone
 
+    /// Core Audio can reject the first graph start while a device or another
+    /// client is still settling. Rebuild the graph between attempts instead of
+    /// making the user stop and start the whole recording again.
+    private static let startupRetryDelays: [Duration] = [
+        .milliseconds(120),
+        .milliseconds(300),
+        .milliseconds(650),
+    ]
+
     private let selection: MeetingMicrophoneSelection
     private let inventory: any MeetingMicrophoneInventoryProviding
     private let engine: any MeetingMicrophoneAudioEngine
@@ -1026,34 +1035,13 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
         guard authorizationStatus() == .authorized else {
             throw NativeMeetingAudioSourceError.permissionDenied
         }
-        let inventorySnapshot = try inventory.snapshot()
-        let deviceID = try inventorySnapshot.deviceID(for: selection)
-        guard let deviceID else { throw NativeMeetingAudioSourceError.unavailable }
-        let selectedExplicitDevice: Bool
-        if case .device = selection {
-            try engine.selectDevice(deviceID)
-            selectedExplicitDevice = true
-        } else {
-            selectedExplicitDevice = false
-        }
-        let format = selectedExplicitDevice
-            ? try await settledInputFormat()
-            : try engine.validatedInputFormat()
         lock.withLock {
             self.eventHandler = eventHandler
-            lastSampleRate = format.sampleRate
+            lastSampleRate = nil
             terminalFailureReported = false
             engineStartCompleted = false
             configurationRecoveryPending = false
         }
-        // A non-nil tap format is applied to the input bus. External devices can
-        // finish switching sample rates asynchronously (for example 44.1 -> 48
-        // kHz), which makes a just-read explicit format stale and causes Core
-        // Audio to reject the tap. Let AVAudioEngine follow the native bus format.
-        engine.installTap(format: nil) { [weak self] buffer, time in
-            self?.receive(buffer: buffer, time: time)
-        }
-        lock.withLock { tapIsInstalled = true }
 
         let environmentObservers = MeetingAudioEnvironmentObservers(
             source: .microphone,
@@ -1073,23 +1061,14 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
         }
 
         do {
-            try engineLifecycleLock.withLock {
-                engine.prepare()
-                try engine.start()
-            }
+            try await startEngineWithRetries()
             lock.withLock { engineStartCompleted = true }
             scheduleConfigurationRecoveryIfNeeded()
             let timer = makeHealthTimer()
             lock.withLock { healthTimer = timer }
             timer.resume()
         } catch {
-            let shouldRemoveTap = lock.withLock { () -> Bool in
-                defer { tapIsInstalled = false }
-                return tapIsInstalled
-            }
-            if shouldRemoveTap {
-                engineLifecycleLock.withLock { engine.removeTap() }
-            }
+            resetEngineGraph()
             environmentObservers.stop()
             NotificationCenter.default.removeObserver(observer)
             lock.withLock {
@@ -1099,6 +1078,9 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
                 healthTimer = nil
                 engineStartCompleted = false
                 configurationRecoveryPending = false
+            }
+            if let nativeError = error as? NativeMeetingAudioSourceError {
+                throw nativeError
             }
             throw NativeMeetingAudioSourceError.startFailed
         }
@@ -1220,22 +1202,19 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
             return true
         }
         guard shouldRecover else { return }
-        Task { [weak self] in self?.recoverFromConfigurationChange() }
+        Task { [weak self] in await self?.recoverFromConfigurationChange() }
     }
 
-    private func recoverFromConfigurationChange() {
+    private func recoverFromConfigurationChange() async {
         defer {
             lock.withLock { configurationRecoveryPending = false }
         }
         guard lock.withLock({ engineStartCompleted }) else { return }
         do {
-            try engineLifecycleLock.withLock {
-                _ = try engine.validatedInputFormat()
-                engine.prepare()
-                try engine.start()
-            }
+            resetEngineGraph()
+            try await startEngineWithRetries()
             if !lock.withLock({ engineStartCompleted }) {
-                engineLifecycleLock.withLock { engine.stop() }
+                resetEngineGraph()
             } else if !engine.isRunning {
                 throw NativeMeetingAudioSourceError.startFailed
             }
@@ -1244,6 +1223,57 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
                 reason: .interrupted,
                 message: "The microphone stream could not recover after its device format changed."
             )
+        }
+    }
+
+    private func startEngineWithRetries() async throws {
+        for attempt in 0...Self.startupRetryDelays.count {
+            if attempt > 0 {
+                try await Task.sleep(for: Self.startupRetryDelays[attempt - 1])
+            }
+
+            do {
+                let inventorySnapshot = try inventory.snapshot()
+                guard let deviceID = try inventorySnapshot.deviceID(for: selection) else {
+                    throw NativeMeetingAudioSourceError.unavailable
+                }
+                let format: AVAudioFormat
+                if case .device = selection {
+                    try engine.selectDevice(deviceID)
+                    format = try await settledInputFormat()
+                } else {
+                    format = try engine.validatedInputFormat()
+                }
+                lock.withLock { lastSampleRate = format.sampleRate }
+
+                // A non-nil tap format is applied to the input bus. External
+                // devices can finish switching sample rates asynchronously,
+                // which makes a just-read explicit format stale. Follow the
+                // native bus format and rebuild the tap for every retry.
+                engine.installTap(format: nil) { [weak self] buffer, time in
+                    self?.receive(buffer: buffer, time: time)
+                }
+                lock.withLock { tapIsInstalled = true }
+                try engineLifecycleLock.withLock {
+                    engine.prepare()
+                    try engine.start()
+                }
+                return
+            } catch {
+                resetEngineGraph()
+                guard attempt < Self.startupRetryDelays.count else { throw error }
+            }
+        }
+    }
+
+    private func resetEngineGraph() {
+        let shouldRemoveTap = lock.withLock { () -> Bool in
+            defer { tapIsInstalled = false }
+            return tapIsInstalled
+        }
+        engineLifecycleLock.withLock {
+            if shouldRemoveTap { engine.removeTap() }
+            if shouldRemoveTap || engine.isRunning { engine.stop() }
         }
     }
 

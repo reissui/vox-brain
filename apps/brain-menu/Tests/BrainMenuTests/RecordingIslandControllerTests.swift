@@ -403,6 +403,38 @@ struct RecordingIslandControllerTests {
     }
 
     @Test
+    func savedVoiceNotePointsToTheVoiceNotesLibrary() throws {
+        var announcements: [String] = []
+        let controller = makeController(
+            defaults: try testDefaults(),
+            announcementHandler: { announcements.append($0) },
+            sleep: { _ in }
+        )
+        let record = MeetingRecord(
+            title: "Voice note",
+            titleSource: .manual,
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            endedAt: Date(timeIntervalSince1970: 1_100),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+
+        controller.meetingSaved(record)
+
+        guard case .meeting(let saved) = controller.presentation else {
+            Issue.record("Expected a visible voice-note-saved notification")
+            return
+        }
+        #expect(saved.isVoiceNote)
+        #expect(saved.phaseTitle == "Voice note added")
+        #expect(saved.audioStatusText.contains("Voice Notes"))
+        #expect(announcements == [
+            "Voice note added. Voice note. It is now at the top of Voice Notes.",
+        ])
+    }
+
+    @Test
     func positionsPersistPerDisplayClampAndRecoverAfterDisplayRemoval() throws {
         let defaults = try testDefaults()
         let environment = RecordingIslandTestEnvironment(
