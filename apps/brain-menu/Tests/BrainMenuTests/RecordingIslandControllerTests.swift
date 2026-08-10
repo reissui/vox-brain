@@ -462,6 +462,21 @@ struct RecordingIslandControllerTests {
     }
 
     @Test
+    func activeVoiceNoteReportsOnlyItsMicrophoneState() {
+        let voiceNote = RecordingIslandMeetingPresentation(
+            phase: .recording,
+            title: "Voice note",
+            recordingKind: .voiceNote,
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            microphoneSignalState: .waiting,
+            systemSignalState: .active
+        )
+
+        #expect(!voiceNote.isReceivingAudio)
+        #expect(voiceNote.audioStatusText == "Waiting for microphone audio…")
+    }
+
+    @Test
     func positionsPersistPerDisplayClampAndRecoverAfterDisplayRemoval() throws {
         let defaults = try testDefaults()
         let environment = RecordingIslandTestEnvironment(

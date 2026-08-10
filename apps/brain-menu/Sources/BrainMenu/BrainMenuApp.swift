@@ -851,7 +851,9 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             ),
             utterances: []
         )
-        let systemAudio = ScreenCaptureKitMeetingAudioSource()
+        let systemAudio: (any MeetingAudioSourceCapturing)? = request.capturesSystemAudio
+            ? ScreenCaptureKitMeetingAudioSource()
+            : nil
         let microphone = AVAudioEngineMeetingAudioSource(
             selection: microphoneSelection,
             inventory: microphoneInventory
@@ -881,12 +883,14 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         ownership.set(true)
         sessionIsReady = false
         do {
-            try await systemAudio.start(eventHandler: systemHandler)
+            if let systemAudio {
+                try await systemAudio.start(eventHandler: systemHandler)
+            }
             do {
                 try await microphone.start(eventHandler: microphoneHandler)
             } catch {
                 gate.stopAccepting()
-                await systemAudio.stop()
+                if let systemAudio { await systemAudio.stop() }
                 await gate.waitUntilIdle()
                 guard shouldRequestAnotherMicrophone(after: error) else { throw error }
                 let startError = MeetingRecordingStartError.microphoneSelectionRequired(
@@ -948,7 +952,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             let activeSwitch = beginSessionShutdown()
             await activeSwitch?.value
             await microphone.stop()
-            await systemAudio.stop()
+            if let systemAudio { await systemAudio.stop() }
             await gate.waitUntilIdle()
             await transcript.cancel()
             try? persistRetryableRecord(

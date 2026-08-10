@@ -577,6 +577,83 @@ struct MeetingViewsTests {
     }
 
     @Test
+    func voiceNoteTranscriptIsPlainParagraphTextAndCopiesInFull() async throws {
+        let id = UUID()
+        let record = MeetingRecord(
+            id: id,
+            title: "Product thought",
+            recordingKind: .voiceNote,
+            titleSource: .manual,
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            endedAt: Date(timeIntervalSince1970: 1_060),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+        let utterances = [
+            try MeetingUtterance(
+                source: .microphone,
+                startMilliseconds: 0,
+                endMilliseconds: 1_000,
+                text: "  The first   sentence. ",
+                baseSpeakerID: "you"
+            ),
+            try MeetingUtterance(
+                source: .microphone,
+                startMilliseconds: 1_200,
+                endMilliseconds: 2_000,
+                text: "It continues here.",
+                baseSpeakerID: "you"
+            ),
+            try MeetingUtterance(
+                source: .microphone,
+                startMilliseconds: 4_000,
+                endMilliseconds: 5_000,
+                text: "This is a new thought.",
+                baseSpeakerID: "you"
+            ),
+            try MeetingUtterance(
+                source: .microphone,
+                startMilliseconds: 6_000,
+                endMilliseconds: 7_000,
+                text: "Hidden correction",
+                baseSpeakerID: "you",
+                suppressed: true
+            ),
+        ]
+        let store = MemoryMeetingViewStore(values: [
+            id: StoredMeeting(meeting: record, utterances: utterances),
+        ])
+        let clipboard = MeetingClipboardSpy()
+        let controller = MeetingDetailController(
+            meetingID: id,
+            store: store,
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: MeetingDetailAudioSpy(meeting: record),
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: clipboard
+        )
+
+        controller.load()
+
+        #expect(controller.viewModel.tab == .transcript)
+        #expect(controller.viewModel.voiceNoteTranscript.paragraphs == [
+            "The first sentence. It continues here.",
+            "This is a new thought.",
+        ])
+        #expect(controller.viewModel.voiceNoteTranscript.fullText
+            == "The first sentence. It continues here.\n\nThis is a new thought.")
+
+        await controller.perform(.copyFullTranscript)
+
+        #expect(clipboard.values == [
+            "The first sentence. It continues here.\n\nThis is a new thought.",
+        ])
+        #expect(controller.viewModel.copiedMessage == "Full transcript copied")
+    }
+
+    @Test
     func ambiguousLegacyRecordingCanBeExplicitlyMovedToVoiceNotes() async throws {
         let id = UUID()
         let record = MeetingRecord(

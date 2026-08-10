@@ -132,14 +132,16 @@ struct RecordingIslandView: View {
                                 color: .green,
                                 reduceMotion: reduceMotion
                             )
-                            RecordingLevelRow(
-                                label: "Computer",
-                                level: value.systemLevel,
-                                samples: value.systemHistory,
-                                signalState: value.systemSignalState,
-                                color: .cyan,
-                                reduceMotion: reduceMotion
-                            )
+                            if !value.isVoiceNote {
+                                RecordingLevelRow(
+                                    label: "Computer",
+                                    level: value.systemLevel,
+                                    samples: value.systemHistory,
+                                    signalState: value.systemSignalState,
+                                    color: .cyan,
+                                    reduceMotion: reduceMotion
+                                )
+                            }
                         }
                     }
                 }

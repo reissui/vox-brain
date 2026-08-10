@@ -260,6 +260,11 @@ struct MeetingControllerTests {
             title: "Meeting in Huddle",
             titleSource: .application
         ))])
+        guard case .start(let request) = fixture.recorder.actions.first else {
+            Issue.record("Expected a meeting recording request")
+            return
+        }
+        #expect(request.capturesSystemAudio)
         #expect(fixture.detector.trackedApplications == [unknownApp])
     }
 
@@ -283,6 +288,11 @@ struct MeetingControllerTests {
             title: "Voice note",
             titleSource: .manual
         ))])
+        guard case .start(let request) = fixture.recorder.actions.first else {
+            Issue.record("Expected a Voice Note recording request")
+            return
+        }
+        #expect(!request.capturesSystemAudio)
     }
 
     @Test
