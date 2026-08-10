@@ -762,13 +762,13 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             return try loadCapture(directory: directory, fileManager: fileManager)
         } catch {
             do {
-                return try recoverCaptureFromRawPCM(
+                return try recoverCaptureFromRetainedAudio(
                     meeting: meeting,
                     directory: directory,
                     fileManager: fileManager
                 )
             } catch {
-                return try recoverCaptureFromRetainedAudio(
+                return try recoverCaptureFromRawPCM(
                     meeting: meeting,
                     directory: directory,
                     fileManager: fileManager

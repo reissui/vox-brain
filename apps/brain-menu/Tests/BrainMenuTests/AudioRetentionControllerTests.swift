@@ -147,10 +147,14 @@ struct AudioRetentionControllerTests {
             text: "Replacement transcript.",
             baseSpeakerID: "remote"
         )
+        let recordingFailure = SnapshottingRecordingFailureFileSystem(
+            store: fixture.store,
+            meetingID: fixture.meeting.id
+        )
 
         #expect(throws: AudioRetentionControllerError.recordingPersistenceFailed) {
             try fixture.controller(
-                fileSystem: FailingAudioRetentionFileSystem(failure: .permissions)
+                fileSystem: recordingFailure
             ).finalize(
                 meeting: retryCandidate,
                 utterances: [replacementUtterance],
@@ -159,6 +163,9 @@ struct AudioRetentionControllerTests {
         }
 
         let stored = try fixture.store.load(fixture.meeting.id)
+        let beforeRecordingCommit = try #require(recordingFailure.snapshot)
+        #expect(beforeRecordingCommit.meeting == archived)
+        #expect(beforeRecordingCommit.utterances == fixture.utterances)
         #expect(stored.meeting == archived)
         #expect(stored.utterances == fixture.utterances)
         #expect(FileManager.default.fileExists(atPath: fixture.recordingURL.path))
@@ -388,8 +395,8 @@ struct AudioRetentionControllerTests {
         let stored = try fixture.store.load(fixture.meeting.id)
 
         #expect(reconciled.map(\.id) == [fixture.meeting.id])
-        #expect(stored.meeting.transcriptionState == .processing)
-        #expect(stored.meeting.transcriptionErrorMessage == nil)
+        #expect(stored.meeting.transcriptionState == .failed)
+        #expect(stored.meeting.transcriptionErrorMessage?.contains("deleted") == true)
         #expect(stored.meeting.retainedAudio == nil)
         #expect(stored.utterances == fixture.utterances)
         #expect(!FileManager.default.fileExists(atPath: fixture.recordingURL.path))
@@ -756,6 +763,54 @@ private final class FailingAudioRetentionFileSystem: AudioRetentionFileSystem, @
     func setOwnerOnlyPermissions(at url: URL) throws {
         if failure == .permissions { throw InjectedAudioRetentionFailure() }
         try base.setOwnerOnlyPermissions(at: url)
+    }
+}
+
+private final class SnapshottingRecordingFailureFileSystem:
+    AudioRetentionFileSystem,
+    @unchecked Sendable
+{
+    private let base = LocalAudioRetentionFileSystem()
+    private let store: MeetingStore
+    private let meetingID: UUID
+    private(set) var snapshot: StoredMeeting?
+
+    init(store: MeetingStore, meetingID: UUID) {
+        self.store = store
+        self.meetingID = meetingID
+    }
+
+    func attributes(at url: URL) throws -> [FileAttributeKey: Any] {
+        try base.attributes(at: url)
+    }
+
+    func contentsOfDirectory(at url: URL) throws -> [URL] {
+        try base.contentsOfDirectory(at: url)
+    }
+
+    func createOwnerOnlyDirectory(at url: URL) throws {
+        try base.createOwnerOnlyDirectory(at: url)
+    }
+
+    func fileExists(at url: URL) -> Bool {
+        base.fileExists(at: url)
+    }
+
+    func copyItem(at source: URL, to destination: URL) throws {
+        try base.copyItem(at: source, to: destination)
+    }
+
+    func moveItem(at source: URL, to destination: URL) throws {
+        try base.moveItem(at: source, to: destination)
+    }
+
+    func removeItem(at url: URL) throws {
+        try base.removeItem(at: url)
+    }
+
+    func setOwnerOnlyPermissions(at url: URL) throws {
+        snapshot = try store.load(meetingID)
+        throw InjectedAudioRetentionFailure()
     }
 }
 

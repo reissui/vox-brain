@@ -818,6 +818,52 @@ struct MeetingTranscriptionCoordinatorTests {
     }
 
     @Test
+    func retryPrefersRetainedArchiveOverIncompleteRawRecovery() async throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        var completed = fixture.meeting
+        completed.transcriptionState = .completed
+        completed.transcriptionAttemptCount = 1
+        let archived = try fixture.retention.finalize(
+            meeting: completed,
+            utterances: [try MeetingUtterance(
+                source: .microphone,
+                startMilliseconds: 0,
+                endMilliseconds: 1_000,
+                text: "Keep the complete archived transcript.",
+                baseSpeakerID: "you"
+            )],
+            audio: fixture.makeCapture()
+        )
+        var failed = archived
+        failed.transcriptionState = .failed
+        failed.transcriptionErrorMessage = "Retry the archived recording."
+        let durableTranscript = try fixture.store.load(failed.id).utterances
+        try fixture.store.save(failed, utterances: durableTranscript)
+
+        let microphoneURL = fixture.meetingDirectory.appendingPathComponent(
+            "microphone.f32le.pcm"
+        )
+        let partialSamples = [Float](repeating: 0.75, count: 4)
+        let partialData = partialSamples.withUnsafeBytes { Data($0) }
+        #expect(FileManager.default.createFile(
+            atPath: microphoneURL.path,
+            contents: partialData,
+            attributes: [.posixPermissions: NSNumber(value: 0o600)]
+        ))
+
+        let retried = try await fixture.coordinator(client: CoordinatorUnsupportedClient())
+            .retry(meetingID: failed.id)
+        let recovered = try fixture.loadCaptureManifest()
+        let frameCounts = recovered.tracks.map(\.frameCount)
+
+        #expect(retried.transcriptionState == .failed)
+        #expect(frameCounts.count == 2)
+        #expect(Set(frameCounts).count == 1)
+        #expect(frameCounts.allSatisfy { $0 > Int64(partialSamples.count) })
+        #expect(try fixture.store.load(failed.id).utterances == durableTranscript)
+    }
+
+    @Test
     func launchReconciliationImportsSafeOrphanedRawRecording() throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()

@@ -140,9 +140,6 @@ final class AudioRetentionController: @unchecked Sendable {
         self.revealer = revealer
     }
 
-    /// Persists the final structured transcript before changing audio files.
-    /// Upload availability is irrelevant here: subsequent delivery uses the
-    /// already-persisted transcript and never any audio URL or bytes.
     @discardableResult
     func finalize(
         meeting: MeetingRecord,
@@ -157,12 +154,15 @@ final class AudioRetentionController: @unchecked Sendable {
             throw AudioRetentionControllerError.invalidTemporaryAudio
         }
 
-        var archiving = meeting
-        archiving.transcriptionState = .processing
-        do {
-            try store.save(archiving, utterances: utterances)
-        } catch {
-            throw AudioRetentionControllerError.transcriptPersistenceFailed
+        if meeting.transcriptionAttemptCount <= 1,
+           previous?.utterances.isEmpty != false {
+            var archiving = meeting
+            archiving.transcriptionState = .processing
+            do {
+                try store.save(archiving, utterances: utterances)
+            } catch {
+                throw AudioRetentionControllerError.transcriptPersistenceFailed
+            }
         }
 
         do {
@@ -627,6 +627,11 @@ final class AudioRetentionController: @unchecked Sendable {
         var updated = meeting
         updated.retainedAudio = nil
         updated.audioRetentionState = .deleted
+        if [.pending, .processing].contains(updated.transcriptionState) {
+            updated.transcriptionState = .failed
+            updated.transcriptionErrorMessage = updated.transcriptionErrorMessage
+                ?? "Transcription stopped because its local audio was deleted."
+        }
         return updated
     }
 
