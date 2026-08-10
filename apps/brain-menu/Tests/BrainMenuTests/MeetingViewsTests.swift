@@ -461,7 +461,7 @@ struct MeetingViewsTests {
         #expect(audio.exports.map(\.path) == ["/tmp/export.caf"])
         await controller.perform(.requestAudioDeletion)
         #expect(audio.deleteCalls == 0)
-        #expect(controller.viewModel.audioDeletionWarning?.contains("retained recording") == true)
+        #expect(controller.viewModel.audioDeletionWarning?.contains("saved recording") == true)
         await controller.perform(.confirmAudioDeletion)
         #expect(audio.deleteCalls == 1)
 
@@ -670,6 +670,12 @@ struct MeetingViewsTests {
             speechModel: "model"
         )
         voiceNote.transcriptionState = .completed
+        voiceNote.retainedAudio = RetainedAudioMetadata(
+            filename: AudioRetentionController.retainedFilename,
+            format: AudioRetentionController.retainedFormat,
+            sizeBytes: 24_000,
+            durationMilliseconds: 66_000
+        )
         let voiceNoteUtterances = [
             try MeetingUtterance(
                 source: .microphone,
@@ -705,7 +711,7 @@ struct MeetingViewsTests {
             analysisStore: MemoryMeetingViewAnalysisStore(),
             uploadController: MeetingDetailUploadSpy(),
             audioController: MeetingDetailAudioSpy(meeting: voiceNote),
-            audioChecker: FixedAudioChecker(value: false),
+            audioChecker: FixedAudioChecker(value: true),
             clipboard: voiceNoteClipboard
         )
         voiceNoteController.load()
@@ -738,6 +744,12 @@ struct MeetingViewsTests {
             speechModel: "model"
         )
         meetingRecord.transcriptionState = .completed
+        meetingRecord.retainedAudio = RetainedAudioMetadata(
+            filename: AudioRetentionController.retainedFilename,
+            format: AudioRetentionController.retainedFormat,
+            sizeBytes: 24_000,
+            durationMilliseconds: 66_000
+        )
         let meetingUtterances = [
             try MeetingUtterance(
                 id: ownerUtteranceID,
@@ -788,7 +800,7 @@ struct MeetingViewsTests {
             ]),
             uploadController: MeetingDetailUploadSpy(),
             audioController: MeetingDetailAudioSpy(meeting: meetingRecord),
-            audioChecker: FixedAudioChecker(value: false),
+            audioChecker: FixedAudioChecker(value: true),
             clipboard: MeetingClipboardSpy()
         )
         meetingController.load()
@@ -799,6 +811,14 @@ struct MeetingViewsTests {
         try renderEvidence(
             MeetingDetailView(controller: meetingController),
             named: "meeting-speaker-transcript.png"
+        )
+    }
+
+    @Test
+    func privacySettingsRenderAlwaysRetainedPolicy() throws {
+        try renderEvidence(
+            SettingsView(selection: .constant(.audioPrivacy)),
+            named: "audio-privacy-settings.png"
         )
     }
 
@@ -872,8 +892,79 @@ struct MeetingViewsTests {
         await controller.perform(.confirmMeetingDeletion)
 
         #expect(transcription.cancellations == [id])
+        #expect(transcription.deletionReservations == [id])
         #expect(store.deleteConfirmations == [true])
         #expect(controller.state == .deleted)
+    }
+
+    @Test
+    func detailDoesNotOfferOrStartRetryAfterAudioDeletion() async throws {
+        let id = UUID()
+        var record = meeting(id: id, title: "Deleted retry audio", start: .now)
+        record.transcriptionState = .failed
+        record.transcriptionErrorMessage = "Transcription failed before audio deletion."
+        record.audioRetentionState = .deleted
+        let transcription = MeetingDetailTranscriptionSpy(isRunning: false)
+        let controller = MeetingDetailController(
+            meetingID: id,
+            store: MemoryMeetingViewStore(values: [
+                id: StoredMeeting(meeting: record, utterances: []),
+            ]),
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: MeetingDetailAudioSpy(meeting: record),
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: MeetingClipboardSpy(),
+            transcriptionController: transcription
+        )
+
+        controller.load()
+        #expect(!controller.viewModel.transcriptionCanRetry)
+
+        await controller.perform(.retryTranscription)
+
+        #expect(transcription.retries.isEmpty)
+        #expect(controller.viewModel.errorMessage?.contains("does not have") == true)
+    }
+
+    @Test
+    func detailCancelsTranscriptionBeforeConfirmedAudioDeletion() async throws {
+        let id = UUID()
+        let record = meeting(
+            id: id,
+            title: "Retrying transcript",
+            start: .now,
+            retainedAudio: RetainedAudioMetadata(
+                filename: AudioRetentionController.retainedFilename,
+                format: AudioRetentionController.retainedFormat,
+                sizeBytes: 100,
+                durationMilliseconds: 3_000
+            )
+        )
+        let audio = MeetingDetailAudioSpy(meeting: record)
+        let transcription = MeetingDetailTranscriptionSpy(isRunning: true)
+        let controller = MeetingDetailController(
+            meetingID: id,
+            store: MemoryMeetingViewStore(values: [
+                id: StoredMeeting(meeting: record, utterances: []),
+            ]),
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: audio,
+            audioChecker: FixedAudioChecker(value: true),
+            clipboard: MeetingClipboardSpy(),
+            transcriptionController: transcription
+        )
+
+        controller.load()
+        await controller.perform(.requestAudioDeletion)
+        await controller.perform(.confirmAudioDeletion)
+
+        #expect(transcription.cancellations == [id])
+        #expect(transcription.deletionReservations == [id])
+        #expect(audio.deleteCalls == 1)
+        #expect(controller.meeting?.retainedAudio == nil)
+        #expect(!controller.isAudioDeletionInProgress)
     }
 
     @Test
@@ -1059,12 +1150,16 @@ struct MeetingViewsTests {
         )
     }
 
-    private func renderEvidence<V: View>(_ view: V, named filename: String) throws {
+    private func renderEvidence<V: View>(
+        _ view: V,
+        named filename: String,
+        height: CGFloat = 700
+    ) throws {
         let hostingView = NSHostingView(rootView: view
-            .frame(width: 900, height: 700)
+            .frame(width: 900, height: height)
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(\.colorScheme, .light))
-        hostingView.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 900, height: height)
         let window = NSWindow(
             contentRect: hostingView.frame,
             styleMask: [.titled, .closable, .resizable],
@@ -1091,6 +1186,48 @@ struct MeetingViewsTests {
                 .appendingPathComponent(filename),
             options: .atomic
         )
+    }
+
+    @Test
+    func detailOffersTranscriptPreservingDeletionForSourceOnlyAudio() async throws {
+        let id = UUID()
+        var record = meeting(id: id, title: "Failed archive", start: .now)
+        record.transcriptionState = .failed
+        record.transcriptionAttemptCount = 1
+        record.transcriptionErrorMessage = "Archival was interrupted."
+        let transcript = try utterances()
+        let audio = MeetingDetailAudioSpy(meeting: record, deletableAudio: true)
+        let controller = MeetingDetailController(
+            meetingID: id,
+            store: MemoryMeetingViewStore(values: [
+                id: StoredMeeting(meeting: record, utterances: transcript),
+            ]),
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: audio,
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: MeetingClipboardSpy()
+        )
+
+        controller.load()
+
+        #expect(audio.deletionAvailabilityChecks == 1)
+        #expect(controller.viewModel.audioControls == [.delete])
+        #expect(controller.viewModel.hasTranscript)
+        _ = controller.viewModel
+        _ = controller.viewModel
+        #expect(audio.deletionAvailabilityChecks == 1)
+        try renderEvidence(
+            MeetingDetailView(controller: controller),
+            named: "source-only-audio-deletion.png",
+            height: 900
+        )
+        await controller.perform(.requestAudioDeletion)
+        #expect(controller.isAudioDeletionPending)
+        await controller.perform(.confirmAudioDeletion)
+        #expect(audio.deleteCalls == 1)
+        #expect(controller.viewModel.hasTranscript)
+        #expect(controller.viewModel.audioRetentionState == .deleted)
     }
 }
 
@@ -1234,21 +1371,32 @@ private final class MeetingDetailUploadSpy: MeetingDetailUploadControlling {
 
 private final class MeetingDetailAudioSpy: MeetingDetailAudioControlling, @unchecked Sendable {
     private var meeting: MeetingRecord
+    private var deletableAudio: Bool
     private(set) var revealCalls = 0
     private(set) var exports: [URL] = []
     private(set) var deleteCalls = 0
+    private(set) var deletionAvailabilityChecks = 0
 
-    init(meeting: MeetingRecord) { self.meeting = meeting }
+    init(meeting: MeetingRecord, deletableAudio: Bool? = nil) {
+        self.meeting = meeting
+        self.deletableAudio = deletableAudio ?? (meeting.retainedAudio != nil)
+    }
 
     func revealRecording(for meetingID: UUID) throws { revealCalls += 1 }
     func exportRecording(for meetingID: UUID, to destination: URL?) throws -> URL? {
         if let destination { exports.append(destination) }
         return destination
     }
+    func hasDeletableRecording(for meetingID: UUID) -> Bool {
+        deletionAvailabilityChecks += 1
+        return deletableAudio
+    }
     func deleteRecording(for meetingID: UUID, confirmed: Bool) throws -> MeetingRecord {
         guard confirmed else { throw AudioRetentionControllerError.deletionRequiresConfirmation }
         deleteCalls += 1
         meeting.retainedAudio = nil
+        meeting.audioRetentionState = .deleted
+        deletableAudio = false
         return meeting
     }
 }
@@ -1256,13 +1404,16 @@ private final class MeetingDetailAudioSpy: MeetingDetailAudioControlling, @unche
 @MainActor
 private final class MeetingDetailTranscriptionSpy: MeetingTranscriptionRetrying {
     private var running: Bool
+    private(set) var retries: [UUID] = []
     private(set) var cancellations: [UUID] = []
+    private(set) var deletionReservations: [UUID] = []
 
     init(isRunning: Bool) {
         running = isRunning
     }
 
     func retry(meetingID: UUID) async throws -> MeetingRecord {
+        retries.append(meetingID)
         throw TestMeetingViewError.failed
     }
 
@@ -1273,6 +1424,15 @@ private final class MeetingDetailTranscriptionSpy: MeetingTranscriptionRetrying 
     func cancelAndWait(meetingID: UUID) async {
         cancellations.append(meetingID)
         running = false
+    }
+
+    func cancelAndWaitForDeletion(
+        meetingID: UUID,
+        operation: @MainActor () throws -> Void
+    ) async throws {
+        await cancelAndWait(meetingID: meetingID)
+        deletionReservations.append(meetingID)
+        try operation()
     }
 }
 

@@ -47,9 +47,7 @@ Audio never enters either capture request.
 4. In **Audio Tests**, speak for the full microphone test and require visible
    input. A pinned input uses its persistent Core Audio UID and never silently
    switches when missing.
-5. Leave **Keep Meeting and Voice Note recordings** off unless local retention
-   is an explicit choice.
-6. Keep meeting and Voice Note AI disabled or select and test a local CLI
+5. Keep meeting and Voice Note AI disabled or select and test a local CLI
    provider. Brain discloses that transcript text goes to that provider and may
    consume its billing or credits.
 
@@ -76,14 +74,30 @@ starts or stops recording automatically.
    once. Voice Notes remain in the Voice Notes list even after they are renamed.
 6. Upload the finalized transcript. Later edits require an explicit revision.
 
-With retention off, Brain removes local audio after final transcript
-persistence. With retention on, local reveal/export/delete controls appear,
-but the capture payload still contains no audio.
+After successful transcription, Brain archives the recording locally as compact
+AAC and exposes reveal, export, and explicit delete controls. Failed or
+interrupted attempts keep their private source audio available for recovery.
+The most recently saved title and transcript, plus existing analysis and
+delivery results, remain intact while a retry is running, if it fails, or if it
+is cancelled. Isolated audio-span failures keep the successfully transcribed
+text reviewable with a warning. Short or empty items remain saved, and Brain
+never auto-deletes their recordings. Capture payloads still contain no audio.
+Existing retained CAF recordings remain available for reveal, export, deletion,
+and transcription retry; a successful retry replaces the legacy recording with
+compact AAC. If an older record predates durable retention intent and could
+represent either an interrupted archive or a prior deletion, Brain preserves
+any remaining source audio without automatically restoring or deleting it.
+
+Deleting a saved recording—or its entire item—removes both its playable archive
+and retry source audio. Deleting only the recording preserves the saved
+transcript and its metadata; deleting the entire item removes all of its data.
+Brain cancels an in-flight retry first, and launch recovery does not recreate
+audio after that explicit deletion.
 
 Recording and transcription work is bounded. A failing speech source stops
-after repeated errors, partial transcripts remain reviewable, and interrupted
-capture or processing is surfaced as a retryable saved recording at the next
-launch.
+after repeated errors, and interrupted capture or processing is surfaced as a
+retryable saved recording at the next launch; Brain does not restart
+transcription automatically.
 
 ## Delivery behavior
 
@@ -103,7 +117,8 @@ Before relying on Meetings or Voice Notes:
 3. Record a short Voice Note and confirm it appears only in **Voice Notes**.
 4. End, process, review, and correct Meeting speakers where applicable. Confirm
    the Voice Note is plain paragraph text and copies in full.
-5. Confirm the default reports no retained recording.
+5. Confirm both items report a saved recording and expose local
+   reveal/export/delete controls after transcription completes.
 6. Confirm both transcripts reach the selected local or remote inbox.
 7. Inspect each capture and verify it contains text but no audio.
 

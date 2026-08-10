@@ -313,17 +313,19 @@ final class MeetingsController {
                 title: analysisTitle(meeting.analysisState),
                 systemImage: analysisSymbol(meeting.analysisState)
             ),
-            MeetingStatusBadge(
-                kind: .audio,
-                title: meeting.retainedAudio == nil ? "Not retained" : "Retained locally",
-                systemImage: meeting.retainedAudio == nil ? "waveform.slash" : "waveform"
-            ),
-            MeetingStatusBadge(
-                kind: .upload,
-                title: uploadTitle(meeting.uploadState),
-                systemImage: uploadSymbol(meeting.uploadState)
-            ),
         ]
+        if meeting.retainedAudio != nil {
+            badges.append(MeetingStatusBadge(
+                kind: .audio,
+                title: "Recording saved",
+                systemImage: "waveform"
+            ))
+        }
+        badges.append(MeetingStatusBadge(
+            kind: .upload,
+            title: uploadTitle(meeting.uploadState),
+            systemImage: uploadSymbol(meeting.uploadState)
+        ))
         if meeting.recordingKindNeedsReview {
             badges.append(MeetingStatusBadge(
                 kind: .classification,

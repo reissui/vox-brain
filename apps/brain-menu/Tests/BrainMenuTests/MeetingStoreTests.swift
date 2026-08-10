@@ -530,6 +530,118 @@ struct MeetingStoreTests {
         ))
     }
 
+    @Test
+    func audioDeletionCannotBeUndoneByALateSave() throws {
+        let temp = try StoreTestDirectory()
+        let store = MeetingStore(rootURL: temp.url)
+        let record = makeRecord(title: "Delete audio permanently", startedAt: 100)
+        try store.save(record, utterances: [])
+        var deleted = record
+        deleted.audioRetentionState = .deleted
+        try store.save(deleted, utterances: [])
+
+        #expect(throws: MeetingStoreError.audioDeletionCommitted(record.id)) {
+            try MeetingStore(rootURL: temp.url).save(record, utterances: [])
+        }
+        #expect(try store.load(record.id).meeting == deleted)
+    }
+
+    @Test
+    func wholeItemDeletionRejectsLateSidecarWrites() throws {
+        let temp = try StoreTestDirectory()
+        let store = MeetingStore(rootURL: temp.url)
+        let record = makeRecord(title: "Delete sidecars permanently", startedAt: 100)
+        try store.save(record, utterances: [])
+        try store.delete(record.id, confirmed: true)
+
+        let revision = MeetingUploadRevision(
+            meetingID: record.id,
+            revision: 1,
+            transcriptDigest: "digest",
+            idempotencyKey: UUID(),
+            request: BrainCaptureRequest(type: .transcript, transcript: "Transcript"),
+            state: .failed,
+            captureID: nil,
+            retryable: true,
+            retryMode: .post,
+            lastError: "Retry later",
+            updatedAt: Date(timeIntervalSince1970: 100)
+        )
+        let analysis = StoredMeetingAnalysis(
+            analysis: MeetingAnalysis(
+                title: "Analysis",
+                summary: "Summary",
+                topics: [],
+                decisions: [],
+                actionItems: [],
+                risks: [],
+                quotes: [],
+                speakerSuggestions: [],
+                followUp: MeetingFollowUpDraft(subject: "Follow up", body: "Body")
+            ),
+            speakerState: SpeakerEditingState()
+        )
+
+        #expect(throws: MeetingUploadStoreError.writeFailed) {
+            try FileMeetingUploadStore(rootURL: temp.url).save(revision)
+        }
+        #expect(throws: MeetingAnalysisStoreError.atomicWriteFailed) {
+            try FileMeetingAnalysisStore(rootURL: temp.url).replace(
+                analysis,
+                meetingID: record.id
+            )
+        }
+        #expect(!FileManager.default.fileExists(atPath: store.directoryURL(for: record.id).path))
+    }
+
+    @Test
+    func deletionAtomicallyHidesTheMeetingBeforeCleanup() throws {
+        let temp = try StoreTestDirectory()
+        let record = makeRecord(title: "Delete durably", startedAt: 100)
+        let store = MeetingStore(rootURL: temp.url)
+        try store.save(record, utterances: [])
+        let interruptedStore = MeetingStore(rootURL: temp.url) { event in
+            if event == .afterAtomicDeletionRename {
+                throw InjectedMeetingStoreFailure()
+            }
+        }
+
+        #expect(throws: InjectedMeetingStoreFailure.self) {
+            try interruptedStore.delete(record.id, confirmed: true)
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: store.directoryURL(for: record.id).path))
+        let tombstones = try FileManager.default.contentsOfDirectory(
+            at: temp.url,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasSuffix(".deleting") }
+        #expect(tombstones.count == 1)
+    }
+
+    @Test
+    func listingReconcilesCommittedDeletionBeforeOrphanRecovery() throws {
+        let temp = try StoreTestDirectory()
+        let record = makeRecord(title: "Do not recover", startedAt: 100)
+        let store = MeetingStore(rootURL: temp.url)
+        try store.save(record, utterances: [])
+        let tombstone = temp.url.appendingPathComponent(
+            ".\(record.id.uuidString).\(UUID().uuidString).deleting",
+            isDirectory: true
+        )
+        try FileManager.default.moveItem(
+            at: store.directoryURL(for: record.id),
+            to: tombstone
+        )
+
+        let entries = try MeetingStore(rootURL: temp.url).list()
+
+        #expect(entries.allSatisfy { $0.id != record.id })
+        #expect(!FileManager.default.fileExists(atPath: tombstone.path))
+        #expect(throws: MeetingStoreError.meetingNotFound(record.id)) {
+            try MeetingStore(rootURL: temp.url).save(record, utterances: [])
+        }
+    }
+
     private func makeRecord(title: String, startedAt: TimeInterval) -> MeetingRecord {
         MeetingRecord(
             title: title,

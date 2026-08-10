@@ -58,46 +58,63 @@ final class FileMeetingAnalysisStore: MeetingAnalysisStoring, @unchecked Sendabl
     }
 
     func replace(_ value: StoredMeetingAnalysis, meetingID: UUID) throws {
-        try withLock {
-            let directory = rootURL.appendingPathComponent(meetingID.uuidString, isDirectory: true)
-            try ensurePrivateDirectory(rootURL)
-            try ensurePrivateDirectory(directory)
-            let destination = analysisURL(for: meetingID)
-            if fileManager.fileExists(atPath: destination.path), !isRegularFile(destination) {
-                throw MeetingAnalysisStoreError.unsafePath
-            }
+        do {
+            try MeetingStore.withDeletionPrecedence(
+                rootURL: rootURL,
+                meetingID: meetingID,
+                fileManager: fileManager
+            ) {
+                try withLock {
+                    let directory = rootURL.appendingPathComponent(
+                        meetingID.uuidString,
+                        isDirectory: true
+                    )
+                    try ensurePrivateDirectory(rootURL)
+                    try ensurePrivateDirectory(directory)
+                    let destination = analysisURL(for: meetingID)
+                    if fileManager.fileExists(atPath: destination.path), !isRegularFile(destination) {
+                        throw MeetingAnalysisStoreError.unsafePath
+                    }
 
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-            let data = try encoder.encode(value)
-            let temporary = directory.appendingPathComponent(
-                ".\(Self.filename).\(UUID().uuidString).tmp"
-            )
-            guard fileManager.createFile(
-                atPath: temporary.path,
-                contents: data,
-                attributes: [.posixPermissions: NSNumber(value: 0o600)]
-            ) else {
-                throw MeetingAnalysisStoreError.atomicWriteFailed
-            }
-            defer { try? fileManager.removeItem(at: temporary) }
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+                    let data = try encoder.encode(value)
+                    let temporary = directory.appendingPathComponent(
+                        ".\(Self.filename).\(UUID().uuidString).tmp"
+                    )
+                    guard fileManager.createFile(
+                        atPath: temporary.path,
+                        contents: data,
+                        attributes: [.posixPermissions: NSNumber(value: 0o600)]
+                    ) else {
+                        throw MeetingAnalysisStoreError.atomicWriteFailed
+                    }
+                    defer { try? fileManager.removeItem(at: temporary) }
 
-            do {
-                let handle = try FileHandle(forWritingTo: temporary)
-                try handle.synchronize()
-                try handle.close()
-                try failureInjector?(.beforeAtomicReplacement(meetingID))
-                let result = temporary.withUnsafeFileSystemRepresentation { sourcePath in
-                    destination.withUnsafeFileSystemRepresentation { destinationPath in
-                        rename(sourcePath, destinationPath)
+                    do {
+                        let handle = try FileHandle(forWritingTo: temporary)
+                        try handle.synchronize()
+                        try handle.close()
+                        try failureInjector?(.beforeAtomicReplacement(meetingID))
+                        let result = temporary.withUnsafeFileSystemRepresentation { sourcePath in
+                            destination.withUnsafeFileSystemRepresentation { destinationPath in
+                                rename(sourcePath, destinationPath)
+                            }
+                        }
+                        guard result == 0 else {
+                            throw MeetingAnalysisStoreError.atomicWriteFailed
+                        }
+                    } catch let error as MeetingAnalysisStoreError {
+                        throw error
+                    } catch {
+                        throw MeetingAnalysisStoreError.atomicWriteFailed
                     }
                 }
-                guard result == 0 else { throw MeetingAnalysisStoreError.atomicWriteFailed }
-            } catch let error as MeetingAnalysisStoreError {
-                throw error
-            } catch {
-                throw MeetingAnalysisStoreError.atomicWriteFailed
             }
+        } catch let error as MeetingAnalysisStoreError {
+            throw error
+        } catch {
+            throw MeetingAnalysisStoreError.atomicWriteFailed
         }
     }
 

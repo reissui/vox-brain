@@ -8,6 +8,7 @@ enum MeetingStoreFile: String, Equatable, Sendable {
 
 enum MeetingStoreWriteEvent: Equatable, Sendable {
     case beforeAtomicReplacement(MeetingStoreFile)
+    case afterAtomicDeletionRename
 }
 
 enum UnavailableMeetingReason: String, Equatable, Sendable {
@@ -39,6 +40,7 @@ enum MeetingListEntry: Equatable, Sendable {
 
 enum MeetingStoreError: Error, Equatable, LocalizedError, Sendable {
     case meetingNotFound(UUID)
+    case audioDeletionCommitted(UUID)
     case deletionRequiresConfirmation
     case unsafeStorePath(String)
     case corruptMeeting(UUID, UnavailableMeetingReason)
@@ -49,6 +51,8 @@ enum MeetingStoreError: Error, Equatable, LocalizedError, Sendable {
         switch self {
         case .meetingNotFound:
             "The meeting is not available on this Mac."
+        case .audioDeletionCommitted:
+            "The meeting audio was deleted and cannot be restored by a stale update."
         case .deletionRequiresConfirmation:
             "Deleting a meeting requires explicit confirmation."
         case .unsafeStorePath:
@@ -96,9 +100,10 @@ final class MeetingStore: @unchecked Sendable {
     }
 
     func save(_ meeting: MeetingRecord, utterances: [MeetingUtterance]) throws {
-        try Self.mutationRegistry.withSave(
-            rootPath: rootURL.path,
-            meetingID: meeting.id
+        try Self.withDeletionPrecedence(
+            rootURL: rootURL,
+            meetingID: meeting.id,
+            fileManager: fileManager
         ) {
             try withLock {
                 try saveLocked(meeting, utterances: utterances)
@@ -110,69 +115,75 @@ final class MeetingStore: @unchecked Sendable {
         _ meeting: MeetingRecord,
         utterances: [MeetingUtterance]
     ) throws {
-            let meetingData = try Self.encoder().encode(meeting)
-            let transcriptData = try Self.encoder().encode(
-                utterances.sorted(by: MeetingUtterance.chronologicallyPrecedes)
-            )
-            try ensureDirectory(rootURL, permissions: 0o700)
+        try ensureDirectory(rootURL, permissions: 0o700)
 
-            let directory = directoryURL(for: meeting.id)
-            let createdDirectory = !fileManager.fileExists(atPath: directory.path)
-            try ensureDirectory(directory, permissions: 0o700)
+        let directory = directoryURL(for: meeting.id)
+        let createdDirectory = !fileManager.fileExists(atPath: directory.path)
+        try ensureDirectory(directory, permissions: 0o700)
 
-            let meetingURL = directory.appendingPathComponent(Self.meetingFilename)
-            let transcriptURL = directory.appendingPathComponent(Self.transcriptFilename)
-            _ = try existingData(at: meetingURL)
-            let oldTranscript = try existingData(at: transcriptURL)
-            if fileManager.fileExists(atPath: transcriptURL.path), !isRegularFile(transcriptURL) {
-                throw MeetingStoreError.unsafeStorePath(transcriptURL.lastPathComponent)
+        let meetingURL = directory.appendingPathComponent(Self.meetingFilename)
+        let transcriptURL = directory.appendingPathComponent(Self.transcriptFilename)
+        let oldMeeting = try existingData(at: meetingURL)
+        if meeting.audioRetentionState != .deleted,
+           let oldMeeting,
+           (try? Self.decoder().decode(MeetingRecord.self, from: oldMeeting))?
+            .audioRetentionState == .deleted {
+            throw MeetingStoreError.audioDeletionCommitted(meeting.id)
+        }
+        let oldTranscript = try existingData(at: transcriptURL)
+        if fileManager.fileExists(atPath: transcriptURL.path), !isRegularFile(transcriptURL) {
+            throw MeetingStoreError.unsafeStorePath(transcriptURL.lastPathComponent)
+        }
+        let meetingData = try Self.encoder().encode(meeting)
+        let transcriptData = try Self.encoder().encode(
+            utterances.sorted(by: MeetingUtterance.chronologicallyPrecedes)
+        )
+        let stagedMeeting = try stage(meetingData, for: .meeting, in: directory)
+        var stagedTranscript: URL?
+
+        do {
+            stagedTranscript = try stage(transcriptData, for: .transcript, in: directory)
+        } catch {
+            try? fileManager.removeItem(at: stagedMeeting)
+            if createdDirectory {
+                try? fileManager.removeItem(at: directory)
             }
-            let stagedMeeting = try stage(meetingData, for: .meeting, in: directory)
-            var stagedTranscript: URL?
+            throw error
+        }
+
+        var replacedTranscript = false
+        do {
+            if let stagedTranscript {
+                try replace(stagedTranscript, at: transcriptURL, file: .transcript, injectFailure: true)
+                replacedTranscript = true
+            }
+            // meeting.json is the visible commit marker. It is replaced
+            // last so a completed state can never point at older transcript
+            // bytes after an interrupted two-file update.
+            try replace(stagedMeeting, at: meetingURL, file: .meeting, injectFailure: true)
+        } catch {
+            try? fileManager.removeItem(at: stagedMeeting)
+            if let stagedTranscript {
+                try? fileManager.removeItem(at: stagedTranscript)
+            }
 
             do {
-                stagedTranscript = try stage(transcriptData, for: .transcript, in: directory)
-            } catch {
-                try? fileManager.removeItem(at: stagedMeeting)
+                if replacedTranscript {
+                    try restore(
+                        oldTranscript,
+                        at: transcriptURL,
+                        file: .transcript,
+                        in: directory
+                    )
+                }
                 if createdDirectory {
                     try? fileManager.removeItem(at: directory)
                 }
-                throw error
-            }
-
-            var replacedTranscript = false
-            do {
-                if let stagedTranscript {
-                    try replace(stagedTranscript, at: transcriptURL, file: .transcript, injectFailure: true)
-                    replacedTranscript = true
-                }
-                // meeting.json is the visible commit marker. It is replaced
-                // last so a completed state can never point at older transcript
-                // bytes after an interrupted two-file update.
-                try replace(stagedMeeting, at: meetingURL, file: .meeting, injectFailure: true)
             } catch {
-                try? fileManager.removeItem(at: stagedMeeting)
-                if let stagedTranscript {
-                    try? fileManager.removeItem(at: stagedTranscript)
-                }
-
-                do {
-                    if replacedTranscript {
-                        try restore(
-                            oldTranscript,
-                            at: transcriptURL,
-                            file: .transcript,
-                            in: directory
-                        )
-                    }
-                    if createdDirectory {
-                        try? fileManager.removeItem(at: directory)
-                    }
-                } catch {
-                    throw MeetingStoreError.rollbackFailed
-                }
-                throw error
+                throw MeetingStoreError.rollbackFailed
             }
+            throw error
+        }
     }
 
     func save(meeting: MeetingRecord, transcript: [MeetingUtterance]) throws {
@@ -194,76 +205,83 @@ final class MeetingStore: @unchecked Sendable {
     }
 
     func list() throws -> [MeetingListEntry] {
-        try withLock {
-            guard fileManager.fileExists(atPath: rootURL.path) else { return [] }
-            try requireSafeDirectory(rootURL)
+        try Self.mutationRegistry.withReconciliation(rootPath: rootURL.path) {
+            try withLock {
+                guard fileManager.fileExists(atPath: rootURL.path) else {
+                    return ([], [])
+                }
+                try requireSafeDirectory(rootURL)
+                let deletedMeetingIDs = try cleanupDeletionTombstonesLocked()
 
-            let children = try fileManager.contentsOfDirectory(
-                at: rootURL,
-                includingPropertiesForKeys: [.contentModificationDateKey],
-                options: [.skipsHiddenFiles]
-            )
+                let children = try fileManager.contentsOfDirectory(
+                    at: rootURL,
+                    includingPropertiesForKeys: [.contentModificationDateKey],
+                    options: [.skipsHiddenFiles]
+                )
 
-            let candidates = children.map { child -> ListingCandidate in
-                let directoryName = child.lastPathComponent
-                let id = UUID(uuidString: directoryName)
-                let modifiedAt = (try? child.resourceValues(
-                    forKeys: [.contentModificationDateKey]
-                ).contentModificationDate) ?? .distantPast
+                let candidates = children.map { child -> ListingCandidate in
+                    let directoryName = child.lastPathComponent
+                    let id = UUID(uuidString: directoryName)
+                    let modifiedAt = (try? child.resourceValues(
+                        forKeys: [.contentModificationDateKey]
+                    ).contentModificationDate) ?? .distantPast
 
-                guard let id else {
-                    return ListingCandidate(
-                        entry: .unavailable(UnavailableMeeting(
-                            id: nil,
-                            directoryName: directoryName,
-                            reason: .unsafeEntry
-                        )),
-                        sortDate: modifiedAt,
-                        directoryName: directoryName
-                    )
+                    guard let id else {
+                        return ListingCandidate(
+                            entry: .unavailable(UnavailableMeeting(
+                                id: nil,
+                                directoryName: directoryName,
+                                reason: .unsafeEntry
+                            )),
+                            sortDate: modifiedAt,
+                            directoryName: directoryName
+                        )
+                    }
+
+                    do {
+                        let stored = try load(id: id, from: child)
+                        return ListingCandidate(
+                            entry: .available(stored.meeting),
+                            sortDate: stored.meeting.startedAt,
+                            directoryName: directoryName
+                        )
+                    } catch let error as ClassifiedLoadError {
+                        return ListingCandidate(
+                            entry: .unavailable(UnavailableMeeting(
+                                id: id,
+                                directoryName: directoryName,
+                                reason: error.reason
+                            )),
+                            sortDate: modifiedAt,
+                            directoryName: directoryName
+                        )
+                    } catch {
+                        return ListingCandidate(
+                            entry: .unavailable(UnavailableMeeting(
+                                id: id,
+                                directoryName: directoryName,
+                                reason: .unsafeEntry
+                            )),
+                            sortDate: modifiedAt,
+                            directoryName: directoryName
+                        )
+                    }
                 }
 
-                do {
-                    let stored = try load(id: id, from: child)
-                    return ListingCandidate(
-                        entry: .available(stored.meeting),
-                        sortDate: stored.meeting.startedAt,
-                        directoryName: directoryName
-                    )
-                } catch let error as ClassifiedLoadError {
-                    return ListingCandidate(
-                        entry: .unavailable(UnavailableMeeting(
-                            id: id,
-                            directoryName: directoryName,
-                            reason: error.reason
-                        )),
-                        sortDate: modifiedAt,
-                        directoryName: directoryName
-                    )
-                } catch {
-                    return ListingCandidate(
-                        entry: .unavailable(UnavailableMeeting(
-                            id: id,
-                            directoryName: directoryName,
-                            reason: .unsafeEntry
-                        )),
-                        sortDate: modifiedAt,
-                        directoryName: directoryName
-                    )
-                }
+                let entries = candidates
+                    .sorted {
+                        if $0.sortDate != $1.sortDate { return $0.sortDate > $1.sortDate }
+                        return $0.directoryName < $1.directoryName
+                    }
+                    .prefix(Self.maximumRecords)
+                    .map(\.entry)
+                return (entries, deletedMeetingIDs)
             }
-
-            return candidates
-                .sorted {
-                    if $0.sortDate != $1.sortDate { return $0.sortDate > $1.sortDate }
-                    return $0.directoryName < $1.directoryName
-                }
-                .prefix(Self.maximumRecords)
-                .map(\.entry)
         }
     }
 
     func delete(_ id: UUID, confirmed: Bool) throws {
+        var tombstone: URL?
         try Self.mutationRegistry.withDelete(rootPath: rootURL.path, meetingID: id) {
             try withLock {
                 guard confirmed else {
@@ -280,8 +298,14 @@ final class MeetingStore: @unchecked Sendable {
                 guard type == .typeDirectory || type == .typeSymbolicLink else {
                     throw MeetingStoreError.unsafeStorePath(directory.lastPathComponent)
                 }
-                try fileManager.removeItem(at: directory)
+                let deletionTombstone = deletionTombstoneURL(for: id)
+                try fileManager.moveItem(at: directory, to: deletionTombstone)
+                tombstone = deletionTombstone
             }
+        }
+        try failureInjector?(.afterAtomicDeletionRename)
+        if let tombstone {
+            try? fileManager.removeItem(at: tombstone)
         }
     }
 
@@ -370,7 +394,7 @@ final class MeetingStore: @unchecked Sendable {
         return hasValidRawCapture(
             in: directory,
             fileManager: fileManager
-        ) || hasValidRetainedCAF(
+        ) || hasValidRetainedAudio(
             meeting: meeting,
             in: directory,
             fileManager: fileManager
@@ -433,15 +457,13 @@ final class MeetingStore: @unchecked Sendable {
         }
     }
 
-    private static func hasValidRetainedCAF(
+    private static func hasValidRetainedAudio(
         meeting: MeetingRecord,
         in directory: URL,
         fileManager: FileManager
     ) -> Bool {
         guard let metadata = meeting.retainedAudio,
-              metadata.filename == AudioRetentionController.retainedFilename,
-              metadata.format == AudioRetentionController.retainedFormat,
-              metadata.channelCount == AudioRetentionController.channelCount else {
+              AudioRetentionController.supports(metadata) else {
             return false
         }
         let url = directory.appendingPathComponent(metadata.filename).standardizedFileURL
@@ -499,6 +521,94 @@ final class MeetingStore: @unchecked Sendable {
             return false
         }
         return attributes[.type] as? FileAttributeType == .typeRegular
+    }
+
+    private func deletionTombstoneURL(for id: UUID) -> URL {
+        rootURL.appendingPathComponent(
+            ".\(id.uuidString).\(UUID().uuidString).deleting",
+            isDirectory: true
+        )
+    }
+
+    static func withDeletionPrecedence<T>(
+        rootURL: URL,
+        meetingID: UUID,
+        fileManager: FileManager,
+        _ operation: () throws -> T
+    ) throws -> T {
+        let rootURL = rootURL.standardizedFileURL
+        return try mutationRegistry.withSave(
+            rootPath: rootURL.path,
+            meetingID: meetingID,
+            durableDeletionExists: {
+                hasDeletionTombstone(
+                    for: meetingID,
+                    rootURL: rootURL,
+                    fileManager: fileManager
+                )
+            },
+            operation
+        )
+    }
+
+    private static func hasDeletionTombstone(
+        for id: UUID,
+        rootURL: URL,
+        fileManager: FileManager
+    ) -> Bool {
+        guard fileManager.fileExists(atPath: rootURL.path),
+              let children = try? fileManager.contentsOfDirectory(
+                  at: rootURL,
+                  includingPropertiesForKeys: nil
+              ) else {
+            return false
+        }
+        return children.contains { child in
+            Self.deletionTombstoneMeetingID(child.lastPathComponent) == id
+                && isDirectoryOrSymbolicLink(child, fileManager: fileManager)
+        }
+    }
+
+    private func cleanupDeletionTombstonesLocked() throws -> Set<UUID> {
+        var deletedMeetingIDs = Set<UUID>()
+        for child in try fileManager.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: nil
+        ) {
+            guard let meetingID = Self.deletionTombstoneMeetingID(child.lastPathComponent),
+                  isDirectoryOrSymbolicLink(child) else {
+                continue
+            }
+            deletedMeetingIDs.insert(meetingID)
+            try? fileManager.removeItem(at: child)
+        }
+        return deletedMeetingIDs
+    }
+
+    private func isDirectoryOrSymbolicLink(_ url: URL) -> Bool {
+        Self.isDirectoryOrSymbolicLink(url, fileManager: fileManager)
+    }
+
+    private static func isDirectoryOrSymbolicLink(
+        _ url: URL,
+        fileManager: FileManager
+    ) -> Bool {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              let type = attributes[.type] as? FileAttributeType else {
+            return false
+        }
+        return type == .typeDirectory || type == .typeSymbolicLink
+    }
+
+    private static func deletionTombstoneMeetingID(_ name: String) -> UUID? {
+        let components = name.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 4,
+              components[0].isEmpty,
+              components[3] == "deleting",
+              UUID(uuidString: String(components[2])) != nil else {
+            return nil
+        }
+        return UUID(uuidString: String(components[1]))
     }
 
     private func stage(_ data: Data, for file: MeetingStoreFile, in directory: URL) throws -> URL {
@@ -599,10 +709,14 @@ private final class MeetingStoreMutationRegistry: @unchecked Sendable {
     func withSave<T>(
         rootPath: String,
         meetingID: UUID,
+        durableDeletionExists: () -> Bool,
         _ operation: () throws -> T
     ) throws -> T {
         try lock.withLock {
             let key = Key(rootPath: rootPath, meetingID: meetingID)
+            if durableDeletionExists() {
+                deleted.insert(key)
+            }
             guard !deleted.contains(key) else {
                 throw MeetingStoreError.meetingNotFound(meetingID)
             }
@@ -618,6 +732,19 @@ private final class MeetingStoreMutationRegistry: @unchecked Sendable {
         try lock.withLock {
             let result = try operation()
             deleted.insert(Key(rootPath: rootPath, meetingID: meetingID))
+            return result
+        }
+    }
+
+    func withReconciliation<T>(
+        rootPath: String,
+        _ operation: () throws -> (T, Set<UUID>)
+    ) throws -> T {
+        try lock.withLock {
+            let (result, meetingIDs) = try operation()
+            deleted.formUnion(meetingIDs.map {
+                Key(rootPath: rootPath, meetingID: $0)
+            })
             return result
         }
     }

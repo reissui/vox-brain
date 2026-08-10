@@ -22,11 +22,19 @@ enum MeetingTranscriptionCoordinatorError: Error, Equatable, LocalizedError, Sen
     }
 }
 
+private enum RetainedAudioRecoveryError: Error {
+    case promotionFailed
+}
+
 @MainActor
 protocol MeetingTranscriptionRetrying: AnyObject {
     func retry(meetingID: UUID) async throws -> MeetingRecord
     func isRunning(meetingID: UUID) -> Bool
     func cancelAndWait(meetingID: UUID) async
+    func cancelAndWaitForDeletion(
+        meetingID: UUID,
+        operation: @MainActor () throws -> Void
+    ) async throws
 }
 
 extension MeetingTranscriptionRetrying {
@@ -35,15 +43,14 @@ extension MeetingTranscriptionRetrying {
 }
 
 /// Owns the post-recording transcript job. The captured source tracks and
-/// manifest remain private and durable until a final transcript succeeds.
-/// Only then is the user's normal audio-retention preference applied and the
-/// text made eligible for analysis and upload.
+/// manifest remain private and durable until a final transcript replaces them
+/// with a private recording or the user explicitly deletes the audio. Failed
+/// or cancelled attempts keep their source audio retryable.
 @MainActor
 final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     typealias ClientFactory = @Sendable () throws -> any LiveTranscriptionClient
     typealias UploadScheduler = @MainActor (UUID) -> Void
 
-    private nonisolated static let accidentalMeetingDuration: TimeInterval = 30
     private static let registry = MeetingTranscriptionJobRegistry.shared
     private let store: MeetingStore
     private let retention: AudioRetentionController
@@ -76,11 +83,12 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     }
 
     /// Atomically exposes a completed recording as a processing job before any
-    /// final speech command starts. A crash after this point can be resumed
-    /// from `audio-capture.json` on the next launch.
+    /// final speech command starts. A crash after this point is recovered from
+    /// `audio-capture.json` into a saved item that waits for explicit retry.
     func stage(
         meeting: MeetingRecord,
-        capture: MeetingAudioCaptureSummary
+        capture: MeetingAudioCaptureSummary,
+        utterances: [MeetingUtterance] = []
     ) throws -> MeetingRecord {
         guard !Self.registry.contains(key(for: meeting.id)) else {
             throw MeetingTranscriptionCoordinatorError.transcriptionAlreadyRunning
@@ -93,7 +101,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         processing.transcriptionErrorMessage = nil
         processing.analysisState = .notRequested
         processing.uploadState = .notUploaded
-        try store.save(processing, utterances: [])
+        try store.save(processing, utterances: utterances)
         return processing
     }
 
@@ -114,6 +122,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         _ = try validatedManifest(capture, meetingID: meeting.id)
         let current = try store.load(meeting.id)
         guard current.meeting.transcriptionAttemptCount + 1 == generation,
+              current.meeting.audioRetentionState != .deleted,
+              !retention.hasInterruptedDeletion(for: meeting.id),
               [.pending, .processing, .failed].contains(
                   current.meeting.transcriptionState
               ) else {
@@ -123,10 +133,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         processing.lifecycleState = .completed
         processing.transcriptionState = .processing
         processing.transcriptionAttemptCount = generation
-        processing.transcriptionErrorMessage = nil
-        processing.analysisState = .notRequested
-        processing.uploadState = .notUploaded
-        try store.save(processing, utterances: [])
+        try store.save(processing, utterances: current.utterances)
         return processing
     }
 
@@ -166,6 +173,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         let entry = MeetingTranscriptionJobRegistry.Entry(
             token: token,
             generation: meeting.transcriptionAttemptCount,
+            retrySnapshot: nil,
             task: task,
             cancel: {
                 await cancellation.cancel()
@@ -245,7 +253,9 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             return await existing.task.value
         }
         let stored = try store.load(meetingID)
-        guard [.pending, .processing, .failed].contains(stored.meeting.transcriptionState) else {
+        guard [.pending, .processing, .failed].contains(stored.meeting.transcriptionState),
+              stored.meeting.audioRetentionState != .deleted,
+              !retention.hasInterruptedDeletion(for: meetingID) else {
             throw MeetingTranscriptionCoordinatorError.transcriptionNotRetryable
         }
 
@@ -253,6 +263,14 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         let generation = stored.meeting.transcriptionAttemptCount + 1
         let cancellation = MeetingTranscriptionCancellationRelay()
         let task = Task { @MainActor [self] in
+            guard !Task.isCancelled,
+                  Self.registry.isCurrent(
+                      key: jobKey,
+                      token: token,
+                      generation: generation
+                  ) else {
+                return currentRecord(for: meetingID, fallback: stored.meeting)
+            }
             let capture: MeetingAudioCaptureSummary
             do {
                 capture = try await Task.detached(
@@ -267,7 +285,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             } catch {
                 return persistUnrecoverableRetry(
                     meeting: stored.meeting,
-                    utterances: stored.utterances,
                     key: jobKey,
                     token: token,
                     generation: generation,
@@ -318,7 +335,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 let candidate = currentRecord(for: meetingID, fallback: stored.meeting)
                 return Self.persistFailureIfCurrent(
                     meeting: candidate,
-                    utterances: stored.utterances,
                     message: Self.bounded(error),
                     store: store
                 )
@@ -327,6 +343,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         let entry = MeetingTranscriptionJobRegistry.Entry(
             token: token,
             generation: generation,
+            retrySnapshot: stored.meeting,
             task: task,
             cancel: {
                 await cancellation.cancel()
@@ -347,7 +364,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
 
     private func persistUnrecoverableRetry(
         meeting: MeetingRecord,
-        utterances: [MeetingUtterance],
         key: MeetingTranscriptionJobKey,
         token: UUID,
         generation: Int,
@@ -359,7 +375,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             token: token,
             generation: generation
         ), let current = try? store.load(meeting.id),
-           current.meeting.transcriptionAttemptCount + 1 == generation else {
+           current.meeting.transcriptionAttemptCount + 1 == generation,
+           current.meeting.audioRetentionState != .deleted else {
             return currentRecord(for: meeting.id, fallback: meeting)
         }
         var failed = current.meeting
@@ -367,10 +384,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         failed.transcriptionState = .failed
         failed.transcriptionAttemptCount = generation
         failed.transcriptionErrorMessage = String(message.prefix(720))
-        failed.analysisState = .notRequested
-        failed.uploadState = .notUploaded
         do {
-            try store.save(failed, utterances: utterances)
+            try store.save(failed, utterances: current.utterances)
             return failed
         } catch {
             return currentRecord(for: meeting.id, fallback: failed)
@@ -390,20 +405,88 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         Self.registry.remove(key: jobKey, token: entry.token)
     }
 
+    func cancelAndWaitForDeletion(
+        meetingID: UUID,
+        operation: @MainActor () throws -> Void
+    ) async throws {
+        let jobKey = key(for: meetingID)
+        let reservationToken: UUID
+        var cancelledRetrySnapshot: MeetingRecord?
+        while true {
+            if let entry = Self.registry.entry(for: jobKey) {
+                entry.task.cancel()
+                await entry.cancel()
+                let result = await entry.task.value
+                if result.transcriptionState == .processing {
+                    cancelledRetrySnapshot = entry.retrySnapshot
+                }
+                if let token = Self.registry.reserveDeletion(
+                    jobKey,
+                    replacingEntryWithToken: entry.token
+                ) {
+                    reservationToken = token
+                    break
+                }
+                guard !Self.registry.hasDeletionReservation(jobKey) else {
+                    throw MeetingTranscriptionCoordinatorError.transcriptionAlreadyRunning
+                }
+                continue
+            }
+            guard let token = Self.registry.reserveDeletion(
+                jobKey,
+                replacingEntryWithToken: nil
+            ) else {
+                throw MeetingTranscriptionCoordinatorError.transcriptionAlreadyRunning
+            }
+            reservationToken = token
+            break
+        }
+
+        defer {
+            Self.registry.releaseDeletion(jobKey, token: reservationToken)
+        }
+        if let cancelledRetrySnapshot {
+            try restoreCancelledRetry(
+                cancelledRetrySnapshot,
+                meetingID: meetingID
+            )
+        }
+        try operation()
+    }
+
+    private func restoreCancelledRetry(
+        _ snapshot: MeetingRecord,
+        meetingID: UUID
+    ) throws {
+        let stored = try store.load(meetingID)
+        guard stored.meeting.transcriptionState == .processing,
+              stored.meeting.transcriptionAttemptCount
+                == snapshot.transcriptionAttemptCount + 1 else { return }
+        var restored = stored.meeting
+        restored.transcriptionState = snapshot.transcriptionState
+        restored.transcriptionAttemptCount = snapshot.transcriptionAttemptCount
+        restored.transcriptionErrorMessage = snapshot.transcriptionErrorMessage
+        restored.analysisState = snapshot.analysisState
+        restored.uploadState = snapshot.uploadState
+        try store.save(restored, utterances: stored.utterances)
+    }
+
     /// Resumes jobs interrupted while pending/processing. It also closes the
     /// narrow crash window after a new-pipeline transcript became durable but
     /// before its idempotent upload was scheduled. Failed transcription attempts
     /// still wait for the user's explicit Retry action.
     func resumeInterruptedJobs() async -> [MeetingRecord] {
         guard let entries = try? store.list() else { return [] }
-        var results: [MeetingRecord] = []
+        var results = retention.reconcileInterruptedDeletions(in: entries)
         for entry in entries {
-            guard case .available(let meeting) = entry else { continue }
+            guard case .available(let meeting) = entry,
+                  !retention.hasInterruptedDeletion(for: meeting.id) else { continue }
             if [.pending, .processing].contains(meeting.transcriptionState),
                let retried = try? await retry(meetingID: meeting.id) {
                 results.append(retried)
             } else if meeting.transcriptionState == .completed,
                       meeting.transcriptionAttemptCount > 0,
+                      meeting.retainedAudio != nil,
                       meeting.uploadState == .notUploaded {
                 scheduleUpload(meeting.id)
             }
@@ -417,8 +500,12 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     @discardableResult
     func reconcileInterruptedJobs(at date: Date = Date()) -> [MeetingRecord] {
         guard let entries = try? store.list() else { return [] }
-        var reconciled: [MeetingRecord] = []
+        var reconciled = retention.reconcileInterruptedDeletions(in: entries)
         for entry in entries {
+            if let meetingID = entry.id,
+               retention.hasInterruptedDeletion(for: meetingID) {
+                continue
+            }
             if case .unavailable(let unavailable) = entry,
                unavailable.reason == .missingMeeting,
                let id = unavailable.id,
@@ -428,34 +515,48 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             }
             guard case .available(let listed) = entry,
                   !Self.registry.contains(key(for: listed.id)),
-                  let stored = try? store.load(listed.id) else { continue }
-            var meeting = stored.meeting
+                  listed.audioRetentionState != .deleted else { continue }
             let interruptedCapture = [
                 MeetingLifecycleState.starting,
                 .recording,
                 .paused,
                 .stopSuggested,
                 .finalizing,
-            ].contains(meeting.lifecycleState)
+            ].contains(listed.lifecycleState)
             let interruptedTranscript = [.pending, .processing]
-                .contains(meeting.transcriptionState)
+                .contains(listed.transcriptionState)
+            let missingArchive = listed.transcriptionState == .completed
+                && listed.transcriptionAttemptCount > 0
+                && listed.retainedAudio == nil
+                && listed.audioRetentionState == .pending
+            let interruptedArchive = missingArchive
+                && Self.hasRecoverableSourceAudio(
+                    in: store.directoryURL(for: listed.id),
+                    fileManager: fileManagerBox.value
+                )
 
-            if interruptedCapture || interruptedTranscript {
+            if interruptedCapture || interruptedTranscript || interruptedArchive {
+                guard let stored = try? store.load(listed.id),
+                      stored.meeting.audioRetentionState != .deleted else { continue }
+                var meeting = stored.meeting
                 meeting.endedAt = meeting.endedAt ?? date
                 meeting.lifecycleState = interruptedCapture ? .failed : .completed
                 meeting.transcriptionState = .failed
-                meeting.transcriptionErrorMessage = interruptedCapture
-                    ? "Brain stopped before this recording finished. Its local audio was preserved; retry the transcript when ready."
-                    : "Brain stopped before this transcript finished. Retry it when ready."
-                meeting.analysisState = .notRequested
-                meeting.uploadState = .notUploaded
+                meeting.transcriptionErrorMessage = if interruptedCapture {
+                    "Brain stopped before this recording finished. Its local audio was preserved; retry the transcript when ready."
+                } else if interruptedArchive {
+                    "Brain stopped before this recording was archived. Its transcript and source audio were preserved; retry when ready."
+                } else {
+                    "Brain stopped before this transcript finished. Retry it when ready."
+                }
                 if (try? store.save(meeting, utterances: stored.utterances)) != nil {
                     reconciled.append(meeting)
                 }
-            } else if meeting.transcriptionState == .completed,
-                      meeting.transcriptionAttemptCount > 0,
-                      meeting.uploadState == .notUploaded {
-                scheduleUpload(meeting.id)
+            } else if listed.transcriptionState == .completed,
+                      listed.transcriptionAttemptCount > 0,
+                      listed.retainedAudio != nil,
+                      listed.uploadState == .notUploaded {
+                scheduleUpload(listed.id)
             }
         }
         return reconciled
@@ -508,28 +609,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         var currentMeeting = currentStored.meeting
         currentMeeting.speechEngine = meeting.speechEngine
         currentMeeting.speechModel = meeting.speechModel
-        if shouldDiscardAccidentalMeeting(
-            currentMeeting,
-            utterances: utterances
-        ) {
-            do {
-                try store.delete(currentMeeting.id, confirmed: true)
-                return MeetingTranscriptionPersistenceOutcome(
-                    meeting: currentMeeting,
-                    shouldScheduleUpload: false
-                )
-            } catch {
-                return MeetingTranscriptionPersistenceOutcome(
-                    meeting: persistFailureIfCurrent(
-                        meeting: currentMeeting,
-                        utterances: utterances,
-                        message: "Brain could not remove the short empty meeting: \(bounded(error))",
-                        store: store
-                    ),
-                    shouldScheduleUpload: false
-                )
-            }
-        }
         let systemicFailures = failures.filter(\.isSystemic)
         guard systemicFailures.isEmpty && (utterances.isEmpty ? failures.isEmpty : true) else {
             let blockingFailures = systemicFailures.isEmpty ? failures : systemicFailures
@@ -539,7 +618,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             return MeetingTranscriptionPersistenceOutcome(
                 meeting: persistFailureIfCurrent(
                     meeting: currentMeeting,
-                    utterances: utterances,
+                    attemptUtterances: utterances,
                     message: message,
                     store: store
                 ),
@@ -552,6 +631,10 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         completed.transcriptionErrorMessage = failures.isEmpty
             ? nil
             : "Transcript completed with \(failures.count) skipped audio span\(failures.count == 1 ? "" : "s")."
+        // A retry keeps the last durable analysis/upload state while it is in
+        // flight. Only a newly committed transcript invalidates those results.
+        completed.analysisState = .notRequested
+        completed.uploadState = .notUploaded
         if currentMeeting.titleSource != .manual {
             completed.title = MeetingContextTitle.make(
                 utterances: utterances,
@@ -580,7 +663,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             if let committed = try? store.load(meeting.id),
                committed.meeting.transcriptionAttemptCount
                 == meeting.transcriptionAttemptCount,
-               committed.meeting.transcriptionState == .completed {
+               committed.meeting.transcriptionState == .completed,
+               committed.meeting.retainedAudio != nil {
                 return MeetingTranscriptionPersistenceOutcome(
                     meeting: committed.meeting,
                     shouldScheduleUpload: true
@@ -589,7 +673,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             return MeetingTranscriptionPersistenceOutcome(
                 meeting: persistFailureIfCurrent(
                     meeting: completed,
-                    utterances: utterances,
+                    attemptUtterances: utterances,
                     message: Self.bounded(error),
                     store: store
                 ),
@@ -598,35 +682,39 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         }
     }
 
-    private nonisolated static func shouldDiscardAccidentalMeeting(
-        _ meeting: MeetingRecord,
-        utterances: [MeetingUtterance]
-    ) -> Bool {
-        guard let endedAt = meeting.endedAt else { return false }
-        let duration = endedAt.timeIntervalSince(meeting.startedAt)
-        guard duration >= 0, duration < accidentalMeetingDuration else { return false }
-        return !utterances.contains {
-            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-    }
-
     private nonisolated static func persistFailureIfCurrent(
         meeting: MeetingRecord,
-        utterances: [MeetingUtterance],
+        attemptUtterances: [MeetingUtterance] = [],
         message: String,
         store: MeetingStore
     ) -> MeetingRecord {
-        guard isCurrentProcessingGeneration(meeting, store: store) else {
+        guard let current = try? store.load(meeting.id),
+              current.meeting.transcriptionAttemptCount
+                == meeting.transcriptionAttemptCount,
+              current.meeting.transcriptionState == .processing
+                || (
+                    current.meeting.transcriptionState == .completed
+                        && current.meeting.retainedAudio == nil
+                        && current.meeting.audioRetentionState == .pending
+                ) else {
             return currentRecord(for: meeting.id, fallback: meeting, store: store)
         }
-        var failed = meeting
+        var failed = current.meeting
+        failed.speechEngine = meeting.speechEngine
+        failed.speechModel = meeting.speechModel
         failed.lifecycleState = .completed
         failed.transcriptionState = .failed
         failed.transcriptionErrorMessage = String(message.prefix(720))
-        failed.analysisState = .notRequested
-        failed.uploadState = .notUploaded
+        // A retry cannot replace a durable transcript until it succeeds. On an
+        // initial attempt there is no prior transcript, so keep any successful
+        // spans that were produced before a systemic failure.
+        let durableUtterances = if meeting.transcriptionAttemptCount <= 1 {
+            attemptUtterances.isEmpty ? current.utterances : attemptUtterances
+        } else {
+            current.utterances
+        }
         do {
-            try store.save(failed, utterances: utterances)
+            try store.save(failed, utterances: durableUtterances)
             return failed
         } catch {
             return currentRecord(for: meeting.id, fallback: failed, store: store)
@@ -682,13 +770,19 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             return try loadCapture(directory: directory, fileManager: fileManager)
         } catch {
             do {
-                return try recoverCaptureFromRawPCM(
+                return try recoverCaptureFromRetainedAudio(
                     meeting: meeting,
                     directory: directory,
                     fileManager: fileManager
                 )
+            } catch RetainedAudioRecoveryError.promotionFailed {
+                // Canonical recovery files may have been replaced already.
+                // Never reinterpret that partial transaction as authoritative
+                // raw capture; the intact retained archive remains the source
+                // for the next retry.
+                throw MeetingTranscriptionCoordinatorError.unsafeAudioManifest
             } catch {
-                return try recoverCaptureFromRetainedCAF(
+                return try recoverCaptureFromRawPCM(
                     meeting: meeting,
                     directory: directory,
                     fileManager: fileManager
@@ -799,6 +893,51 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         }
     }
 
+    /// Distinguishes a recoverable archive crash from a legacy item or a
+    /// recording the user explicitly deleted. This check is read-only: launch
+    /// reconciliation must never manufacture recovery files for an item that
+    /// intentionally has no audio.
+    private nonisolated static func hasRecoverableSourceAudio(
+        in directory: URL,
+        fileManager: FileManager
+    ) -> Bool {
+        let directory = directory.standardizedFileURL
+        guard directory.isFileURL,
+              directory.path.hasPrefix("/"),
+              directory.resolvingSymlinksInPath().standardizedFileURL == directory,
+              let directoryAttributes = try? fileManager.attributesOfItem(
+                  atPath: directory.path
+              ),
+              directoryAttributes[.type] as? FileAttributeType == .typeDirectory,
+              (directoryAttributes[.ownerAccountID] as? NSNumber)?.uint32Value
+                == Darwin.geteuid(),
+              ((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue
+                ?? 0o777) & 0o077 == 0 else {
+            return false
+        }
+
+        if (try? loadCapture(directory: directory, fileManager: fileManager)) != nil {
+            return true
+        }
+
+        return MeetingAudioSource.allCases.contains { source in
+            let url = directory.appendingPathComponent("\(source.rawValue).f32le.pcm")
+                .standardizedFileURL
+            guard url.deletingLastPathComponent() == directory,
+                  url.resolvingSymlinksInPath().standardizedFileURL == url,
+                  let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+                  attributes[.type] as? FileAttributeType == .typeRegular,
+                  (attributes[.ownerAccountID] as? NSNumber)?.uint32Value
+                    == Darwin.geteuid(),
+                  ((attributes[.posixPermissions] as? NSNumber)?.intValue
+                    ?? 0o777) & 0o077 == 0,
+                  let size = (attributes[.size] as? NSNumber)?.int64Value else {
+                return false
+            }
+            return size > 0 && size % Int64(MemoryLayout<Float>.size) == 0
+        }
+    }
+
     @discardableResult
     private func validatedManifest(
         _ capture: MeetingAudioCaptureSummary,
@@ -853,7 +992,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         return capture
     }
 
-    private nonisolated static func recoverCaptureFromRetainedCAF(
+    private nonisolated static func recoverCaptureFromRetainedAudio(
         meeting: MeetingRecord,
         directory: URL,
         fileManager: FileManager
@@ -867,9 +1006,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
               ),
               directoryAttributes[.type] as? FileAttributeType == .typeDirectory,
               let metadata = meeting.retainedAudio,
-              metadata.filename == AudioRetentionController.retainedFilename,
-              metadata.format == AudioRetentionController.retainedFormat,
-              metadata.channelCount == AudioRetentionController.channelCount else {
+              AudioRetentionController.supports(metadata) else {
             throw MeetingTranscriptionCoordinatorError.unsafeAudioManifest
         }
 
@@ -1073,14 +1210,14 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 at: directory.appendingPathComponent(MeetingAudioWriter.manifestFilename),
                 fileManager: fileManager
             )
+            return try validatedManifest(
+                capture,
+                directory: directory,
+                fileManager: fileManager
+            )
         } catch {
-            throw MeetingTranscriptionCoordinatorError.unsafeAudioManifest
+            throw RetainedAudioRecoveryError.promotionFailed
         }
-        return try validatedManifest(
-            capture,
-            directory: directory,
-            fileManager: fileManager
-        )
     }
 
     private nonisolated static func createOwnerOnlyFile(
@@ -1169,15 +1306,17 @@ private final class MeetingTranscriptionJobRegistry {
     struct Entry {
         let token: UUID
         let generation: Int
+        let retrySnapshot: MeetingRecord?
         let task: Task<MeetingRecord, Never>
         let cancel: @MainActor () async -> Void
     }
 
     static let shared = MeetingTranscriptionJobRegistry()
     private var entries: [MeetingTranscriptionJobKey: Entry] = [:]
+    private var deletionReservations: [MeetingTranscriptionJobKey: UUID] = [:]
 
     func contains(_ key: MeetingTranscriptionJobKey) -> Bool {
-        entries[key] != nil
+        entries[key] != nil || deletionReservations[key] != nil
     }
 
     func entry(for key: MeetingTranscriptionJobKey) -> Entry? {
@@ -1185,7 +1324,7 @@ private final class MeetingTranscriptionJobRegistry {
     }
 
     func install(_ entry: Entry, for key: MeetingTranscriptionJobKey) -> Bool {
-        guard entries[key] == nil else { return false }
+        guard entries[key] == nil, deletionReservations[key] == nil else { return false }
         entries[key] = entry
         return true
     }
@@ -1202,6 +1341,31 @@ private final class MeetingTranscriptionJobRegistry {
     func remove(key: MeetingTranscriptionJobKey, token: UUID) {
         guard entries[key]?.token == token else { return }
         entries.removeValue(forKey: key)
+    }
+
+    func reserveDeletion(
+        _ key: MeetingTranscriptionJobKey,
+        replacingEntryWithToken entryToken: UUID?
+    ) -> UUID? {
+        guard deletionReservations[key] == nil else { return nil }
+        if let entryToken {
+            guard entries[key]?.token == entryToken else { return nil }
+            entries.removeValue(forKey: key)
+        } else {
+            guard entries[key] == nil else { return nil }
+        }
+        let token = UUID()
+        deletionReservations[key] = token
+        return token
+    }
+
+    func hasDeletionReservation(_ key: MeetingTranscriptionJobKey) -> Bool {
+        deletionReservations[key] != nil
+    }
+
+    func releaseDeletion(_ key: MeetingTranscriptionJobKey, token: UUID) {
+        guard deletionReservations[key] == token else { return }
+        deletionReservations.removeValue(forKey: key)
     }
 }
 

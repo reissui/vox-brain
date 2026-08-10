@@ -76,35 +76,47 @@ final class FileMeetingUploadStore: MeetingUploadStoring, @unchecked Sendable {
     }
 
     func save(_ revision: MeetingUploadRevision) throws {
-        try withLock {
-            let directory = rootURL
-                .appendingPathComponent(revision.meetingID.uuidString, isDirectory: true)
-            try ensurePrivateDirectory(rootURL)
-            try ensurePrivateDirectory(directory)
-            let destination = stateURL(for: revision.meetingID)
-            if fileManager.fileExists(atPath: destination.path), !isRegularFile(destination) {
-                throw MeetingUploadStoreError.unsafePath
-            }
+        do {
+            try MeetingStore.withDeletionPrecedence(
+                rootURL: rootURL,
+                meetingID: revision.meetingID,
+                fileManager: fileManager
+            ) {
+                try withLock {
+                    let directory = rootURL
+                        .appendingPathComponent(revision.meetingID.uuidString, isDirectory: true)
+                    try ensurePrivateDirectory(rootURL)
+                    try ensurePrivateDirectory(directory)
+                    let destination = stateURL(for: revision.meetingID)
+                    if fileManager.fileExists(atPath: destination.path), !isRegularFile(destination) {
+                        throw MeetingUploadStoreError.unsafePath
+                    }
 
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .millisecondsSince1970
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-            let data: Data
-            do {
-                data = try encoder.encode(revision)
-            } catch {
-                throw MeetingUploadStoreError.writeFailed
-            }
+                    let encoder = JSONEncoder()
+                    encoder.dateEncodingStrategy = .millisecondsSince1970
+                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+                    let data: Data
+                    do {
+                        data = try encoder.encode(revision)
+                    } catch {
+                        throw MeetingUploadStoreError.writeFailed
+                    }
 
-            do {
-                try data.write(to: destination, options: .atomic)
-                try fileManager.setAttributes(
-                    [.posixPermissions: NSNumber(value: 0o600)],
-                    ofItemAtPath: destination.path
-                )
-            } catch {
-                throw MeetingUploadStoreError.writeFailed
+                    do {
+                        try data.write(to: destination, options: .atomic)
+                        try fileManager.setAttributes(
+                            [.posixPermissions: NSNumber(value: 0o600)],
+                            ofItemAtPath: destination.path
+                        )
+                    } catch {
+                        throw MeetingUploadStoreError.writeFailed
+                    }
+                }
             }
+        } catch let error as MeetingUploadStoreError {
+            throw error
+        } catch {
+            throw MeetingUploadStoreError.writeFailed
         }
     }
 

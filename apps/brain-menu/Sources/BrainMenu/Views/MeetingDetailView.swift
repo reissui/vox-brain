@@ -121,6 +121,7 @@ struct MeetingDetailViewModel: Equatable, Sendable {
     let analysis: MeetingAnalysis?
     let followUp: MeetingFollowUpViewModel?
     let audioControls: [MeetingAudioControl]
+    let audioRetentionState: MeetingAudioRetentionState?
     let transcriptionState: MeetingTranscriptionState?
     let analysisState: MeetingAnalysisState?
     let transcriptionCanRetry: Bool
@@ -196,6 +197,7 @@ extension MeetingUploadController: MeetingDetailUploadControlling {}
 protocol MeetingDetailAudioControlling: Sendable {
     func revealRecording(for meetingID: UUID) throws
     func exportRecording(for meetingID: UUID, to destination: URL?) throws -> URL?
+    func hasDeletableRecording(for meetingID: UUID) -> Bool
     func deleteRecording(for meetingID: UUID, confirmed: Bool) throws -> MeetingRecord
 }
 
@@ -213,10 +215,11 @@ struct FileMeetingLocalAudioChecker: MeetingLocalAudioChecking {
     }
 
     func hasLocalAudio(for meeting: MeetingRecord) -> Bool {
-        guard meeting.retainedAudio != nil else { return false }
+        guard let metadata = meeting.retainedAudio,
+              AudioRetentionController.supports(metadata) else { return false }
         let url = rootURL
             .appendingPathComponent(meeting.id.uuidString, isDirectory: true)
-            .appendingPathComponent(AudioRetentionController.retainedFilename)
+            .appendingPathComponent(metadata.filename)
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else {
             return false
         }
@@ -269,7 +272,7 @@ enum MeetingDetailAction: Equatable, Sendable {
 final class MeetingDetailController {
     static let meetingDeletionWarning = "Delete this meeting from this Mac? This removes only local application state. It does not retract a capture already delivered to the Brain vault."
     static let voiceNoteDeletionWarning = "Delete this voice note from this Mac? This removes only local application state. It does not retract a capture already delivered to the Brain vault."
-    static let audioDeletionWarning = "Delete this retained recording from this Mac? The transcript and any delivered vault capture remain available."
+    static let audioDeletionWarning = "Delete this saved recording from this Mac? The transcript and any delivered vault capture remain available."
 
     private(set) var state: MeetingDetailLoadState = .idle
     private(set) var meeting: MeetingRecord?
@@ -281,8 +284,11 @@ final class MeetingDetailController {
     private(set) var copiedMessage: String?
     private(set) var isMeetingDeletionPending = false
     private(set) var isAudioDeletionPending = false
+    private(set) var isAudioDeletionInProgress = false
     private(set) var isTranscriptionRetryInProgress = false
     private(set) var isMeetingDeletionInProgress = false
+    private(set) var isPlayableAudioAvailable = false
+    private(set) var isAudioDeletionAvailable = false
     var selectedTab: MeetingDetailTab = .summary
     var selectedUtteranceIDs: Set<UUID> = []
     var titleDraft = ""
@@ -357,9 +363,12 @@ final class MeetingDetailController {
                 }
                 return $0.id < $1.id
             }
-        let localAudioExists = meeting.map {
-            $0.retainedAudio != nil && audioChecker.hasLocalAudio(for: $0)
-        } ?? false
+        var audioControls: [MeetingAudioControl] = isPlayableAudioAvailable
+            ? [.reveal, .export]
+            : []
+        if meeting != nil, isAudioDeletionAvailable {
+            audioControls.append(.delete)
+        }
         var effectiveMeeting = meeting
         if let uploadRevision {
             effectiveMeeting?.uploadState = uploadRevision.state
@@ -393,10 +402,12 @@ final class MeetingDetailController {
                     body: $0.followUp.body
                 )
             },
-            audioControls: localAudioExists ? MeetingAudioControl.allCases : [],
+            audioControls: audioControls,
+            audioRetentionState: meeting?.audioRetentionState,
             transcriptionState: effectiveTranscriptionState,
             analysisState: effectiveMeeting?.analysisState,
             transcriptionCanRetry: meeting?.transcriptionState == .failed
+                && meeting?.audioRetentionState != .deleted
                 && !isTranscriptionRetryInProgress
                 && !transcriptionController.isRunning(meetingID: meetingID),
             transcriptionMessage: isTranscriptionRetryInProgress
@@ -438,6 +449,7 @@ final class MeetingDetailController {
                 stored = StoredMeeting(meeting: stored.meeting, utterances: cleanedUtterances)
             }
             meeting = stored.meeting
+            refreshAudioCapabilities(for: stored.meeting)
             lastKnownRecordingKind = stored.meeting.recordingKind
             if isInitialLoad, stored.meeting.isVoiceNote {
                 selectedTab = .transcript
@@ -460,6 +472,7 @@ final class MeetingDetailController {
             state = .ready
         } catch let error as MeetingStoreError {
             meeting = nil
+            refreshAudioCapabilities(for: nil)
             utterances = []
             uploadRevision = nil
             editor = SpeakerEditor(utterances: [])
@@ -471,6 +484,7 @@ final class MeetingDetailController {
             }
         } catch {
             meeting = nil
+            refreshAudioCapabilities(for: nil)
             utterances = []
             uploadRevision = nil
             editor = SpeakerEditor(utterances: [])
@@ -530,12 +544,14 @@ final class MeetingDetailController {
         case .exportAudio(let destination):
             exportAudio(to: destination)
         case .requestAudioDeletion:
-            guard !viewModel.audioControls.isEmpty else { return }
+            guard isAudioDeletionAvailable,
+                  !isAudioDeletionInProgress,
+                  !isMeetingDeletionInProgress else { return }
             isAudioDeletionPending = true
         case .confirmAudioDeletion:
-            deleteAudio()
+            await deleteAudio()
         case .cancelAudioDeletion:
-            isAudioDeletionPending = false
+            if !isAudioDeletionInProgress { isAudioDeletionPending = false }
         case .retryTranscription:
             await retryTranscription()
         case .retryUpload:
@@ -545,7 +561,7 @@ final class MeetingDetailController {
             await uploadController.reupload(meetingID: meetingID)
             reloadMeetingAfterTypedAction()
         case .requestMeetingDeletion:
-            guard meeting != nil else { return }
+            guard meeting != nil, !isAudioDeletionInProgress else { return }
             isMeetingDeletionPending = true
         case .confirmMeetingDeletion:
             await deleteMeeting()
@@ -555,7 +571,13 @@ final class MeetingDetailController {
     }
 
     private func retryTranscription() async {
+        guard meeting?.audioRetentionState != .deleted else {
+            errorMessage = MeetingTranscriptionCoordinatorError
+                .transcriptionNotRetryable.localizedDescription
+            return
+        }
         guard !isTranscriptionRetryInProgress,
+              !isAudioDeletionInProgress,
               !isMeetingDeletionInProgress,
               !transcriptionController.isRunning(meetingID: meetingID) else {
             errorMessage = MeetingTranscriptionCoordinatorError
@@ -567,7 +589,9 @@ final class MeetingDetailController {
         errorMessage = nil
         do {
             _ = try await transcriptionController.retry(meetingID: meetingID)
-            guard !isMeetingDeletionInProgress, state != .deleted else { return }
+            guard !isAudioDeletionInProgress,
+                  !isMeetingDeletionInProgress,
+                  state != .deleted else { return }
             load()
         } catch {
             errorMessage = Self.bounded(error)
@@ -717,7 +741,7 @@ final class MeetingDetailController {
     }
 
     private func revealAudio() {
-        guard viewModel.audioControls.contains(.reveal) else { return }
+        guard isPlayableAudioAvailable else { return }
         do {
             try audioController.revealRecording(for: meetingID)
             errorMessage = nil
@@ -727,7 +751,7 @@ final class MeetingDetailController {
     }
 
     private func exportAudio(to destination: URL?) {
-        guard viewModel.audioControls.contains(.export) else { return }
+        guard isPlayableAudioAvailable else { return }
         do {
             _ = try audioController.exportRecording(for: meetingID, to: destination)
             errorMessage = nil
@@ -736,26 +760,50 @@ final class MeetingDetailController {
         }
     }
 
-    private func deleteAudio() {
+    private func deleteAudio() async {
         guard isAudioDeletionPending,
-              viewModel.audioControls.contains(.delete) else { return }
+              !isAudioDeletionInProgress,
+              isAudioDeletionAvailable else { return }
+        isAudioDeletionPending = false
+        isAudioDeletionInProgress = true
+        defer { isAudioDeletionInProgress = false }
+
         do {
-            meeting = try audioController.deleteRecording(for: meetingID, confirmed: true)
-            isAudioDeletionPending = false
+            var deletedMeeting: MeetingRecord?
+            try await transcriptionController.cancelAndWaitForDeletion(
+                meetingID: meetingID
+            ) {
+                guard state != .deleted, !isMeetingDeletionInProgress else { return }
+                deletedMeeting = try audioController.deleteRecording(
+                    for: meetingID,
+                    confirmed: true
+                )
+            }
+            if let deletedMeeting {
+                meeting = deletedMeeting
+                isPlayableAudioAvailable = false
+                isAudioDeletionAvailable = false
+            }
             errorMessage = nil
         } catch {
-            errorMessage = Self.bounded(error)
+            let deletionError = Self.bounded(error)
+            reloadMeetingAfterTypedAction()
+            errorMessage = deletionError
         }
     }
 
     private func deleteMeeting() async {
         guard isMeetingDeletionPending, !isMeetingDeletionInProgress else { return }
         isMeetingDeletionInProgress = true
-        await transcriptionController.cancelAndWait(meetingID: meetingID)
         do {
-            try store.delete(meetingID, confirmed: true)
+            try await transcriptionController.cancelAndWaitForDeletion(
+                meetingID: meetingID
+            ) {
+                try store.delete(meetingID, confirmed: true)
+            }
             isMeetingDeletionPending = false
             meeting = nil
+            refreshAudioCapabilities(for: nil)
             utterances = []
             analysis = nil
             uploadRevision = nil
@@ -774,11 +822,23 @@ final class MeetingDetailController {
             meeting = stored.meeting
             utterances = stored.utterances
             editor.reprocessFinalUtterances(stored.utterances)
+            refreshAudioCapabilities(for: stored.meeting)
             loadUploadRevision()
             errorMessage = uploadController.errorMessage ?? errorMessage
         } catch {
             errorMessage = Self.bounded(error)
         }
+    }
+
+    private func refreshAudioCapabilities(for meeting: MeetingRecord?) {
+        guard let meeting else {
+            isPlayableAudioAvailable = false
+            isAudioDeletionAvailable = false
+            return
+        }
+        isPlayableAudioAvailable = meeting.retainedAudio != nil
+            && audioChecker.hasLocalAudio(for: meeting)
+        isAudioDeletionAvailable = audioController.hasDeletableRecording(for: meetingID)
     }
 
     private func loadUploadRevision() {
@@ -1223,19 +1283,34 @@ struct MeetingDetailView: View {
     private func audioSection(_ model: MeetingDetailViewModel) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Local audio").font(.title3.bold())
-            if model.audioControls.isEmpty {
-                Text("No retained recording. Audio retention is off by default.")
-                    .foregroundStyle(.secondary)
-            } else {
+            if !model.audioControls.contains(.reveal) {
+                if model.audioControls.contains(.delete) {
+                    Text("Brain keeps source audio available for transcript recovery. A playable recording will appear here after transcription completes.")
+                        .foregroundStyle(.secondary)
+                } else if model.audioRetentionState == .deleted {
+                    Text("The local recording was deleted. Any saved transcript remains available.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("No playable recording is available for this item.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if !model.audioControls.isEmpty {
                 HStack {
-                    Button("Reveal", systemImage: "folder") {
-                        Task { await controller.perform(.revealAudio) }
+                    if model.audioControls.contains(.reveal) {
+                        Button("Reveal", systemImage: "folder") {
+                            Task { await controller.perform(.revealAudio) }
+                        }
                     }
-                    Button("Export", systemImage: "square.and.arrow.up") {
-                        exportAudio()
+                    if model.audioControls.contains(.export) {
+                        Button("Export", systemImage: "square.and.arrow.up") {
+                            exportAudio()
+                        }
                     }
-                    Button("Delete Recording", systemImage: "trash", role: .destructive) {
-                        Task { await controller.perform(.requestAudioDeletion) }
+                    if model.audioControls.contains(.delete) {
+                        Button("Delete Recording", systemImage: "trash", role: .destructive) {
+                            Task { await controller.perform(.requestAudioDeletion) }
+                        }
                     }
                 }
             }
@@ -1467,7 +1542,10 @@ struct MeetingDetailView: View {
 
     private func exportAudio() {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "\(controller.titleDraft).caf"
+        let pathExtension = controller.meeting?.retainedAudio.map {
+            URL(fileURLWithPath: $0.filename).pathExtension
+        } ?? "m4a"
+        panel.nameFieldStringValue = "\(controller.titleDraft).\(pathExtension)"
         panel.allowedContentTypes = [.audio]
         guard panel.runModal() == .OK else { return }
         Task { await controller.perform(.exportAudio(panel.url)) }

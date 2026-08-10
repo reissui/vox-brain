@@ -246,17 +246,15 @@ struct VoiceMeetingAcceptanceTests {
         #expect(talkTime.data.contains { $0.speakerID == "remote" && $0.durationMilliseconds == 2_000 })
         #expect(talkTime.data.contains { $0.speakerID == "owner" && $0.durationMilliseconds == 1_500 })
 
-        let defaultsOff = try acceptanceDefaults("retention-off")
         let store = MeetingStore(rootURL: fixture.root)
-        let retentionOff = AudioRetentionController(defaults: defaultsOff, store: store)
-        #expect(!retentionOff.keepMeetingRecordings)
+        let retention = AudioRetentionController(store: store)
         let finalUtterances = suppressed.visibleUtterances
-        let withoutAudio = try retentionOff.finalize(
+        let detectedWithAudio = try retention.finalize(
             meeting: detectedMeeting,
             utterances: finalUtterances,
             audio: detectedAudio
         )
-        #expect(withoutAudio.retainedAudio == nil)
+        #expect(detectedWithAudio.retainedAudio?.filename == AudioRetentionController.retainedFilename)
         #expect(!FileManager.default.fileExists(atPath: detectedAudio.tracks[0].fileURL.path))
 
         let manualMeeting = try #require(manual.currentMeeting)
@@ -265,10 +263,7 @@ struct VoiceMeetingAcceptanceTests {
             meetingID: manualMeeting.id,
             origin: manualMeeting.startedAt
         )
-        let defaultsOn = try acceptanceDefaults("retention-on")
-        let retentionOn = AudioRetentionController(defaults: defaultsOn, store: store)
-        retentionOn.keepMeetingRecordings = true
-        let withAudio = try retentionOn.finalize(
+        let withAudio = try retention.finalize(
             meeting: manualMeeting,
             utterances: finalUtterances,
             audio: manualAudio
