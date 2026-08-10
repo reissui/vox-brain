@@ -149,6 +149,7 @@ final class AudioRetentionController: @unchecked Sendable {
         utterances: [MeetingUtterance],
         audio: MeetingAudioCaptureSummary
     ) throws -> MeetingRecord {
+        let previous = try? store.load(meeting.id)
         let validated: ValidatedTemporaryAudio
         do {
             validated = try validateTemporaryAudio(audio, meetingID: meeting.id)
@@ -164,12 +165,19 @@ final class AudioRetentionController: @unchecked Sendable {
             throw AudioRetentionControllerError.transcriptPersistenceFailed
         }
 
-        return try retain(
-            meeting: meeting,
-            utterances: utterances,
-            audio: audio,
-            validated: validated
-        )
+        do {
+            return try retain(
+                meeting: meeting,
+                utterances: utterances,
+                audio: audio,
+                validated: validated
+            )
+        } catch {
+            if let previous {
+                try? store.save(previous.meeting, utterances: previous.utterances)
+            }
+            throw error
+        }
     }
 
     @discardableResult
@@ -324,7 +332,7 @@ final class AudioRetentionController: @unchecked Sendable {
                 reconciled.append(updated)
             case .unavailable:
                 if !quarantines.isEmpty {
-                    restoreQuarantines(quarantines, in: directory)
+                    finishInterruptedDeletion(in: directory, quarantines: quarantines)
                 }
             }
         }
@@ -592,65 +600,6 @@ final class AudioRetentionController: @unchecked Sendable {
         }
     }
 
-    private func restoreQuarantines(_ quarantines: [URL], in directory: URL) {
-        for quarantine in quarantines {
-            let type = try? fileSystem.attributes(at: quarantine)[.type]
-                as? FileAttributeType
-            if type == .typeRegular {
-                let destination = directory.appendingPathComponent(
-                    Self.legacyRetainedFilename,
-                    isDirectory: false
-                )
-                guard !fileSystem.fileExists(at: destination) else { continue }
-                try? fileSystem.moveItem(at: quarantine, to: destination)
-                continue
-            }
-            guard type == .typeDirectory else { continue }
-            guard let items = try? fileSystem.contentsOfDirectory(at: quarantine) else { continue }
-            var restoredAll = true
-            for item in items {
-                guard let originalName = Self.originalArtifactName(
-                    from: item.lastPathComponent
-                ), let destination = restorationURL(
-                    for: originalName,
-                    in: directory
-                ), !fileSystem.fileExists(at: destination) else {
-                    restoredAll = false
-                    continue
-                }
-                do {
-                    try fileSystem.moveItem(at: item, to: destination)
-                } catch {
-                    restoredAll = false
-                }
-            }
-            if restoredAll,
-               (try? fileSystem.contentsOfDirectory(at: quarantine).isEmpty) == true {
-                try? fileSystem.removeItem(at: quarantine)
-            }
-        }
-    }
-
-    private func restorationURL(for name: String, in directory: URL) -> URL? {
-        if name.hasSuffix(".wav"),
-           name.hasPrefix("preview-") || name.hasPrefix("final-") {
-            let transcriptionDirectory = directory.appendingPathComponent(
-                ".transcription",
-                isDirectory: true
-            )
-            if !fileSystem.fileExists(at: transcriptionDirectory) {
-                try? fileSystem.createOwnerOnlyDirectory(at: transcriptionDirectory)
-            }
-            guard fileSystem.fileExists(at: transcriptionDirectory) else { return nil }
-            return transcriptionDirectory.appendingPathComponent(name, isDirectory: false)
-        }
-        guard Self.isTopLevelAudioArtifact(name) else { return nil }
-        return directory.appendingPathComponent(
-            name,
-            isDirectory: Self.isDeletionQuarantineName(name)
-        )
-    }
-
     private static func isTopLevelAudioArtifact(_ name: String) -> Bool {
         if [
             Self.retainedFilename,
@@ -674,21 +623,10 @@ final class AudioRetentionController: @unchecked Sendable {
         name.hasPrefix(".recording.") && name.hasSuffix(".deleting")
     }
 
-    private static func originalArtifactName(from quarantinedName: String) -> String? {
-        guard let separator = quarantinedName.firstIndex(of: "-") else { return nil }
-        let index = quarantinedName[..<separator]
-        let name = quarantinedName[quarantinedName.index(after: separator)...]
-        guard !index.isEmpty,
-              index.allSatisfy(\.isNumber),
-              !name.isEmpty else { return nil }
-        return String(name)
-    }
-
     private static func recordAfterDeletingAudio(_ meeting: MeetingRecord) -> MeetingRecord {
         var updated = meeting
         updated.retainedAudio = nil
         updated.audioRetentionState = .deleted
-        updated.transcriptionState = .completed
         return updated
     }
 

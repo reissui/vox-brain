@@ -27,6 +27,10 @@ protocol MeetingTranscriptionRetrying: AnyObject {
     func retry(meetingID: UUID) async throws -> MeetingRecord
     func isRunning(meetingID: UUID) -> Bool
     func cancelAndWait(meetingID: UUID) async
+    func cancelAndWaitForDeletion(
+        meetingID: UUID,
+        operation: @MainActor () throws -> Void
+    ) async throws
 }
 
 extension MeetingTranscriptionRetrying {
@@ -113,6 +117,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         _ = try validatedManifest(capture, meetingID: meeting.id)
         let current = try store.load(meeting.id)
         guard current.meeting.transcriptionAttemptCount + 1 == generation,
+              current.meeting.audioRetentionState != .deleted,
+              !retention.hasInterruptedDeletion(for: meeting.id),
               [.pending, .processing, .failed].contains(
                   current.meeting.transcriptionState
               ) else {
@@ -241,7 +247,9 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             return await existing.task.value
         }
         let stored = try store.load(meetingID)
-        guard [.pending, .processing, .failed].contains(stored.meeting.transcriptionState) else {
+        guard [.pending, .processing, .failed].contains(stored.meeting.transcriptionState),
+              stored.meeting.audioRetentionState != .deleted,
+              !retention.hasInterruptedDeletion(for: meetingID) else {
             throw MeetingTranscriptionCoordinatorError.transcriptionNotRetryable
         }
 
@@ -249,6 +257,14 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         let generation = stored.meeting.transcriptionAttemptCount + 1
         let cancellation = MeetingTranscriptionCancellationRelay()
         let task = Task { @MainActor [self] in
+            guard !Task.isCancelled,
+                  Self.registry.isCurrent(
+                      key: jobKey,
+                      token: token,
+                      generation: generation
+                  ) else {
+                return currentRecord(for: meetingID, fallback: stored.meeting)
+            }
             let capture: MeetingAudioCaptureSummary
             do {
                 capture = try await Task.detached(
@@ -382,6 +398,45 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         Self.registry.remove(key: jobKey, token: entry.token)
     }
 
+    func cancelAndWaitForDeletion(
+        meetingID: UUID,
+        operation: @MainActor () throws -> Void
+    ) async throws {
+        let jobKey = key(for: meetingID)
+        let reservationToken: UUID
+        while true {
+            if let entry = Self.registry.entry(for: jobKey) {
+                entry.task.cancel()
+                await entry.cancel()
+                _ = await entry.task.value
+                if let token = Self.registry.reserveDeletion(
+                    jobKey,
+                    replacingEntryWithToken: entry.token
+                ) {
+                    reservationToken = token
+                    break
+                }
+                guard !Self.registry.hasDeletionReservation(jobKey) else {
+                    throw MeetingTranscriptionCoordinatorError.transcriptionAlreadyRunning
+                }
+                continue
+            }
+            guard let token = Self.registry.reserveDeletion(
+                jobKey,
+                replacingEntryWithToken: nil
+            ) else {
+                throw MeetingTranscriptionCoordinatorError.transcriptionAlreadyRunning
+            }
+            reservationToken = token
+            break
+        }
+
+        defer {
+            Self.registry.releaseDeletion(jobKey, token: reservationToken)
+        }
+        try operation()
+    }
+
     /// Resumes jobs interrupted while pending/processing. It also closes the
     /// narrow crash window after a new-pipeline transcript became durable but
     /// before its idempotent upload was scheduled. Failed transcription attempts
@@ -427,6 +482,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             guard case .available(let listed) = entry,
                   !Self.registry.contains(key(for: listed.id)),
                   let stored = try? store.load(listed.id) else { continue }
+            guard stored.meeting.audioRetentionState != .deleted else { continue }
             var meeting = stored.meeting
             let interruptedCapture = [
                 MeetingLifecycleState.starting,
@@ -458,8 +514,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 } else {
                     "Brain stopped before this transcript finished. Retry it when ready."
                 }
-                meeting.analysisState = .notRequested
-                meeting.uploadState = .notUploaded
                 if (try? store.save(meeting, utterances: stored.utterances)) != nil {
                     reconciled.append(meeting)
                 }
@@ -1215,9 +1269,10 @@ private final class MeetingTranscriptionJobRegistry {
 
     static let shared = MeetingTranscriptionJobRegistry()
     private var entries: [MeetingTranscriptionJobKey: Entry] = [:]
+    private var deletionReservations: [MeetingTranscriptionJobKey: UUID] = [:]
 
     func contains(_ key: MeetingTranscriptionJobKey) -> Bool {
-        entries[key] != nil
+        entries[key] != nil || deletionReservations[key] != nil
     }
 
     func entry(for key: MeetingTranscriptionJobKey) -> Entry? {
@@ -1225,7 +1280,7 @@ private final class MeetingTranscriptionJobRegistry {
     }
 
     func install(_ entry: Entry, for key: MeetingTranscriptionJobKey) -> Bool {
-        guard entries[key] == nil else { return false }
+        guard entries[key] == nil, deletionReservations[key] == nil else { return false }
         entries[key] = entry
         return true
     }
@@ -1242,6 +1297,31 @@ private final class MeetingTranscriptionJobRegistry {
     func remove(key: MeetingTranscriptionJobKey, token: UUID) {
         guard entries[key]?.token == token else { return }
         entries.removeValue(forKey: key)
+    }
+
+    func reserveDeletion(
+        _ key: MeetingTranscriptionJobKey,
+        replacingEntryWithToken entryToken: UUID?
+    ) -> UUID? {
+        guard deletionReservations[key] == nil else { return nil }
+        if let entryToken {
+            guard entries[key]?.token == entryToken else { return nil }
+            entries.removeValue(forKey: key)
+        } else {
+            guard entries[key] == nil else { return nil }
+        }
+        let token = UUID()
+        deletionReservations[key] = token
+        return token
+    }
+
+    func hasDeletionReservation(_ key: MeetingTranscriptionJobKey) -> Bool {
+        deletionReservations[key] != nil
+    }
+
+    func releaseDeletion(_ key: MeetingTranscriptionJobKey, token: UUID) {
+        guard deletionReservations[key] == token else { return }
+        deletionReservations.removeValue(forKey: key)
     }
 }
 

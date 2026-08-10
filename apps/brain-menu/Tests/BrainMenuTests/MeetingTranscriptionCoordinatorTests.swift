@@ -306,25 +306,35 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(inFlight.meeting.uploadState == .delivered)
         #expect(inFlight.utterances == originalTranscript)
 
-        await coordinator.cancelAndWait(meetingID: fixture.meeting.id)
+        var deletionResult: MeetingRecord?
+        try await coordinator.cancelAndWaitForDeletion(
+            meetingID: fixture.meeting.id
+        ) {
+            #expect(coordinator.isRunning(meetingID: fixture.meeting.id))
+            deletionResult = try fixture.retention.deleteRecording(
+                for: fixture.meeting.id,
+                confirmed: true
+            )
+        }
         _ = try await retry.value
-        let cancelled = try fixture.store.load(fixture.meeting.id)
-        let deleted = try fixture.retention.deleteRecording(
-            for: fixture.meeting.id,
-            confirmed: true
-        )
+        let deleted = try #require(deletionResult)
         let stored = try fixture.store.load(fixture.meeting.id)
         let launchReconciled = coordinator.reconcileInterruptedJobs(at: failed.startedAt)
 
-        #expect(deleted.transcriptionState == .completed)
-        #expect(cancelled.meeting.transcriptionErrorMessage == "Retry requested.")
+        #expect(deleted.transcriptionState == .processing)
         #expect(deleted.transcriptionErrorMessage == "Retry requested.")
         #expect(deleted.retainedAudio == nil)
+        #expect(deleted.audioRetentionState == .deleted)
         #expect(deleted.analysisState == .completed)
         #expect(deleted.uploadState == .delivered)
         #expect(stored.meeting == deleted)
         #expect(stored.utterances == originalTranscript)
         #expect(launchReconciled.isEmpty)
+        await #expect(
+            throws: MeetingTranscriptionCoordinatorError.transcriptionNotRetryable
+        ) {
+            try await coordinator.retry(meetingID: fixture.meeting.id)
+        }
     }
 
     @Test
@@ -644,6 +654,44 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(stored.meeting.transcriptionErrorMessage?.contains("Retry") == true)
         #expect(stored.meeting.endedAt == processing.endedAt)
         #expect(await client.callCount == 0)
+    }
+
+    @Test
+    func launchReconciliationPreservesDurableRetryMetadata() throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        let transcript = [try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 1_000,
+            text: "Keep the durable transcript and derived state.",
+            baseSpeakerID: "you"
+        )]
+        var completed = fixture.meeting
+        completed.transcriptionState = .completed
+        completed.transcriptionAttemptCount = 1
+        let archived = try fixture.retention.finalize(
+            meeting: completed,
+            utterances: transcript,
+            audio: fixture.makeCapture()
+        )
+        var interruptedRetry = archived
+        interruptedRetry.transcriptionState = .processing
+        interruptedRetry.transcriptionAttemptCount = 2
+        interruptedRetry.transcriptionErrorMessage = "Previous retry detail."
+        interruptedRetry.analysisState = .completed
+        interruptedRetry.uploadState = .delivered
+        try fixture.store.save(interruptedRetry, utterances: transcript)
+
+        let reconciled = fixture.coordinator(client: CoordinatorSuccessClient())
+            .reconcileInterruptedJobs(at: interruptedRetry.startedAt)
+        let stored = try fixture.store.load(interruptedRetry.id)
+
+        #expect(reconciled.map(\.id) == [interruptedRetry.id])
+        #expect(stored.meeting.transcriptionState == .failed)
+        #expect(stored.meeting.analysisState == .completed)
+        #expect(stored.meeting.uploadState == .delivered)
+        #expect(stored.meeting.retainedAudio == archived.retainedAudio)
+        #expect(stored.utterances == transcript)
     }
 
     @Test

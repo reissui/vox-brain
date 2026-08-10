@@ -892,8 +892,39 @@ struct MeetingViewsTests {
         await controller.perform(.confirmMeetingDeletion)
 
         #expect(transcription.cancellations == [id])
+        #expect(transcription.deletionReservations == [id])
         #expect(store.deleteConfirmations == [true])
         #expect(controller.state == .deleted)
+    }
+
+    @Test
+    func detailDoesNotOfferOrStartRetryAfterAudioDeletion() async throws {
+        let id = UUID()
+        var record = meeting(id: id, title: "Deleted retry audio", start: .now)
+        record.transcriptionState = .failed
+        record.transcriptionErrorMessage = "Transcription failed before audio deletion."
+        record.audioRetentionState = .deleted
+        let transcription = MeetingDetailTranscriptionSpy(isRunning: false)
+        let controller = MeetingDetailController(
+            meetingID: id,
+            store: MemoryMeetingViewStore(values: [
+                id: StoredMeeting(meeting: record, utterances: []),
+            ]),
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: MeetingDetailAudioSpy(meeting: record),
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: MeetingClipboardSpy(),
+            transcriptionController: transcription
+        )
+
+        controller.load()
+        #expect(!controller.viewModel.transcriptionCanRetry)
+
+        await controller.perform(.retryTranscription)
+
+        #expect(transcription.retries.isEmpty)
+        #expect(controller.viewModel.errorMessage?.contains("does not have") == true)
     }
 
     @Test
@@ -930,6 +961,7 @@ struct MeetingViewsTests {
         await controller.perform(.confirmAudioDeletion)
 
         #expect(transcription.cancellations == [id])
+        #expect(transcription.deletionReservations == [id])
         #expect(audio.deleteCalls == 1)
         #expect(controller.meeting?.retainedAudio == nil)
         #expect(!controller.isAudioDeletionInProgress)
@@ -1315,13 +1347,16 @@ private final class MeetingDetailAudioSpy: MeetingDetailAudioControlling, @unche
 @MainActor
 private final class MeetingDetailTranscriptionSpy: MeetingTranscriptionRetrying {
     private var running: Bool
+    private(set) var retries: [UUID] = []
     private(set) var cancellations: [UUID] = []
+    private(set) var deletionReservations: [UUID] = []
 
     init(isRunning: Bool) {
         running = isRunning
     }
 
     func retry(meetingID: UUID) async throws -> MeetingRecord {
+        retries.append(meetingID)
         throw TestMeetingViewError.failed
     }
 
@@ -1332,6 +1367,15 @@ private final class MeetingDetailTranscriptionSpy: MeetingTranscriptionRetrying 
     func cancelAndWait(meetingID: UUID) async {
         cancellations.append(meetingID)
         running = false
+    }
+
+    func cancelAndWaitForDeletion(
+        meetingID: UUID,
+        operation: @MainActor () throws -> Void
+    ) async throws {
+        await cancelAndWait(meetingID: meetingID)
+        deletionReservations.append(meetingID)
+        try operation()
     }
 }
 

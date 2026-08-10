@@ -122,6 +122,49 @@ struct AudioRetentionControllerTests {
     }
 
     @Test
+    func retryArchiveFailureRestoresPriorDurableMeetingSnapshot() throws {
+        let fixture = try AudioRetentionFixture()
+        let controller = fixture.controller()
+        var original = fixture.meeting
+        original.transcriptionState = .completed
+        original.transcriptionAttemptCount = 1
+        original.analysisState = .completed
+        original.uploadState = .delivered
+        let archived = try controller.finalize(
+            meeting: original,
+            utterances: fixture.utterances,
+            audio: fixture.makeAudio()
+        )
+        var retryCandidate = archived
+        retryCandidate.title = "Replacement transcript title"
+        retryCandidate.transcriptionAttemptCount = 2
+        retryCandidate.analysisState = .notRequested
+        retryCandidate.uploadState = .notUploaded
+        let replacementUtterance = try MeetingUtterance(
+            source: .system,
+            startMilliseconds: 0,
+            endMilliseconds: 500,
+            text: "Replacement transcript.",
+            baseSpeakerID: "remote"
+        )
+
+        #expect(throws: AudioRetentionControllerError.recordingPersistenceFailed) {
+            try fixture.controller(
+                fileSystem: FailingAudioRetentionFileSystem(failure: .permissions)
+            ).finalize(
+                meeting: retryCandidate,
+                utterances: [replacementUtterance],
+                audio: fixture.makeAudio()
+            )
+        }
+
+        let stored = try fixture.store.load(fixture.meeting.id)
+        #expect(stored.meeting == archived)
+        #expect(stored.utterances == fixture.utterances)
+        #expect(FileManager.default.fileExists(atPath: fixture.recordingURL.path))
+    }
+
+    @Test
     func writesCompactPrivateM4AWithMicrophoneThenSystemChannels() throws {
         let fixture = try AudioRetentionFixture()
         let controller = fixture.controller()
@@ -345,7 +388,7 @@ struct AudioRetentionControllerTests {
         let stored = try fixture.store.load(fixture.meeting.id)
 
         #expect(reconciled.map(\.id) == [fixture.meeting.id])
-        #expect(stored.meeting.transcriptionState == .completed)
+        #expect(stored.meeting.transcriptionState == .processing)
         #expect(stored.meeting.transcriptionErrorMessage == nil)
         #expect(stored.meeting.retainedAudio == nil)
         #expect(stored.utterances == fixture.utterances)
@@ -406,7 +449,35 @@ struct AudioRetentionControllerTests {
     }
 
     @Test
-    func launchReconciliationRollsBackQuarantineWithoutUsableMetadata() throws {
+    func deletingAudioPreservesFailedTranscriptionMetadata() throws {
+        let fixture = try AudioRetentionFixture()
+        let controller = fixture.controller()
+        var failed = try controller.finalize(
+            meeting: fixture.meeting,
+            utterances: fixture.utterances,
+            audio: fixture.makeAudio()
+        )
+        failed.transcriptionState = .failed
+        failed.transcriptionAttemptCount = 4
+        failed.transcriptionErrorMessage = "Keep this retry failure."
+        failed.analysisState = .completed
+        failed.uploadState = .delivered
+        try fixture.store.save(failed, utterances: fixture.utterances)
+
+        let deleted = try controller.deleteRecording(
+            for: fixture.meeting.id,
+            confirmed: true
+        )
+        var expected = failed
+        expected.retainedAudio = nil
+        expected.audioRetentionState = .deleted
+
+        #expect(deleted == expected)
+        #expect(try fixture.store.load(fixture.meeting.id).meeting == expected)
+    }
+
+    @Test
+    func launchReconciliationFinishesDeletionWithoutUsableMetadata() throws {
         let fixture = try AudioRetentionFixture()
         let controller = fixture.controller()
         _ = try controller.finalize(
@@ -430,7 +501,7 @@ struct AudioRetentionControllerTests {
         let reconciled = controller.reconcileInterruptedDeletions()
 
         #expect(reconciled.isEmpty)
-        #expect(FileManager.default.fileExists(atPath: fixture.recordingURL.path))
+        #expect(!FileManager.default.fileExists(atPath: fixture.recordingURL.path))
         #expect(!FileManager.default.fileExists(atPath: quarantine.path))
         #expect(!controller.hasInterruptedDeletion(for: fixture.meeting.id))
     }

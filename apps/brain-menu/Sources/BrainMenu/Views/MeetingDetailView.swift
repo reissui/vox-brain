@@ -399,6 +399,7 @@ final class MeetingDetailController {
             transcriptionState: effectiveTranscriptionState,
             analysisState: effectiveMeeting?.analysisState,
             transcriptionCanRetry: meeting?.transcriptionState == .failed
+                && meeting?.audioRetentionState != .deleted
                 && !isTranscriptionRetryInProgress
                 && !transcriptionController.isRunning(meetingID: meetingID),
             transcriptionMessage: isTranscriptionRetryInProgress
@@ -559,6 +560,11 @@ final class MeetingDetailController {
     }
 
     private func retryTranscription() async {
+        guard meeting?.audioRetentionState != .deleted else {
+            errorMessage = MeetingTranscriptionCoordinatorError
+                .transcriptionNotRetryable.localizedDescription
+            return
+        }
         guard !isTranscriptionRetryInProgress,
               !isAudioDeletionInProgress,
               !isMeetingDeletionInProgress,
@@ -751,10 +757,20 @@ final class MeetingDetailController {
         isAudioDeletionInProgress = true
         defer { isAudioDeletionInProgress = false }
 
-        await transcriptionController.cancelAndWait(meetingID: meetingID)
-        guard state != .deleted, !isMeetingDeletionInProgress else { return }
         do {
-            meeting = try audioController.deleteRecording(for: meetingID, confirmed: true)
+            var deletedMeeting: MeetingRecord?
+            try await transcriptionController.cancelAndWaitForDeletion(
+                meetingID: meetingID
+            ) {
+                guard state != .deleted, !isMeetingDeletionInProgress else { return }
+                deletedMeeting = try audioController.deleteRecording(
+                    for: meetingID,
+                    confirmed: true
+                )
+            }
+            if let deletedMeeting {
+                meeting = deletedMeeting
+            }
             errorMessage = nil
         } catch {
             errorMessage = Self.bounded(error)
@@ -764,9 +780,12 @@ final class MeetingDetailController {
     private func deleteMeeting() async {
         guard isMeetingDeletionPending, !isMeetingDeletionInProgress else { return }
         isMeetingDeletionInProgress = true
-        await transcriptionController.cancelAndWait(meetingID: meetingID)
         do {
-            try store.delete(meetingID, confirmed: true)
+            try await transcriptionController.cancelAndWaitForDeletion(
+                meetingID: meetingID
+            ) {
+                try store.delete(meetingID, confirmed: true)
+            }
             isMeetingDeletionPending = false
             meeting = nil
             utterances = []
