@@ -267,6 +267,8 @@ struct MeetingTranscriptionCoordinatorTests {
         var failed = archived
         failed.transcriptionState = .failed
         failed.transcriptionErrorMessage = "Retry requested."
+        failed.analysisState = .completed
+        failed.uploadState = .delivered
         try fixture.store.save(failed, utterances: originalTranscript)
         let client = CoordinatorCancellableClient()
         let coordinator = fixture.coordinator(client: client)
@@ -277,6 +279,8 @@ struct MeetingTranscriptionCoordinatorTests {
 
         let inFlight = try fixture.store.load(fixture.meeting.id)
         #expect(inFlight.meeting.transcriptionState == .processing)
+        #expect(inFlight.meeting.analysisState == .completed)
+        #expect(inFlight.meeting.uploadState == .delivered)
         #expect(inFlight.utterances == originalTranscript)
 
         await coordinator.cancelAndWait(meetingID: fixture.meeting.id)
@@ -291,6 +295,8 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(deleted.transcriptionState == .completed)
         #expect(deleted.transcriptionErrorMessage == nil)
         #expect(deleted.retainedAudio == nil)
+        #expect(deleted.analysisState == .completed)
+        #expect(deleted.uploadState == .delivered)
         #expect(stored.meeting == deleted)
         #expect(stored.utterances == originalTranscript)
         #expect(launchReconciled.isEmpty)

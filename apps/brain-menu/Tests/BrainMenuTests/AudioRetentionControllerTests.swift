@@ -355,6 +355,30 @@ struct AudioRetentionControllerTests {
     }
 
     @Test
+    func deletingRecordingPreservesCompletedTranscriptWarning() throws {
+        let fixture = try AudioRetentionFixture()
+        let controller = fixture.controller()
+        var meeting = fixture.meeting
+        meeting.transcriptionState = .completed
+        meeting.transcriptionErrorMessage = "Transcript completed with 1 skipped audio span."
+        let completed = try controller.finalize(
+            meeting: meeting,
+            utterances: fixture.utterances,
+            audio: fixture.makeAudio()
+        )
+        #expect(completed.transcriptionErrorMessage == meeting.transcriptionErrorMessage)
+
+        let deleted = try controller.deleteRecording(
+            for: fixture.meeting.id,
+            confirmed: true
+        )
+
+        #expect(deleted.transcriptionState == .completed)
+        #expect(deleted.transcriptionErrorMessage == meeting.transcriptionErrorMessage)
+        #expect(deleted.retainedAudio == nil)
+    }
+
+    @Test
     func launchReconciliationRollsBackQuarantineWithoutUsableMetadata() throws {
         let fixture = try AudioRetentionFixture()
         let controller = fixture.controller()

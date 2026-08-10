@@ -123,8 +123,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         processing.transcriptionState = .processing
         processing.transcriptionAttemptCount = generation
         processing.transcriptionErrorMessage = nil
-        processing.analysisState = .notRequested
-        processing.uploadState = .notUploaded
         try store.save(processing, utterances: current.utterances)
         return processing
     }
@@ -548,6 +546,10 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         completed.transcriptionErrorMessage = failures.isEmpty
             ? nil
             : "Transcript completed with \(failures.count) skipped audio span\(failures.count == 1 ? "" : "s")."
+        // A retry keeps the last durable analysis/upload state while it is in
+        // flight. Only a newly committed transcript invalidates those results.
+        completed.analysisState = .notRequested
+        completed.uploadState = .notUploaded
         if currentMeeting.titleSource != .manual {
             completed.title = MeetingContextTitle.make(
                 utterances: utterances,

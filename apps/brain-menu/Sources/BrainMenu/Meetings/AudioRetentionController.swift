@@ -670,7 +670,12 @@ final class AudioRetentionController: @unchecked Sendable {
         var updated = meeting
         updated.retainedAudio = nil
         updated.transcriptionState = .completed
-        updated.transcriptionErrorMessage = nil
+        // A cancelled in-flight retry has no durable error to preserve. For an
+        // already completed or failed transcript, keep partial-span/failure
+        // diagnostics visible after its source recording is removed.
+        if meeting.transcriptionState == .processing {
+            updated.transcriptionErrorMessage = nil
+        }
         return updated
     }
 
