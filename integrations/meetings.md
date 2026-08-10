@@ -1,10 +1,11 @@
 # Native Meetings and Voice Notes capture
 
-Brain.app records microphone plus system audio on the Mac where the recording
-occurs. Its included VoxType speech engine transcribes locally; a compatible
-standalone VoxType installation can be used instead and takes precedence. The
-user reviews the transcript before Brain sends finalized text to the active
-local or remote vault.
+Brain.app records microphone plus system audio for Meetings and microphone only
+for single-speaker Voice Notes on the Mac where the recording occurs. Its
+included VoxType speech engine transcribes locally; a compatible standalone
+VoxType installation can be used instead and takes precedence. The user reviews
+the transcript before Brain sends finalized text to the active local or remote
+vault.
 
 Meetings and Voice Notes use the same local recording and transcription
 pipeline, but they have separate top-level workspaces and saved lists in
@@ -17,9 +18,11 @@ marker; open it to keep it in Meetings or move it to Voice Notes. Any recording
 can also be moved between the two sections later from its detail actions.
 
 ```text
-Brain.app Meeting or Voice Note capture
+Brain.app Meeting (microphone + system) or Voice Note (microphone) capture
   → local VoxType transcription
-  → local review, speakers, talk time, and optional AI analysis
+  → local review and optional AI analysis
+     Meetings: speaker editing and talk time
+     Voice Notes: plain paragraphs and Copy Full Transcript
   → This Mac: local inbox
      Remote Brain: paired /v1 capture → Queue → Agent → remote inbox
 ```
@@ -32,9 +35,10 @@ Audio never enters either capture request.
    recommended model, enables its included speech engine, and starts it without
    leaving the app. If macOS has disabled background items, approve it in the
    Login Items settings page Brain opens.
-2. Complete Brain onboarding for **Microphone**, **Screen & System Audio
-   Recording**, and **Accessibility**. Accessibility supports selected-text
-   context and paste-related features; Brain does not monitor global keys.
+2. Complete Brain onboarding for **Microphone** and **Accessibility**. Meetings
+   also need **Screen & System Audio Recording**; Voice Notes do not.
+   Accessibility supports selected-text context and paste-related features;
+   Brain does not monitor global keys.
 3. Download and activate the recommended model in Brain's Speech Setup. Brain
    defaults English transcription to Whisper Small (English); Whisper Large v3
    Turbo is the multilingual fallback. Additional catalog models remain
@@ -57,17 +61,19 @@ starts or stops recording automatically.
 1. Open **Meetings** and choose **Start Meeting**, or open the separate **Voice
    Notes** section and choose **Record Voice Note** for a solo dictated session.
    Confirm the microphone meter moves.
-2. Brain automatically retries transient macOS microphone startup failures. A
-   genuinely unavailable source still ends startup with an error. Once
-   connected, Brain warns when no usable microphone signal arrives and keeps
-   recording so a muted or temporarily quiet input does not discard the
-   session.
+2. Brain automatically retries transient macOS microphone startup failures. If
+   the selected input is missing or unusable, Brain stays open at **Choose
+   microphone**; choose an available input, then start again. Other capture
+   failures still end startup with an error. Once connected, Brain warns when
+   no usable microphone signal arrives and keeps recording so a muted or
+   temporarily quiet input does not discard the session.
 3. Pause/resume explicitly. Dictation cannot take the microphone during either
    kind of recording.
 4. Choose **End & Process**. Dismissing the prompt keeps recording.
-5. Review the saved item in its own section. Meetings and Voice Notes include
-   transcript, speakers, talk-time totals, summary, action items, and any email
-   draft. Voice Notes remain in the Voice Notes list even after they are renamed.
+5. Review the saved item in its own section. Meetings retain speaker editing and
+   talk-time totals. Voice Notes show one selectable transcript split into
+   readable paragraphs, with **Copy Full Transcript** for copying all text at
+   once. Voice Notes remain in the Voice Notes list even after they are renamed.
 6. Upload the finalized transcript. Later edits require an explicit revision.
 
 With retention off, Brain removes local audio after final transcript
@@ -95,7 +101,8 @@ Before relying on Meetings or Voice Notes:
 1. Run one VoxType dictation.
 2. Record a short meeting with audible microphone and system audio.
 3. Record a short Voice Note and confirm it appears only in **Voice Notes**.
-4. End, process, review, and correct speakers where applicable.
+4. End, process, review, and correct Meeting speakers where applicable. Confirm
+   the Voice Note is plain paragraph text and copies in full.
 5. Confirm the default reports no retained recording.
 6. Confirm both transcripts reach the selected local or remote inbox.
 7. Inspect each capture and verify it contains text but no audio.
@@ -104,8 +111,9 @@ Retain the previous app artifact until this passes.
 
 ## Troubleshooting
 
-- **No microphone:** run the five-second Speech test, reconnect a pinned input,
-  or choose System Default; recheck macOS Microphone permission.
+- **No microphone:** use the **Choose microphone** recovery prompt described
+  above. If no available input works, run the five-second Speech test and
+  recheck macOS Microphone permission.
 - **No system track:** recheck Screen & System Audio Recording permission.
 - **VoxType missing:** choose **Enable Speech** in Speech Setup. If the bundled
   helper is unavailable, Brain links to the official installation guide.

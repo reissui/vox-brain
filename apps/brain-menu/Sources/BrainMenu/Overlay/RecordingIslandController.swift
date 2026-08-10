@@ -181,7 +181,8 @@ struct RecordingIslandMeetingPresentation: Equatable, Sendable {
         guard phase == .starting || phase == .recording || phase == .stopSuggested else {
             return false
         }
-        return microphoneSignalState == .active || systemSignalState == .active
+        return microphoneSignalState == .active
+            || (!isVoiceNote && systemSignalState == .active)
     }
 
     var audioStatusText: String {
@@ -195,6 +196,13 @@ struct RecordingIslandMeetingPresentation: Equatable, Sendable {
         case .saved:
             return "Added to \(libraryName). It is now at the top of the list."
         case .starting, .recording, .stopSuggested:
+            if isVoiceNote {
+                return switch microphoneSignalState {
+                case .active: "Receiving microphone audio…"
+                case .quiet: "Connected — waiting for sound…"
+                case .waiting: "Waiting for microphone audio…"
+                }
+            }
             switch (microphoneSignalState == .active, systemSignalState == .active) {
             case (true, true):
                 return "Receiving microphone and computer audio…"

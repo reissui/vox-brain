@@ -30,6 +30,11 @@ struct MeetingRecordingRequest: Equatable, Sendable {
     let startedAt: Date
     let title: String
     let titleSource: MeetingTitleSource
+
+    /// Meetings capture both sides of a call. A Voice Note is intentionally a
+    /// single-person microphone recording and must not depend on screen or
+    /// system-audio availability.
+    var capturesSystemAudio: Bool { recordingKind == .meeting }
 }
 
 enum MeetingRecordingStartError: Error, Equatable, LocalizedError, Sendable {
@@ -57,7 +62,8 @@ enum MeetingRecoveryReason: String, Equatable, Sendable {
 
 @MainActor
 protocol MeetingRecording: AnyObject {
-    /// This is the only method that may open the microphone and system stream.
+    /// This is the only method that may open the microphone and, for meetings,
+    /// the system-audio stream.
     func start(_ request: MeetingRecordingRequest) async throws
     /// Stops accepting new buffers without finalizing the session.
     func pause(at date: Date) async throws
@@ -293,8 +299,8 @@ final class MeetingController {
         )
     }
 
-    /// Long-form solo speech deliberately uses the meeting reliability path.
-    /// It is a presentation mode, not a second recorder or transcript store.
+    /// Long-form solo speech uses the same durable recording pipeline with a
+    /// microphone-only source configuration.
     func startVoiceNote() async {
         await startRecording(
             application: nil,

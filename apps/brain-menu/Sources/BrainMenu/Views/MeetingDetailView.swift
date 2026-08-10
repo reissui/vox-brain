@@ -43,6 +43,56 @@ struct MeetingDetailTranscriptRowModel: Equatable, Identifiable, Sendable {
     var accessibilityLabel: String { "\(timestamp), \(speakerName): \(text)" }
 }
 
+struct VoiceNoteTranscriptViewModel: Equatable, Sendable {
+    static let paragraphBreakPauseMilliseconds: Int64 = 1_500
+    static let preferredMaximumParagraphCharacters = 700
+
+    let paragraphs: [String]
+
+    var fullText: String { paragraphs.joined(separator: "\n\n") }
+
+    init(utterances: [MeetingUtterance]) {
+        let ordered = utterances
+            .filter { !$0.suppressed }
+            .sorted {
+                if $0.startMilliseconds != $1.startMilliseconds {
+                    return $0.startMilliseconds < $1.startMilliseconds
+                }
+                if $0.endMilliseconds != $1.endMilliseconds {
+                    return $0.endMilliseconds < $1.endMilliseconds
+                }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+
+        var completed: [String] = []
+        var current = ""
+        var previousEnd: Int64?
+        for utterance in ordered {
+            let text = utterance.text
+                .split(whereSeparator: { $0.isWhitespace })
+                .joined(separator: " ")
+            guard !text.isEmpty else { continue }
+
+            let followsNaturalPause = previousEnd.map {
+                utterance.startMilliseconds - $0 >= Self.paragraphBreakPauseMilliseconds
+            } ?? false
+            let wouldBecomeTooLong = !current.isEmpty
+                && current.count + 1 + text.count > Self.preferredMaximumParagraphCharacters
+            if followsNaturalPause || wouldBecomeTooLong {
+                completed.append(current)
+                current = text
+            } else if current.isEmpty {
+                current = text
+            } else {
+                current += " \(text)"
+            }
+            previousEnd = max(previousEnd ?? utterance.endMilliseconds, utterance.endMilliseconds)
+        }
+        if !current.isEmpty { completed.append(current) }
+        paragraphs = completed
+    }
+}
+
 struct MeetingDetailSpeakerModel: Equatable, Identifiable, Sendable {
     let id: String
     let displayName: String
@@ -65,6 +115,7 @@ struct MeetingDetailViewModel: Equatable, Sendable {
     let badges: [MeetingStatusBadge]
     let tab: MeetingDetailTab
     let transcript: [MeetingDetailTranscriptRowModel]
+    let voiceNoteTranscript: VoiceNoteTranscriptViewModel
     let speakers: [MeetingDetailSpeakerModel]
     let talkTime: [SpeakerTalkTime]
     let analysis: MeetingAnalysis?
@@ -81,7 +132,9 @@ struct MeetingDetailViewModel: Equatable, Sendable {
     let meetingDeletionWarning: String?
     let audioDeletionWarning: String?
 
-    var hasTranscript: Bool { !transcript.isEmpty }
+    var hasTranscript: Bool {
+        isVoiceNote ? !voiceNoteTranscript.paragraphs.isEmpty : !transcript.isEmpty
+    }
     var hasAnalysis: Bool { analysis != nil }
 }
 
@@ -196,6 +249,7 @@ enum MeetingDetailAction: Equatable, Sendable {
     case acceptSpeakerSuggestion(UUID)
     case analyze
     case reanalyze
+    case copyFullTranscript
     case copyDraft(MeetingDraftCopyAction)
     case revealAudio
     case exportAudio(URL?)
@@ -329,6 +383,7 @@ final class MeetingDetailController {
             badges: effectiveMeeting.map(MeetingsController.badges) ?? [],
             tab: selectedTab,
             transcript: rows,
+            voiceNoteTranscript: VoiceNoteTranscriptViewModel(utterances: editor.utterances),
             speakers: speakerModels,
             talkTime: TalkTimeCalculator().calculate(for: editor).data,
             analysis: analysis,
@@ -364,6 +419,7 @@ final class MeetingDetailController {
     }
 
     func load() {
+        let isInitialLoad = state == .idle
         state = .loading
         errorMessage = nil
         do {
@@ -383,6 +439,9 @@ final class MeetingDetailController {
             }
             meeting = stored.meeting
             lastKnownRecordingKind = stored.meeting.recordingKind
+            if isInitialLoad, stored.meeting.isVoiceNote {
+                selectedTab = .transcript
+            }
             utterances = stored.utterances
             titleDraft = stored.meeting.title
             loadUploadRevision()
@@ -462,6 +521,8 @@ final class MeetingDetailController {
             await runAnalysis(isReanalysis: false)
         case .reanalyze:
             await runAnalysis(isReanalysis: true)
+        case .copyFullTranscript:
+            copyFullTranscript()
         case .copyDraft(let copyAction):
             copyDraft(copyAction)
         case .revealAudio:
@@ -645,6 +706,14 @@ final class MeetingDetailController {
             copiedMessage = "Follow-up draft copied"
         }
         clipboard.write(value)
+    }
+
+    private func copyFullTranscript() {
+        guard meeting?.isVoiceNote == true else { return }
+        let value = viewModel.voiceNoteTranscript.fullText
+        guard !value.isEmpty else { return }
+        clipboard.write(value)
+        copiedMessage = "Full transcript copied"
     }
 
     private func revealAudio() {
@@ -974,8 +1043,10 @@ struct MeetingDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 analysisSection(model)
-                talkTimeSection(model)
-                speakerSection(model)
+                if !model.isVoiceNote {
+                    talkTimeSection(model)
+                    speakerSection(model)
+                }
                 uploadSection(model)
                 audioSection(model)
             }
@@ -1004,7 +1075,7 @@ struct MeetingDetailView: View {
                 valueList("Topics", values: analysis.topics)
                 valueList("Decisions", values: analysis.decisions)
                 valueList("Risks", values: analysis.risks)
-                if !analysis.speakerSuggestions.isEmpty {
+                if !model.isVoiceNote, !analysis.speakerSuggestions.isEmpty {
                     Text("Speaker suggestions").font(.headline)
                     ForEach(analysis.speakerSuggestions, id: \.utteranceID) { suggestion in
                         HStack {
@@ -1200,64 +1271,110 @@ struct MeetingDetailView: View {
                 )
             }
         } else {
-            VStack(spacing: 0) {
+            if model.isVoiceNote {
+                voiceNoteTranscript(model)
+            } else {
+                editableMeetingTranscript(model)
+            }
+        }
+    }
+
+    private func voiceNoteTranscript(_ model: MeetingDetailViewModel) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
                 HStack {
-                    Text("Select utterances to reassign or split.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Transcript")
+                            .font(.title3.bold())
+                        Text("Single-speaker text, split into readable paragraphs.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
-                    Menu("Reassign") {
-                        ForEach(model.speakers) { speaker in
-                            Button(speaker.displayName) {
-                                Task {
-                                    await controller.perform(.reassign(
-                                        utteranceIDs: controller.selectedUtteranceIDs,
-                                        to: speaker.id
-                                    ))
-                                }
-                            }
-                        }
+                    Button("Copy Full Transcript", systemImage: "doc.on.doc") {
+                        Task { await controller.perform(.copyFullTranscript) }
                     }
-                    .disabled(controller.selectedUtteranceIDs.isEmpty)
-                    Menu("Split to new speaker") {
-                        ForEach(model.speakers) { speaker in
-                            Button("From \(speaker.displayName)") {
-                                Task {
-                                    await controller.perform(.split(
-                                        speakerID: speaker.id,
-                                        utteranceIDs: controller.selectedUtteranceIDs,
-                                        name: nil
-                                    ))
-                                }
-                            }
-                        }
-                    }
-                    .disabled(controller.selectedUtteranceIDs.isEmpty)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                    .accessibilityHint("Copies every paragraph of this voice note.")
                 }
-                .padding()
-                Divider()
-                List(model.transcript) { row in
-                    Button { controller.toggleSelection(row.id) } label: {
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: row.isSelected ? "checkmark.circle.fill" : "circle")
-                                .accessibilityHidden(true)
-                            Text(row.timestamp)
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack {
-                                    Text(row.speakerName).font(.caption.bold())
-                                    Text(row.provenance.rawValue)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Text(row.text).textSelection(.enabled)
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(
+                        Array(model.voiceNoteTranscript.paragraphs.enumerated()),
+                        id: \.offset
+                    ) { _, paragraph in
+                        Text(paragraph)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .textSelection(.enabled)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Full voice note transcript")
+            }
+            .padding(24)
+            .frame(maxWidth: 820)
+            .frame(maxWidth: .infinity, alignment: .top)
+        }
+    }
+
+    private func editableMeetingTranscript(_ model: MeetingDetailViewModel) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Select utterances to reassign or split.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Menu("Reassign") {
+                    ForEach(model.speakers) { speaker in
+                        Button(speaker.displayName) {
+                            Task {
+                                await controller.perform(.reassign(
+                                    utteranceIDs: controller.selectedUtteranceIDs,
+                                    to: speaker.id
+                                ))
                             }
                         }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel((row.isSelected ? "Selected, " : "") + row.accessibilityLabel)
                 }
+                .disabled(controller.selectedUtteranceIDs.isEmpty)
+                Menu("Split to new speaker") {
+                    ForEach(model.speakers) { speaker in
+                        Button("From \(speaker.displayName)") {
+                            Task {
+                                await controller.perform(.split(
+                                    speakerID: speaker.id,
+                                    utteranceIDs: controller.selectedUtteranceIDs,
+                                    name: nil
+                                ))
+                            }
+                        }
+                    }
+                }
+                .disabled(controller.selectedUtteranceIDs.isEmpty)
+            }
+            .padding()
+            Divider()
+            List(model.transcript) { row in
+                Button { controller.toggleSelection(row.id) } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: row.isSelected ? "checkmark.circle.fill" : "circle")
+                            .accessibilityHidden(true)
+                        Text(row.timestamp)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(row.speakerName).font(.caption.bold())
+                                Text(row.provenance.rawValue)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(row.text).textSelection(.enabled)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel((row.isSelected ? "Selected, " : "") + row.accessibilityLabel)
             }
         }
     }

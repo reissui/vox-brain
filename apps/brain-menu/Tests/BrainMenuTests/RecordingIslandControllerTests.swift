@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import BrainMenu
 
@@ -261,9 +262,18 @@ struct RecordingIslandControllerTests {
         unavailable.activeDevice = nil
         unavailable.selectedPreference = .device(uid: "disconnected")
         unavailable.switchState = .failed(message: "Choose a different microphone.")
+        let voiceNote = MeetingRecord(
+            title: "Voice note",
+            recordingKind: .voiceNote,
+            titleSource: .manual,
+            startedAt: Date(),
+            lifecycleState: .sourceSelectionRequired,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
         controller.updateMeeting(
             .sourceSelectionRequired,
-            meeting: nil,
+            meeting: voiceNote,
             guidance: [.microphone: "Choose a different microphone, then start again."],
             microphone: unavailable
         )
@@ -275,6 +285,11 @@ struct RecordingIslandControllerTests {
         #expect(prompt.audioStatusText == "Choose another microphone, then start again.")
         #expect(prompt.guidance == "Choose a different microphone, then start again.")
         #expect(controller.isVisible)
+
+        try renderEvidence(
+            RecordingIslandView(controller: controller),
+            named: "missing-microphone-recovery.png"
+        )
 
         controller.selectMicrophone(.device(uid: "desk"))
         #expect(selections == [
@@ -459,6 +474,21 @@ struct RecordingIslandControllerTests {
         #expect(announcements == [
             "Voice note added. Field note. It is now at the top of Voice Notes.",
         ])
+    }
+
+    @Test
+    func activeVoiceNoteReportsOnlyItsMicrophoneState() {
+        let voiceNote = RecordingIslandMeetingPresentation(
+            phase: .recording,
+            title: "Voice note",
+            recordingKind: .voiceNote,
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            microphoneSignalState: .waiting,
+            systemSignalState: .active
+        )
+
+        #expect(!voiceNote.isReceivingAudio)
+        #expect(voiceNote.audioStatusText == "Waiting for microphone audio…")
     }
 
     @Test
@@ -714,6 +744,41 @@ struct RecordingIslandControllerTests {
             reduceMotionProvider: reduceMotionProvider,
             sleep: sleep,
             panelPresentationHandler: panelPresentationHandler
+        )
+    }
+
+    private func renderEvidence<V: View>(_ view: V, named filename: String) throws {
+        let size = RecordingIslandController.meetingPanelSize
+        let hostingView = NSHostingView(rootView: view
+            .frame(width: size.width, height: size.height)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .environment(\.colorScheme, .light))
+        hostingView.frame = NSRect(origin: .zero, size: size)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Voice Note microphone recovery"
+        window.contentView = hostingView
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        hostingView.layoutSubtreeIfNeeded()
+        let bitmap = try #require(hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds))
+        hostingView.cacheDisplay(in: hostingView.bounds, to: bitmap)
+        let png = try #require(bitmap.representation(using: .png, properties: [:]))
+        #expect(png.count > 10_000)
+
+        guard let directory = ProcessInfo.processInfo.environment["BRAIN_TEST_EVIDENCE_DIR"] else {
+            return
+        }
+        try png.write(
+            to: URL(fileURLWithPath: directory, isDirectory: true)
+                .appendingPathComponent(filename),
+            options: .atomic
         )
     }
 

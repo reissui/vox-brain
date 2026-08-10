@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import BrainMenu
 
@@ -577,6 +579,230 @@ struct MeetingViewsTests {
     }
 
     @Test
+    func voiceNoteTranscriptIsPlainParagraphTextAndCopiesInFull() async throws {
+        let id = UUID()
+        let record = MeetingRecord(
+            id: id,
+            title: "Product thought",
+            recordingKind: .voiceNote,
+            titleSource: .manual,
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            endedAt: Date(timeIntervalSince1970: 1_060),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+        let utterances = [
+            try MeetingUtterance(
+                source: .microphone,
+                startMilliseconds: 0,
+                endMilliseconds: 1_000,
+                text: "  The first   sentence. ",
+                baseSpeakerID: "you"
+            ),
+            try MeetingUtterance(
+                source: .microphone,
+                startMilliseconds: 1_200,
+                endMilliseconds: 2_000,
+                text: "It continues here.",
+                baseSpeakerID: "you"
+            ),
+            try MeetingUtterance(
+                source: .microphone,
+                startMilliseconds: 4_000,
+                endMilliseconds: 5_000,
+                text: "This is a new thought.",
+                baseSpeakerID: "you"
+            ),
+            try MeetingUtterance(
+                source: .microphone,
+                startMilliseconds: 6_000,
+                endMilliseconds: 7_000,
+                text: "Hidden correction",
+                baseSpeakerID: "you",
+                suppressed: true
+            ),
+        ]
+        let store = MemoryMeetingViewStore(values: [
+            id: StoredMeeting(meeting: record, utterances: utterances),
+        ])
+        let clipboard = MeetingClipboardSpy()
+        let controller = MeetingDetailController(
+            meetingID: id,
+            store: store,
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: MeetingDetailAudioSpy(meeting: record),
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: clipboard
+        )
+
+        controller.load()
+
+        #expect(controller.viewModel.tab == .transcript)
+        #expect(controller.viewModel.voiceNoteTranscript.paragraphs == [
+            "The first sentence. It continues here.",
+            "This is a new thought.",
+        ])
+        #expect(controller.viewModel.voiceNoteTranscript.fullText
+            == "The first sentence. It continues here.\n\nThis is a new thought.")
+
+        await controller.perform(.copyFullTranscript)
+
+        #expect(clipboard.values == [
+            "The first sentence. It continues here.\n\nThis is a new thought.",
+        ])
+        #expect(controller.viewModel.copiedMessage == "Full transcript copied")
+    }
+
+    @Test
+    func detailViewsRenderVoiceNoteReadingAndMeetingSpeakerWorkflows() async throws {
+        let voiceNoteID = UUID(uuidString: "A0000000-0000-0000-0000-000000000001")!
+        var voiceNote = MeetingRecord(
+            id: voiceNoteID,
+            title: "Launch narrative",
+            recordingKind: .voiceNote,
+            titleSource: .manual,
+            startedAt: Date(timeIntervalSince1970: 1_786_339_800),
+            endedAt: Date(timeIntervalSince1970: 1_786_339_866),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+        voiceNote.transcriptionState = .completed
+        let voiceNoteUtterances = [
+            try MeetingUtterance(
+                source: .microphone,
+                startMilliseconds: 0,
+                endMilliseconds: 1_100,
+                text: "The launch story should begin with the customer's problem.",
+                baseSpeakerID: "you"
+            ),
+            try MeetingUtterance(
+                source: .microphone,
+                startMilliseconds: 1_250,
+                endMilliseconds: 2_500,
+                text: "Then explain why the current workaround is too slow.",
+                baseSpeakerID: "you"
+            ),
+            try MeetingUtterance(
+                source: .microphone,
+                startMilliseconds: 4_500,
+                endMilliseconds: 6_200,
+                text: "The closing paragraph should make the next action unmistakable.",
+                baseSpeakerID: "you"
+            ),
+        ]
+        let voiceNoteClipboard = MeetingClipboardSpy()
+        let voiceNoteController = MeetingDetailController(
+            meetingID: voiceNoteID,
+            store: MemoryMeetingViewStore(values: [
+                voiceNoteID: StoredMeeting(
+                    meeting: voiceNote,
+                    utterances: voiceNoteUtterances
+                ),
+            ]),
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: MeetingDetailAudioSpy(meeting: voiceNote),
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: voiceNoteClipboard
+        )
+        voiceNoteController.load()
+        await voiceNoteController.perform(.copyFullTranscript)
+
+        #expect(voiceNoteController.viewModel.tab == .transcript)
+        #expect(voiceNoteController.viewModel.copiedMessage == "Full transcript copied")
+        #expect(voiceNoteClipboard.values == [
+            "The launch story should begin with the customer's problem. "
+                + "Then explain why the current workaround is too slow.\n\n"
+                + "The closing paragraph should make the next action unmistakable.",
+        ])
+        try renderEvidence(
+            MeetingDetailView(controller: voiceNoteController),
+            named: "voice-note-transcript.png"
+        )
+
+        let meetingID = UUID(uuidString: "B0000000-0000-0000-0000-000000000001")!
+        let ownerUtteranceID = UUID(uuidString: "B0000000-0000-0000-0000-000000000002")!
+        let guestUtteranceID = UUID(uuidString: "B0000000-0000-0000-0000-000000000003")!
+        var meetingRecord = MeetingRecord(
+            id: meetingID,
+            title: "Monday planning",
+            titleSource: .application,
+            detectedApplication: "Zoom",
+            startedAt: Date(timeIntervalSince1970: 1_786_339_800),
+            endedAt: Date(timeIntervalSince1970: 1_786_339_866),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+        meetingRecord.transcriptionState = .completed
+        let meetingUtterances = [
+            try MeetingUtterance(
+                id: ownerUtteranceID,
+                source: .microphone,
+                startMilliseconds: 0,
+                endMilliseconds: 2_000,
+                text: "I will send the revised launch brief this afternoon.",
+                baseSpeakerID: "you"
+            ),
+            try MeetingUtterance(
+                id: guestUtteranceID,
+                source: .system,
+                startMilliseconds: 2_400,
+                endMilliseconds: 4_600,
+                text: "Great, I will confirm the customer quotes before then.",
+                baseSpeakerID: "remote"
+            ),
+        ]
+        let speakerState = SpeakerEditingState(
+            assignments: [
+                ownerUtteranceID: SpeakerAssignment(
+                    speakerID: "owner",
+                    provenance: .manual
+                ),
+                guestUtteranceID: SpeakerAssignment(
+                    speakerID: "guest",
+                    provenance: .manual
+                ),
+            ],
+            speakers: [
+                "owner": MeetingSpeaker(id: "owner", displayName: "Reiss"),
+                "guest": MeetingSpeaker(id: "guest", displayName: "Alex"),
+            ]
+        )
+        let meetingController = MeetingDetailController(
+            meetingID: meetingID,
+            store: MemoryMeetingViewStore(values: [
+                meetingID: StoredMeeting(
+                    meeting: meetingRecord,
+                    utterances: meetingUtterances
+                ),
+            ]),
+            analysisStore: MemoryMeetingViewAnalysisStore(values: [
+                meetingID: StoredMeetingAnalysis(
+                    analysis: analysisFixture(utteranceID: ownerUtteranceID),
+                    speakerState: speakerState
+                ),
+            ]),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: MeetingDetailAudioSpy(meeting: meetingRecord),
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: MeetingClipboardSpy()
+        )
+        meetingController.load()
+        await meetingController.perform(.selectTab(.transcript))
+
+        #expect(meetingController.viewModel.transcript.map(\.speakerName) == ["Reiss", "Alex"])
+        #expect(meetingController.viewModel.transcript.map(\.text) == meetingUtterances.map(\.text))
+        try renderEvidence(
+            MeetingDetailView(controller: meetingController),
+            named: "meeting-speaker-transcript.png"
+        )
+    }
+
+    @Test
     func ambiguousLegacyRecordingCanBeExplicitlyMovedToVoiceNotes() async throws {
         let id = UUID()
         let record = MeetingRecord(
@@ -830,6 +1056,40 @@ struct MeetingViewsTests {
                 subject: "Follow up",
                 body: "Thanks for the review."
             )
+        )
+    }
+
+    private func renderEvidence<V: View>(_ view: V, named filename: String) throws {
+        let hostingView = NSHostingView(rootView: view
+            .frame(width: 900, height: 700)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .environment(\.colorScheme, .light))
+        hostingView.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = filename == "voice-note-transcript.png" ? "Voice Note" : "Meeting"
+        window.contentView = hostingView
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        hostingView.layoutSubtreeIfNeeded()
+        let bitmap = try #require(hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds))
+        hostingView.cacheDisplay(in: hostingView.bounds, to: bitmap)
+        let png = try #require(bitmap.representation(using: .png, properties: [:]))
+        #expect(png.count > 10_000)
+
+        guard let directory = ProcessInfo.processInfo.environment["BRAIN_TEST_EVIDENCE_DIR"] else {
+            return
+        }
+        try png.write(
+            to: URL(fileURLWithPath: directory, isDirectory: true)
+                .appendingPathComponent(filename),
+            options: .atomic
         )
     }
 }

@@ -45,10 +45,11 @@ History and records text only after VoxType logs successful output. Brain
 changes only an explicitly selected speech engine/model and leaves the rest of
 VoxType's configuration untouched.
 
-For meetings and Voice Notes, Brain records microphone plus system audio and
-uses VoxType for local transcription. Failed or interrupted jobs retain their
-private source audio for explicit retry and never resume automatically when
-Brain launches.
+For meetings, Brain records microphone plus system audio. Voice Notes are
+single-speaker microphone-only recordings, so they do not depend on Screen &
+System Audio permission or a second source. VoxType transcribes both workflows
+locally. Failed or interrupted jobs retain their private source audio for
+explicit retry and never resume automatically when Brain launches.
 The app checks **Microphone**, **Screen & System Audio
 Recording**, and **Accessibility** permissions only when their related features
 are used.
@@ -155,7 +156,7 @@ OAuth files, source-control history, or machine-specific paths.
 Brain requests permissions only for features the user enables:
 
 - Microphone for meeting and Voice Note audio;
-- Screen & System Audio Recording for system audio in meetings and Voice Notes;
+- Screen & System Audio Recording for system audio in meetings;
 - Accessibility for selected-text context and paste-related features; and
 - Notifications for app status.
 
