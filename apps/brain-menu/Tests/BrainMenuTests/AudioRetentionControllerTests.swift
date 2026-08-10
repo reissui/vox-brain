@@ -355,6 +355,33 @@ struct AudioRetentionControllerTests {
     }
 
     @Test
+    func launchReconciliationCompletesLegacyFileDeletionIntent() throws {
+        let fixture = try AudioRetentionFixture()
+        let controller = fixture.controller()
+        _ = try controller.finalize(
+            meeting: fixture.meeting,
+            utterances: fixture.utterances,
+            audio: fixture.makeAudio()
+        )
+        let quarantine = fixture.meetingDirectory.appendingPathComponent(
+            ".recording.\(UUID().uuidString).deleting",
+            isDirectory: false
+        )
+        try FileManager.default.moveItem(at: fixture.recordingURL, to: quarantine)
+
+        let reconciled = controller.reconcileInterruptedDeletions()
+        let stored = try fixture.store.load(fixture.meeting.id)
+
+        #expect(reconciled.map(\.id) == [fixture.meeting.id])
+        #expect(stored.meeting.transcriptionState == .completed)
+        #expect(stored.meeting.retainedAudio == nil)
+        #expect(stored.meeting.audioRetentionState == .deleted)
+        #expect(stored.utterances == fixture.utterances)
+        #expect(!FileManager.default.fileExists(atPath: quarantine.path))
+        #expect(!controller.hasInterruptedDeletion(for: fixture.meeting.id))
+    }
+
+    @Test
     func deletingRecordingPreservesCompletedTranscriptWarning() throws {
         let fixture = try AudioRetentionFixture()
         let controller = fixture.controller()
@@ -406,6 +433,45 @@ struct AudioRetentionControllerTests {
         #expect(FileManager.default.fileExists(atPath: fixture.recordingURL.path))
         #expect(!FileManager.default.fileExists(atPath: quarantine.path))
         #expect(!controller.hasInterruptedDeletion(for: fixture.meeting.id))
+    }
+
+    @Test
+    func failedRollbackKeepsQuarantineAndItsOnlyAudioCopy() throws {
+        let fixture = try AudioRetentionFixture()
+        _ = try fixture.controller().finalize(
+            meeting: fixture.meeting,
+            utterances: fixture.utterances,
+            audio: fixture.makeAudio()
+        )
+        let failingStore = MeetingStore(rootURL: fixture.rootURL) { event in
+            if event == .beforeAtomicReplacement(.meeting) {
+                throw InjectedAudioRetentionFailure()
+            }
+        }
+        let controller = fixture.controller(
+            store: failingStore,
+            fileSystem: RestorationFailureAudioRetentionFileSystem()
+        )
+
+        #expect(throws: AudioRetentionControllerError.deleteFailed) {
+            try controller.deleteRecording(for: fixture.meeting.id, confirmed: true)
+        }
+
+        let stored = try fixture.store.load(fixture.meeting.id)
+        let quarantines = try FileManager.default.contentsOfDirectory(
+            at: fixture.meetingDirectory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasSuffix(".deleting") }
+        let quarantine = try #require(quarantines.first)
+        let quarantinedItems = try FileManager.default.contentsOfDirectory(
+            at: quarantine,
+            includingPropertiesForKeys: nil
+        )
+
+        #expect(!FileManager.default.fileExists(atPath: fixture.recordingURL.path))
+        #expect(stored.meeting.retainedAudio != nil)
+        #expect(quarantinedItems.contains { $0.lastPathComponent.hasSuffix("recording.m4a") })
+        #expect(controller.hasInterruptedDeletion(for: fixture.meeting.id))
     }
 
     @Test
@@ -661,6 +727,48 @@ private final class SelectiveCleanupFailureAudioRetentionFileSystem:
         if url.lastPathComponent == failingFilename {
             throw InjectedAudioRetentionFailure()
         }
+        try base.removeItem(at: url)
+    }
+
+    func setOwnerOnlyPermissions(at url: URL) throws {
+        try base.setOwnerOnlyPermissions(at: url)
+    }
+}
+
+private final class RestorationFailureAudioRetentionFileSystem:
+    AudioRetentionFileSystem,
+    @unchecked Sendable
+{
+    private let base = LocalAudioRetentionFileSystem()
+
+    func attributes(at url: URL) throws -> [FileAttributeKey: Any] {
+        try base.attributes(at: url)
+    }
+
+    func contentsOfDirectory(at url: URL) throws -> [URL] {
+        try base.contentsOfDirectory(at: url)
+    }
+
+    func createOwnerOnlyDirectory(at url: URL) throws {
+        try base.createOwnerOnlyDirectory(at: url)
+    }
+
+    func fileExists(at url: URL) -> Bool {
+        base.fileExists(at: url)
+    }
+
+    func copyItem(at source: URL, to destination: URL) throws {
+        try base.copyItem(at: source, to: destination)
+    }
+
+    func moveItem(at source: URL, to destination: URL) throws {
+        if source.deletingLastPathComponent().lastPathComponent.hasSuffix(".deleting") {
+            throw InjectedAudioRetentionFailure()
+        }
+        try base.moveItem(at: source, to: destination)
+    }
+
+    func removeItem(at url: URL) throws {
         try base.removeItem(at: url)
     }
 

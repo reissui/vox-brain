@@ -122,7 +122,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         processing.lifecycleState = .completed
         processing.transcriptionState = .processing
         processing.transcriptionAttemptCount = generation
-        processing.transcriptionErrorMessage = nil
         try store.save(processing, utterances: current.utterances)
         return processing
     }
@@ -264,7 +263,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             } catch {
                 return persistUnrecoverableRetry(
                     meeting: stored.meeting,
-                    utterances: stored.utterances,
                     key: jobKey,
                     token: token,
                     generation: generation,
@@ -315,7 +313,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 let candidate = currentRecord(for: meetingID, fallback: stored.meeting)
                 return Self.persistFailureIfCurrent(
                     meeting: candidate,
-                    utterances: stored.utterances,
                     message: Self.bounded(error),
                     store: store
                 )
@@ -344,7 +341,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
 
     private func persistUnrecoverableRetry(
         meeting: MeetingRecord,
-        utterances: [MeetingUtterance],
         key: MeetingTranscriptionJobKey,
         token: UUID,
         generation: Int,
@@ -356,7 +352,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             token: token,
             generation: generation
         ), let current = try? store.load(meeting.id),
-           current.meeting.transcriptionAttemptCount + 1 == generation else {
+           current.meeting.transcriptionAttemptCount + 1 == generation,
+           current.meeting.audioRetentionState != .deleted else {
             return currentRecord(for: meeting.id, fallback: meeting)
         }
         var failed = current.meeting
@@ -364,10 +361,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         failed.transcriptionState = .failed
         failed.transcriptionAttemptCount = generation
         failed.transcriptionErrorMessage = String(message.prefix(720))
-        failed.analysisState = .notRequested
-        failed.uploadState = .notUploaded
         do {
-            try store.save(failed, utterances: utterances)
+            try store.save(failed, utterances: current.utterances)
             return failed
         } catch {
             return currentRecord(for: meeting.id, fallback: failed)
@@ -445,6 +440,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             let missingArchive = meeting.transcriptionState == .completed
                 && meeting.transcriptionAttemptCount > 0
                 && meeting.retainedAudio == nil
+                && meeting.audioRetentionState == .pending
             let interruptedArchive = missingArchive
                 && Self.hasRecoverableSourceAudio(
                     in: store.directoryURL(for: meeting.id),
@@ -533,7 +529,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             return MeetingTranscriptionPersistenceOutcome(
                 meeting: persistFailureIfCurrent(
                     meeting: currentMeeting,
-                    utterances: utterances,
                     message: message,
                     store: store
                 ),
@@ -588,7 +583,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             return MeetingTranscriptionPersistenceOutcome(
                 meeting: persistFailureIfCurrent(
                     meeting: completed,
-                    utterances: utterances,
                     message: Self.bounded(error),
                     store: store
                 ),
@@ -599,7 +593,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
 
     private nonisolated static func persistFailureIfCurrent(
         meeting: MeetingRecord,
-        utterances: [MeetingUtterance],
         message: String,
         store: MeetingStore
     ) -> MeetingRecord {
@@ -610,17 +603,18 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 || (
                     current.meeting.transcriptionState == .completed
                         && current.meeting.retainedAudio == nil
+                        && current.meeting.audioRetentionState == .pending
                 ) else {
             return currentRecord(for: meeting.id, fallback: meeting, store: store)
         }
-        var failed = meeting
+        var failed = current.meeting
+        failed.speechEngine = meeting.speechEngine
+        failed.speechModel = meeting.speechModel
         failed.lifecycleState = .completed
         failed.transcriptionState = .failed
         failed.transcriptionErrorMessage = String(message.prefix(720))
-        failed.analysisState = .notRequested
-        failed.uploadState = .notUploaded
         do {
-            try store.save(failed, utterances: utterances)
+            try store.save(failed, utterances: current.utterances)
             return failed
         } catch {
             return currentRecord(for: meeting.id, fallback: failed, store: store)

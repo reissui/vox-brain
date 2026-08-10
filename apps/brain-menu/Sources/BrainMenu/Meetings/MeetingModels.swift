@@ -47,6 +47,12 @@ enum MeetingRecordingKind: String, Codable, CaseIterable, Sendable {
     case voiceNote
 }
 
+enum MeetingAudioRetentionState: String, Codable, CaseIterable, Sendable {
+    case pending
+    case retained
+    case deleted
+}
+
 struct RetainedAudioMetadata: Codable, Equatable, Sendable {
     var filename: String
     var format: String
@@ -87,6 +93,7 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     var analysisState: MeetingAnalysisState
     var uploadState: MeetingUploadState
     var retainedAudio: RetainedAudioMetadata?
+    var audioRetentionState: MeetingAudioRetentionState
     var isUnread: Bool
 
     var isVoiceNote: Bool {
@@ -111,6 +118,7 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         analysisState: MeetingAnalysisState = .notRequested,
         uploadState: MeetingUploadState = .notUploaded,
         retainedAudio: RetainedAudioMetadata? = nil,
+        audioRetentionState: MeetingAudioRetentionState? = nil,
         isUnread: Bool = true
     ) {
         self.id = id
@@ -131,6 +139,8 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         self.analysisState = analysisState
         self.uploadState = uploadState
         self.retainedAudio = retainedAudio
+        self.audioRetentionState = audioRetentionState
+            ?? (retainedAudio == nil ? .pending : .retained)
         self.isUnread = isUnread
     }
 
@@ -152,6 +162,7 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         case analysisState
         case uploadState
         case retainedAudio
+        case audioRetentionState
         case isUnread
     }
 
@@ -167,6 +178,26 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         let persistedRecordingKind = try container.decodeIfPresent(
             MeetingRecordingKind.self,
             forKey: .recordingKind
+        )
+        let lifecycleState = try container.decode(
+            MeetingLifecycleState.self,
+            forKey: .lifecycleState
+        )
+        let transcriptionState = try container.decodeIfPresent(
+            MeetingTranscriptionState.self,
+            forKey: .transcriptionState
+        ) ?? (lifecycleState == .completed ? .completed : .pending)
+        let retainedAudio = try container.decodeIfPresent(
+            RetainedAudioMetadata.self,
+            forKey: .retainedAudio
+        )
+        let audioRetentionState = try container.decodeIfPresent(
+            MeetingAudioRetentionState.self,
+            forKey: .audioRetentionState
+        ) ?? Self.legacyAudioRetentionState(
+            lifecycleState: lifecycleState,
+            transcriptionState: transcriptionState,
+            retainedAudio: retainedAudio
         )
         let legacyMigration = Self.legacyRecordingKindMigration(
             title: title,
@@ -185,13 +216,10 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
             detectedApplication: detectedApplication,
             startedAt: try container.decode(Date.self, forKey: .startedAt),
             endedAt: try container.decodeIfPresent(Date.self, forKey: .endedAt),
-            lifecycleState: try container.decode(MeetingLifecycleState.self, forKey: .lifecycleState),
+            lifecycleState: lifecycleState,
             speechEngine: try container.decode(String.self, forKey: .speechEngine),
             speechModel: try container.decode(String.self, forKey: .speechModel),
-            transcriptionState: try container.decodeIfPresent(
-                MeetingTranscriptionState.self,
-                forKey: .transcriptionState
-            ),
+            transcriptionState: transcriptionState,
             transcriptionAttemptCount: try container.decodeIfPresent(
                 Int.self,
                 forKey: .transcriptionAttemptCount
@@ -202,10 +230,8 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
             ),
             analysisState: try container.decode(MeetingAnalysisState.self, forKey: .analysisState),
             uploadState: try container.decode(MeetingUploadState.self, forKey: .uploadState),
-            retainedAudio: try container.decodeIfPresent(
-                RetainedAudioMetadata.self,
-                forKey: .retainedAudio
-            ),
+            retainedAudio: retainedAudio,
+            audioRetentionState: audioRetentionState,
             // Records written before unread tracking existed are treated as
             // already seen. Only newly completed recordings receive the New state.
             isUnread: try container.decodeIfPresent(Bool.self, forKey: .isUnread) ?? false
@@ -217,6 +243,20 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         return normalized == "meeting" || normalized.hasPrefix("meeting in ")
             ? .application
             : .manual
+    }
+
+    private static func legacyAudioRetentionState(
+        lifecycleState: MeetingLifecycleState,
+        transcriptionState: MeetingTranscriptionState,
+        retainedAudio: RetainedAudioMetadata?
+    ) -> MeetingAudioRetentionState {
+        if retainedAudio != nil {
+            return .retained
+        }
+        if lifecycleState == .completed, transcriptionState == .completed {
+            return .deleted
+        }
+        return .pending
     }
 
     private static func legacyRecordingKindMigration(

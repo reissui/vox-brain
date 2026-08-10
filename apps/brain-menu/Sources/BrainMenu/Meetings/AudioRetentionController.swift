@@ -308,12 +308,14 @@ final class AudioRetentionController: @unchecked Sendable {
         for entry in entries {
             guard let meetingID = entry.id else { continue }
             let directory = store.directoryURL(for: meetingID).standardizedFileURL
-            guard let quarantines = try? deletionQuarantines(in: directory),
-                  !quarantines.isEmpty else { continue }
+            guard let quarantines = try? deletionQuarantines(in: directory) else { continue }
 
             switch entry {
             case .available:
                 guard let stored = try? store.load(meetingID) else { continue }
+                let hasDeletedAudioArtifacts = stored.meeting.audioRetentionState == .deleted
+                    && ((try? audioArtifacts(in: directory).isEmpty) == false)
+                guard !quarantines.isEmpty || hasDeletedAudioArtifacts else { continue }
                 let updated = Self.recordAfterDeletingAudio(stored.meeting)
                 guard (try? store.save(updated, utterances: stored.utterances)) != nil else {
                     continue
@@ -321,7 +323,9 @@ final class AudioRetentionController: @unchecked Sendable {
                 finishInterruptedDeletion(in: directory, quarantines: quarantines)
                 reconciled.append(updated)
             case .unavailable:
-                restoreQuarantines(quarantines, in: directory)
+                if !quarantines.isEmpty {
+                    restoreQuarantines(quarantines, in: directory)
+                }
             }
         }
 
@@ -386,6 +390,7 @@ final class AudioRetentionController: @unchecked Sendable {
 
         var updated = meeting
         updated.retainedAudio = metadata
+        updated.audioRetentionState = .retained
         do {
             try store.save(updated, utterances: utterances)
         } catch {
@@ -558,9 +563,10 @@ final class AudioRetentionController: @unchecked Sendable {
             .filter { Self.isDeletionQuarantineName($0.lastPathComponent) }
             .map { quarantine in
                 let quarantine = quarantine.standardizedFileURL
+                let type = try fileSystem.attributes(at: quarantine)[.type]
+                    as? FileAttributeType
                 guard quarantine.deletingLastPathComponent() == directory,
-                      try fileSystem.attributes(at: quarantine)[.type] as? FileAttributeType
-                        == .typeDirectory else {
+                      type == .typeDirectory || type == .typeRegular else {
                     throw AudioRetentionControllerError.deleteFailed
                 }
                 return quarantine
@@ -588,6 +594,18 @@ final class AudioRetentionController: @unchecked Sendable {
 
     private func restoreQuarantines(_ quarantines: [URL], in directory: URL) {
         for quarantine in quarantines {
+            let type = try? fileSystem.attributes(at: quarantine)[.type]
+                as? FileAttributeType
+            if type == .typeRegular {
+                let destination = directory.appendingPathComponent(
+                    Self.legacyRetainedFilename,
+                    isDirectory: false
+                )
+                guard !fileSystem.fileExists(at: destination) else { continue }
+                try? fileSystem.moveItem(at: quarantine, to: destination)
+                continue
+            }
+            guard type == .typeDirectory else { continue }
             guard let items = try? fileSystem.contentsOfDirectory(at: quarantine) else { continue }
             var restoredAll = true
             for item in items {
@@ -669,23 +687,26 @@ final class AudioRetentionController: @unchecked Sendable {
     private static func recordAfterDeletingAudio(_ meeting: MeetingRecord) -> MeetingRecord {
         var updated = meeting
         updated.retainedAudio = nil
+        updated.audioRetentionState = .deleted
         updated.transcriptionState = .completed
-        // A cancelled in-flight retry has no durable error to preserve. For an
-        // already completed or failed transcript, keep partial-span/failure
-        // diagnostics visible after its source recording is removed.
-        if meeting.transcriptionState == .processing {
-            updated.transcriptionErrorMessage = nil
-        }
         return updated
     }
 
     private func restore(_ moves: [AudioArtifactMove], quarantine: URL) {
-        for move in moves.reversed()
-        where fileSystem.fileExists(at: move.quarantined)
-            && !fileSystem.fileExists(at: move.original) {
-            try? fileSystem.moveItem(at: move.quarantined, to: move.original)
+        var restoredAll = true
+        for move in moves.reversed() where fileSystem.fileExists(at: move.quarantined) {
+            guard !fileSystem.fileExists(at: move.original) else {
+                restoredAll = false
+                continue
+            }
+            do {
+                try fileSystem.moveItem(at: move.quarantined, to: move.original)
+            } catch {
+                restoredAll = false
+            }
         }
-        if fileSystem.fileExists(at: quarantine) {
+        if restoredAll,
+           (try? fileSystem.contentsOfDirectory(at: quarantine).isEmpty) == true {
             try? fileSystem.removeItem(at: quarantine)
         }
     }
