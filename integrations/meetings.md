@@ -61,11 +61,12 @@ starts or stops recording automatically.
 1. Open **Meetings** and choose **Start Meeting**, or open the separate **Voice
    Notes** section and choose **Record Voice Note** for a solo dictated session.
    Confirm the microphone meter moves.
-2. Brain automatically retries transient macOS microphone startup failures. A
-   genuinely unavailable source still ends startup with an error. Once
-   connected, Brain warns when no usable microphone signal arrives and keeps
-   recording so a muted or temporarily quiet input does not discard the
-   session.
+2. Brain automatically retries transient macOS microphone startup failures. If
+   the selected input is missing or unusable, Brain stays open at **Choose
+   microphone**; choose an available input, then start again. Other capture
+   failures still end startup with an error. Once connected, Brain warns when
+   no usable microphone signal arrives and keeps recording so a muted or
+   temporarily quiet input does not discard the session.
 3. Pause/resume explicitly. Dictation cannot take the microphone during either
    kind of recording.
 4. Choose **End & Process**. Dismissing the prompt keeps recording.
@@ -110,8 +111,9 @@ Retain the previous app artifact until this passes.
 
 ## Troubleshooting
 
-- **No microphone:** run the five-second Speech test, reconnect a pinned input,
-  or choose System Default; recheck macOS Microphone permission.
+- **No microphone:** use the **Choose microphone** recovery prompt described
+  above. If no available input works, run the five-second Speech test and
+  recheck macOS Microphone permission.
 - **No system track:** recheck Screen & System Audio Recording permission.
 - **VoxType missing:** choose **Enable Speech** in Speech Setup. If the bundled
   helper is unavailable, Brain links to the official installation guide.
