@@ -515,29 +515,30 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             }
             guard case .available(let listed) = entry,
                   !Self.registry.contains(key(for: listed.id)),
-                  let stored = try? store.load(listed.id) else { continue }
-            guard stored.meeting.audioRetentionState != .deleted else { continue }
-            var meeting = stored.meeting
+                  listed.audioRetentionState != .deleted else { continue }
             let interruptedCapture = [
                 MeetingLifecycleState.starting,
                 .recording,
                 .paused,
                 .stopSuggested,
                 .finalizing,
-            ].contains(meeting.lifecycleState)
+            ].contains(listed.lifecycleState)
             let interruptedTranscript = [.pending, .processing]
-                .contains(meeting.transcriptionState)
-            let missingArchive = meeting.transcriptionState == .completed
-                && meeting.transcriptionAttemptCount > 0
-                && meeting.retainedAudio == nil
-                && meeting.audioRetentionState == .pending
+                .contains(listed.transcriptionState)
+            let missingArchive = listed.transcriptionState == .completed
+                && listed.transcriptionAttemptCount > 0
+                && listed.retainedAudio == nil
+                && listed.audioRetentionState == .pending
             let interruptedArchive = missingArchive
                 && Self.hasRecoverableSourceAudio(
-                    in: store.directoryURL(for: meeting.id),
+                    in: store.directoryURL(for: listed.id),
                     fileManager: fileManagerBox.value
                 )
 
             if interruptedCapture || interruptedTranscript || interruptedArchive {
+                guard let stored = try? store.load(listed.id),
+                      stored.meeting.audioRetentionState != .deleted else { continue }
+                var meeting = stored.meeting
                 meeting.endedAt = meeting.endedAt ?? date
                 meeting.lifecycleState = interruptedCapture ? .failed : .completed
                 meeting.transcriptionState = .failed
@@ -551,11 +552,11 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 if (try? store.save(meeting, utterances: stored.utterances)) != nil {
                     reconciled.append(meeting)
                 }
-            } else if meeting.transcriptionState == .completed,
-                      meeting.transcriptionAttemptCount > 0,
-                      meeting.retainedAudio != nil,
-                      meeting.uploadState == .notUploaded {
-                scheduleUpload(meeting.id)
+            } else if listed.transcriptionState == .completed,
+                      listed.transcriptionAttemptCount > 0,
+                      listed.retainedAudio != nil,
+                      listed.uploadState == .notUploaded {
+                scheduleUpload(listed.id)
             }
         }
         return reconciled
@@ -707,9 +708,11 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         // A retry cannot replace a durable transcript until it succeeds. On an
         // initial attempt there is no prior transcript, so keep any successful
         // spans that were produced before a systemic failure.
-        let durableUtterances = current.utterances.isEmpty
-            ? attemptUtterances
-            : current.utterances
+        let durableUtterances = if meeting.transcriptionAttemptCount <= 1 {
+            attemptUtterances.isEmpty ? current.utterances : attemptUtterances
+        } else {
+            current.utterances
+        }
         do {
             try store.save(failed, utterances: durableUtterances)
             return failed

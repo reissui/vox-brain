@@ -254,7 +254,18 @@ struct MeetingTranscriptionCoordinatorTests {
         let rawURLs = fixture.rawURLs(for: capture)
         let client = CoordinatorPartialSystemicClient()
         let coordinator = fixture.coordinator(client: client)
-        let processing = try coordinator.stage(meeting: fixture.meeting, capture: capture)
+        let preview = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 10,
+            text: "Earlier live preview.",
+            baseSpeakerID: "you"
+        )
+        let processing = try coordinator.stage(
+            meeting: fixture.meeting,
+            capture: capture,
+            utterances: [preview]
+        )
 
         let failed = await coordinator.complete(
             meeting: processing,

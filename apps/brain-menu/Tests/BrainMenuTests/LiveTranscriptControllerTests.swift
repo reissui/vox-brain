@@ -6,6 +6,32 @@ import Testing
 struct LiveTranscriptControllerTests {
     @Test
     @MainActor
+    func publishesSettledPreviewSnapshotsForDurableCheckpointing() async throws {
+        let fixture = try LiveTranscriptFixture()
+        let service = try LiveTranscriptionService(
+            client: FakeLiveTranscriptionClient(),
+            engine: .whisper,
+            originHostTimestamp: 100,
+            wavDirectory: fixture.wavDirectory
+        )
+        let controller = LiveTranscriptController(service: service)
+        var checkpoints: [[MeetingUtterance]] = []
+        controller.setUtteranceCheckpointHandler { checkpoints.append($0) }
+
+        await controller.append(fixture.buffer(
+            source: .microphone,
+            hostTimestamp: 100,
+            duration: 10,
+            amplitude: 0.25
+        ))
+        await controller.waitForPendingPreview()
+
+        #expect(checkpoints.last == controller.utterances)
+        #expect(checkpoints.last?.first?.text == "preview microphone 0")
+    }
+
+    @Test
+    @MainActor
     func chunksSourcesOnMeetingWindowsSkipsSilenceFlushesTailAndCleansWAVs() async throws {
         let fixture = try LiveTranscriptFixture()
         let client = FakeLiveTranscriptionClient()

@@ -786,7 +786,9 @@ final class MeetingDetailController {
             }
             errorMessage = nil
         } catch {
-            errorMessage = Self.bounded(error)
+            let deletionError = Self.bounded(error)
+            reloadMeetingAfterTypedAction()
+            errorMessage = deletionError
         }
     }
 
@@ -820,6 +822,7 @@ final class MeetingDetailController {
             meeting = stored.meeting
             utterances = stored.utterances
             editor.reprocessFinalUtterances(stored.utterances)
+            refreshAudioCapabilities(for: stored.meeting)
             loadUploadRevision()
             errorMessage = uploadController.errorMessage ?? errorMessage
         } catch {

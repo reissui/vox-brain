@@ -13,9 +13,16 @@ final class LiveTranscriptController {
 
     @ObservationIgnored private let service: LiveTranscriptionService
     @ObservationIgnored private var isConnected = false
+    @ObservationIgnored private var utteranceCheckpointHandler: (([MeetingUtterance]) -> Void)?
 
     init(service: LiveTranscriptionService) {
         self.service = service
+    }
+
+    func setUtteranceCheckpointHandler(
+        _ handler: @escaping ([MeetingUtterance]) -> Void
+    ) {
+        utteranceCheckpointHandler = handler
     }
 
     func append(_ buffer: MeetingAudioSampleBuffer) async {
@@ -58,6 +65,7 @@ final class LiveTranscriptController {
         }
         utterances = (preservedPreviews + finalUtterances)
             .sorted(by: MeetingUtterance.chronologicallyPrecedes)
+        utteranceCheckpointHandler?(utterances)
         let preservedPreviewErrors = errors.filter {
             $0.phase == .preview && !Self.failure($0, overlapsAny: finalUtterances)
         }
@@ -93,6 +101,7 @@ final class LiveTranscriptController {
             utterances.removeAll { $0.id == utterance.id }
             utterances.append(utterance)
             utterances.sort(by: MeetingUtterance.chronologicallyPrecedes)
+            utteranceCheckpointHandler?(utterances)
         case .failure(let failure):
             errors = Self.deduplicated(errors + [failure])
         case .previewLagChanged(let state):

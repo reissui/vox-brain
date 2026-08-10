@@ -751,6 +751,9 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
     private var currentMicrophoneSelection: MeetingMicrophoneSelection?
     private var microphoneRefreshTask: Task<Void, Never>?
     private var microphoneSwitchTask: Task<Void, Never>?
+    private var transcriptCheckpointTask: Task<Void, Never>?
+    private var pendingTranscriptCheckpoint: [MeetingUtterance]?
+    private var lastTranscriptCheckpoint: [MeetingUtterance] = []
     private var activeMicrophoneSwitchID: UUID?
     private var sessionGeneration: UInt64 = 0
     private var isSwitchingMicrophone = false
@@ -864,6 +867,9 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         self.writer = writer
         writePipeline = BrainMeetingAudioWritePipeline(writer: writer)
         self.transcript = transcript
+        transcript.setUtteranceCheckpointHandler { [weak self] utterances in
+            self?.scheduleTranscriptCheckpoint(utterances)
+        }
         self.systemAudio = systemAudio
         self.microphone = microphone
         currentMicrophoneSelection = microphoneSelection
@@ -954,12 +960,16 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             await microphone.stop()
             if let systemAudio { await systemAudio.stop() }
             await gate.waitUntilIdle()
+            await transcript.waitForPendingPreview()
+            let utterances = transcript.utterances
+            try? flushTranscriptCheckpoint(utterances)
             await transcript.cancel()
             try? persistRetryableRecord(
                 for: request,
                 at: Date(),
                 lifecycleState: .failed,
-                message: "Meeting capture could not start: \(error.localizedDescription)"
+                message: "Meeting capture could not start: \(error.localizedDescription)",
+                utterances: utterances
             )
             clearSession()
             ownership.set(false)
@@ -1168,6 +1178,19 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         await systemAudio?.stop()
         await eventGate?.waitUntilIdle()
         await transcript.waitForPendingPreview()
+        let previewUtterances = transcript.utterances
+        do {
+            try flushTranscriptCheckpoint(previewUtterances)
+        } catch {
+            try? persistRetryableRecord(
+                for: request,
+                at: date,
+                lifecycleState: .failed,
+                message: "The transcript checkpoint could not be saved: \(error.localizedDescription)",
+                utterances: previewUtterances
+            )
+            throw error
+        }
         let summary: MeetingAudioCaptureSummary
         do {
             summary = try await writePipeline.finalize()
@@ -1176,7 +1199,8 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
                 for: request,
                 at: date,
                 lifecycleState: .failed,
-                message: "Brain could not finalize this recording: \(error.localizedDescription)"
+                message: "Brain could not finalize this recording: \(error.localizedDescription)",
+                utterances: previewUtterances
             )
             throw error
         }
@@ -1197,14 +1221,15 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             processing = try transcription.stage(
                 meeting: completed,
                 capture: summary,
-                utterances: transcript.utterances
+                utterances: previewUtterances
             )
         } catch {
             try? persistRetryableRecord(
                 for: request,
                 at: date,
                 lifecycleState: .completed,
-                message: "The recording was saved, but transcription could not start: \(error.localizedDescription)"
+                message: "The recording was saved, but transcription could not start: \(error.localizedDescription)",
+                utterances: previewUtterances
             )
             throw error
         }
@@ -1228,12 +1253,16 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         await microphone?.stop()
         await systemAudio?.stop()
         await eventGate?.waitUntilIdle()
+        await transcript?.waitForPendingPreview()
+        let utterances = transcript?.utterances ?? []
+        try? flushTranscriptCheckpoint(utterances)
         await transcript?.cancel()
         if let request {
             _ = await finalizeAsRetryable(
                 request: request,
                 at: date,
-                message: "Recording reached Brain's eight-hour safety limit. Retry the saved transcript when ready."
+                message: "Recording reached Brain's eight-hour safety limit. Retry the saved transcript when ready.",
+                utterances: utterances
             )
         }
         clearSession()
@@ -1467,11 +1496,15 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         await microphone?.stop()
         await systemAudio?.stop()
         await eventGate?.waitUntilIdle()
+        await transcript?.waitForPendingPreview()
+        let utterances = transcript?.utterances ?? []
+        try? flushTranscriptCheckpoint(utterances)
         await transcript?.cancel()
         _ = await finalizeAsRetryable(
             request: request,
             at: Date(),
-            message: "Recording stopped after an audio failure: \(message)"
+            message: "Recording stopped after an audio failure: \(message)",
+            utterances: utterances
         )
         clearSession()
         ownership.set(false)
@@ -1497,7 +1530,8 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
     private func finalizeAsRetryable(
         request: MeetingRecordingRequest,
         at date: Date,
-        message: String
+        message: String,
+        utterances: [MeetingUtterance]
     ) async -> MeetingRecord {
         let finalizationError: String?
         do {
@@ -1520,7 +1554,6 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             transcriptionState: .failed,
             errorMessage: combinedMessage
         )
-        let utterances = (try? store.load(request.meetingID).utterances) ?? []
         try? store.save(failed, utterances: utterances)
         return failed
     }
@@ -1529,9 +1562,9 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         for request: MeetingRecordingRequest,
         at date: Date,
         lifecycleState: MeetingLifecycleState,
-        message: String
+        message: String,
+        utterances: [MeetingUtterance]
     ) throws {
-        let utterances = (try? store.load(request.meetingID).utterances) ?? []
         try store.save(
             record(
                 for: request,
@@ -1542,6 +1575,42 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             ),
             utterances: utterances
         )
+    }
+
+    private func scheduleTranscriptCheckpoint(_ utterances: [MeetingUtterance]) {
+        guard request != nil, utterances != lastTranscriptCheckpoint else { return }
+        pendingTranscriptCheckpoint = utterances
+        guard transcriptCheckpointTask == nil else { return }
+        transcriptCheckpointTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(750))
+            guard !Task.isCancelled, let self else { return }
+            self.transcriptCheckpointTask = nil
+            guard let utterances = self.pendingTranscriptCheckpoint else { return }
+            self.pendingTranscriptCheckpoint = nil
+            try? self.persistTranscriptCheckpoint(utterances)
+        }
+    }
+
+    private func flushTranscriptCheckpoint(_ utterances: [MeetingUtterance]) throws {
+        transcriptCheckpointTask?.cancel()
+        transcriptCheckpointTask = nil
+        pendingTranscriptCheckpoint = nil
+        try persistTranscriptCheckpoint(utterances)
+    }
+
+    private func persistTranscriptCheckpoint(_ utterances: [MeetingUtterance]) throws {
+        guard let request, utterances != lastTranscriptCheckpoint else { return }
+        let stored = try store.load(request.meetingID)
+        guard stored.meeting.audioRetentionState != .deleted,
+              [
+                  MeetingLifecycleState.starting,
+                  .recording,
+                  .paused,
+                  .stopSuggested,
+                  .finalizing,
+              ].contains(stored.meeting.lifecycleState) else { return }
+        try store.save(stored.meeting, utterances: utterances)
+        lastTranscriptCheckpoint = utterances
     }
 
     private func record(
@@ -1590,6 +1659,10 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
     }
 
     private func clearSession() {
+        transcriptCheckpointTask?.cancel()
+        transcriptCheckpointTask = nil
+        pendingTranscriptCheckpoint = nil
+        lastTranscriptCheckpoint = []
         microphoneRefreshTask?.cancel()
         microphoneRefreshTask = nil
         microphoneSwitchTask?.cancel()

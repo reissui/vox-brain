@@ -148,20 +148,13 @@ final class AudioRetentionController: @unchecked Sendable {
         audio: MeetingAudioCaptureSummary
     ) throws -> MeetingRecord {
         let previous = try? store.load(meeting.id)
-        let validated: ValidatedTemporaryAudio
-        do {
-            validated = try validateTemporaryAudio(audio, meetingID: meeting.id)
-        } catch {
-            throw AudioRetentionControllerError.invalidTemporaryAudio
-        }
-
         let hasPriorDurableAudio = previous.map {
             $0.meeting.retainedAudio != nil
                 || $0.meeting.audioRetentionState != .pending
         } ?? false
-        if !hasPriorDurableAudio,
-           meeting.transcriptionAttemptCount <= 1,
-           previous?.utterances.isEmpty != false {
+        let checkpointsAttemptTranscript = !hasPriorDurableAudio
+            && meeting.transcriptionAttemptCount <= 1
+        if checkpointsAttemptTranscript {
             var archiving = meeting
             archiving.transcriptionState = .processing
             do {
@@ -169,6 +162,13 @@ final class AudioRetentionController: @unchecked Sendable {
             } catch {
                 throw AudioRetentionControllerError.transcriptPersistenceFailed
             }
+        }
+
+        let validated: ValidatedTemporaryAudio
+        do {
+            validated = try validateTemporaryAudio(audio, meetingID: meeting.id)
+        } catch {
+            throw AudioRetentionControllerError.invalidTemporaryAudio
         }
 
         do {
@@ -179,7 +179,7 @@ final class AudioRetentionController: @unchecked Sendable {
                 validated: validated
             )
         } catch {
-            if let previous {
+            if let previous, !checkpointsAttemptTranscript {
                 try? store.save(previous.meeting, utterances: previous.utterances)
             }
             throw error
@@ -249,7 +249,6 @@ final class AudioRetentionController: @unchecked Sendable {
     func hasDeletableRecording(for meetingID: UUID) -> Bool {
         guard let stored = try? store.load(meetingID),
               Self.allowsAudioDeletion(stored.meeting.lifecycleState),
-              stored.meeting.audioRetentionState != .deleted,
               let artifacts = try? audioArtifacts(
                   in: store.directoryURL(for: meetingID).standardizedFileURL
               ) else {
@@ -270,11 +269,16 @@ final class AudioRetentionController: @unchecked Sendable {
         } catch {
             throw AudioRetentionControllerError.retainedAudioUnavailable
         }
-        guard Self.allowsAudioDeletion(stored.meeting.lifecycleState),
-              stored.meeting.audioRetentionState != .deleted else {
+        guard Self.allowsAudioDeletion(stored.meeting.lifecycleState) else {
             throw AudioRetentionControllerError.deleteFailed
         }
         let directory = store.directoryURL(for: meetingID).standardizedFileURL
+        if stored.meeting.audioRetentionState == .deleted {
+            guard retryInterruptedDeletion(in: directory) else {
+                throw AudioRetentionControllerError.deleteFailed
+            }
+            return stored.meeting
+        }
         let quarantine = directory.appendingPathComponent(
             ".recording.\(UUID().uuidString).deleting",
             isDirectory: true
@@ -317,7 +321,11 @@ final class AudioRetentionController: @unchecked Sendable {
             throw AudioRetentionControllerError.deleteFailed
         }
 
-        try? fileSystem.removeItem(at: quarantine)
+        do {
+            try fileSystem.removeItem(at: quarantine)
+        } catch {
+            throw AudioRetentionControllerError.deleteFailed
+        }
         return updated
     }
 
@@ -338,11 +346,11 @@ final class AudioRetentionController: @unchecked Sendable {
             guard let quarantines = try? deletionQuarantines(in: directory) else { continue }
 
             switch entry {
-            case .available:
-                guard let stored = try? store.load(meetingID) else { continue }
-                let hasDeletedAudioArtifacts = stored.meeting.audioRetentionState == .deleted
+            case .available(let listed):
+                let hasDeletedAudioArtifacts = listed.audioRetentionState == .deleted
                     && ((try? audioArtifacts(in: directory).isEmpty) == false)
                 guard !quarantines.isEmpty || hasDeletedAudioArtifacts else { continue }
+                guard let stored = try? store.load(meetingID) else { continue }
                 let updated = Self.recordAfterDeletingAudio(stored.meeting)
                 guard (try? store.save(updated, utterances: stored.utterances)) != nil else {
                     continue
@@ -617,6 +625,14 @@ final class AudioRetentionController: @unchecked Sendable {
         for quarantine in quarantines {
             try? fileSystem.removeItem(at: quarantine)
         }
+    }
+
+    private func retryInterruptedDeletion(in directory: URL) -> Bool {
+        guard let quarantines = try? deletionQuarantines(in: directory) else {
+            return false
+        }
+        finishInterruptedDeletion(in: directory, quarantines: quarantines)
+        return (try? audioArtifacts(in: directory).isEmpty) == true
     }
 
     private static func isTopLevelAudioArtifact(_ name: String) -> Bool {

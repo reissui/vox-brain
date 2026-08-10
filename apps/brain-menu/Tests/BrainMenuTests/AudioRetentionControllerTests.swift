@@ -122,6 +122,77 @@ struct AudioRetentionControllerTests {
     }
 
     @Test
+    func firstAttemptFinalTranscriptReplacesPreviewBeforeFallibleArchiving() throws {
+        let fixture = try AudioRetentionFixture()
+        let summary = try fixture.makeAudio()
+        let preview = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 10,
+            text: "Earlier live preview.",
+            baseSpeakerID: "you"
+        )
+        var processing = fixture.meeting
+        processing.transcriptionState = .processing
+        processing.transcriptionAttemptCount = 1
+        try fixture.store.save(processing, utterances: [preview])
+
+        #expect(throws: AudioRetentionControllerError.recordingPersistenceFailed) {
+            try fixture.controller(
+                fileSystem: FailingAudioRetentionFileSystem(failure: .permissions)
+            ).finalize(
+                meeting: processing,
+                utterances: fixture.utterances,
+                audio: summary
+            )
+        }
+
+        let preserved = try fixture.store.load(fixture.meeting.id)
+        #expect(preserved.meeting.transcriptionState == .processing)
+        #expect(preserved.utterances == fixture.utterances)
+        #expect(summary.tracks.allSatisfy {
+            FileManager.default.fileExists(atPath: $0.fileURL.path)
+        })
+    }
+
+    @Test
+    func firstAttemptFinalTranscriptPersistsBeforeAudioValidation() throws {
+        let fixture = try AudioRetentionFixture()
+        let summary = try fixture.makeAudio()
+        let invalidSummary = MeetingAudioCaptureSummary(
+            origin: summary.origin,
+            originHostTimestamp: summary.originHostTimestamp,
+            tracks: summary.tracks,
+            chunks: [],
+            discontinuities: summary.discontinuities,
+            failures: summary.failures
+        )
+        let preview = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 10,
+            text: "Earlier live preview.",
+            baseSpeakerID: "you"
+        )
+        var processing = fixture.meeting
+        processing.transcriptionState = .processing
+        processing.transcriptionAttemptCount = 1
+        try fixture.store.save(processing, utterances: [preview])
+
+        #expect(throws: AudioRetentionControllerError.invalidTemporaryAudio) {
+            try fixture.controller().finalize(
+                meeting: processing,
+                utterances: fixture.utterances,
+                audio: invalidSummary
+            )
+        }
+
+        let preserved = try fixture.store.load(fixture.meeting.id)
+        #expect(preserved.meeting.transcriptionState == .processing)
+        #expect(preserved.utterances == fixture.utterances)
+    }
+
+    @Test
     func retryArchiveFailureRestoresPriorDurableMeetingSnapshot() throws {
         let fixture = try AudioRetentionFixture()
         let controller = fixture.controller()
@@ -352,13 +423,22 @@ struct AudioRetentionControllerTests {
 
         let deleteFailure = FailingAudioRetentionFileSystem(failure: .deleteRemoval)
         let deleteFailingController = fixture.controller(fileSystem: deleteFailure)
-        let deleted = try deleteFailingController.deleteRecording(
+        #expect(throws: AudioRetentionControllerError.deleteFailed) {
+            try deleteFailingController.deleteRecording(
+                for: fixture.meeting.id,
+                confirmed: true
+            )
+        }
+        let pendingDeletion = try fixture.store.load(fixture.meeting.id).meeting
+        #expect(pendingDeletion.audioRetentionState == .deleted)
+        #expect(deleteFailingController.hasInterruptedDeletion(for: fixture.meeting.id))
+        #expect(deleteFailingController.hasDeletableRecording(for: fixture.meeting.id))
+
+        let deleted = try controller.deleteRecording(
             for: fixture.meeting.id,
             confirmed: true
         )
-        #expect(deleted.audioRetentionState == .deleted)
-        #expect(deleteFailingController.hasInterruptedDeletion(for: fixture.meeting.id))
-        _ = controller.reconcileInterruptedDeletions()
+
         #expect(deleted.retainedAudio == nil)
         #expect(!FileManager.default.fileExists(atPath: fixture.recordingURL.path))
         for url in [microphoneURL, manifestURL, backupURL, recoveryURL, wavURL] {
@@ -366,6 +446,7 @@ struct AudioRetentionControllerTests {
         }
         #expect(FileManager.default.fileExists(atPath: unrelatedURL.path))
         #expect(try fixture.store.load(fixture.meeting.id).meeting.retainedAudio == nil)
+        #expect(!controller.hasDeletableRecording(for: fixture.meeting.id))
         #expect(FileManager.default.fileExists(atPath: exportURL.path))
     }
 
