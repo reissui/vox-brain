@@ -10,6 +10,12 @@ Meetings and Voice Notes use the same local recording and transcription
 pipeline, but they have separate top-level workspaces and saved lists in
 Brain.app.
 
+Recordings saved before Brain stored an explicit meeting/voice-note type are
+migrated conservatively. An unrenamed **Voice note** stays in Voice Notes. A
+genuinely ambiguous older recording stays in Meetings with a **Choose section**
+marker; open it to keep it in Meetings or move it to Voice Notes. Any recording
+can also be moved between the two sections later from its detail actions.
+
 ```text
 Brain.app Meeting or Voice Note capture
   → local VoxType transcription

@@ -58,6 +58,7 @@ struct MeetingDetailViewModel: Equatable, Sendable {
     let state: MeetingDetailLoadState
     let meetingID: UUID?
     let isVoiceNote: Bool
+    let recordingKindNeedsReview: Bool
     let title: String
     let dateText: String
     let durationText: String
@@ -185,6 +186,7 @@ final class SystemMeetingClipboard: MeetingClipboardWriting {
 
 enum MeetingDetailAction: Equatable, Sendable {
     case saveTitle(String)
+    case setRecordingKind(MeetingRecordingKind)
     case selectTab(MeetingDetailTab)
     case renameSpeaker(id: String, name: String)
     case mergeSpeakers(sourceIDs: Set<String>, into: String)
@@ -315,6 +317,7 @@ final class MeetingDetailController {
             state: state,
             meetingID: meeting?.id,
             isVoiceNote: (meeting?.recordingKind ?? lastKnownRecordingKind) == .voiceNote,
+            recordingKindNeedsReview: meeting?.recordingKindNeedsReview ?? false,
             title: meeting?.title ?? "Meeting",
             dateText: meeting.map { Self.dateFormatter.string(from: $0.startedAt) } ?? "",
             durationText: meeting.map {
@@ -436,6 +439,8 @@ final class MeetingDetailController {
         switch action {
         case .saveTitle(let title):
             saveTitle(title)
+        case .setRecordingKind(let kind):
+            setRecordingKind(kind)
         case .selectTab(let tab):
             selectedTab = tab
         case .renameSpeaker(let id, let name):
@@ -529,6 +534,25 @@ final class MeetingDetailController {
         } catch {
             errorMessage = Self.bounded(error)
             titleDraft = self.meeting?.title ?? ""
+        }
+    }
+
+    private func setRecordingKind(_ recordingKind: MeetingRecordingKind) {
+        guard var meeting else { return }
+        guard meeting.recordingKind != recordingKind || meeting.recordingKindNeedsReview else {
+            return
+        }
+        let previousMeeting = meeting
+        meeting.recordingKind = recordingKind
+        meeting.recordingKindNeedsReview = false
+        do {
+            try store.save(meeting, utterances: utterances)
+            self.meeting = meeting
+            lastKnownRecordingKind = recordingKind
+            errorMessage = nil
+        } catch {
+            self.meeting = previousMeeting
+            errorMessage = "The recording section was not changed: \(Self.bounded(error))"
         }
     }
 
@@ -855,6 +879,16 @@ struct MeetingDetailView: View {
                 Spacer()
                 Menu(model.isVoiceNote ? "Voice note actions" : "Meeting actions", systemImage: "ellipsis.circle") {
                     Button(
+                        model.isVoiceNote ? "Move to Meetings" : "Move to Voice Notes",
+                        systemImage: "arrow.left.arrow.right"
+                    ) {
+                        Task {
+                            await controller.perform(.setRecordingKind(
+                                model.isVoiceNote ? .meeting : .voiceNote
+                            ))
+                        }
+                    }
+                    Button(
                         model.isVoiceNote ? "Delete Local Voice Note" : "Delete Local Meeting",
                         systemImage: "trash",
                         role: .destructive
@@ -871,6 +905,27 @@ struct MeetingDetailView: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+            if model.recordingKindNeedsReview {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Choose a section for this older recording", systemImage: "questionmark.folder")
+                        .font(.callout.weight(.semibold))
+                    Text("Brain kept it in Meetings because older recordings did not store whether they were a meeting or a voice note.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button("Keep in Meetings") {
+                            Task { await controller.perform(.setRecordingKind(.meeting)) }
+                        }
+                        Button("Move to Voice Notes") {
+                            Task { await controller.perform(.setRecordingKind(.voiceNote)) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityElement(children: .combine)
+            }
             HStack(spacing: 8) {
                 ForEach(model.badges) { badge in
                     Label(badge.title, systemImage: badge.systemImage)

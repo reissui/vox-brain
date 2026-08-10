@@ -264,6 +264,21 @@ struct AppIntegrationTests {
         #expect(meeting.state == .completed)
         #expect(graph.activity == .idle)
         #expect(graph.recordingIsland.presentation == .hidden)
+
+        recorder.suspendStop = true
+        await graph.startVoiceNote()
+        #expect(graph.activity == .dictation(
+            label: "Recording voice note",
+            startedAt: meeting.currentMeeting?.startedAt ?? .distantPast
+        ))
+        let stoppingVoiceNote = Task { await meeting.stop() }
+        await recorder.waitUntilStopSuspends()
+        #expect(meeting.state == .finalizing)
+        #expect(graph.activity == .transcribing("Finalizing voice note"))
+        recorder.releaseStop()
+        await stoppingVoiceNote.value
+        #expect(meeting.state == .completed)
+        #expect(graph.activity == .idle)
     }
 
     @Test

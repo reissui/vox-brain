@@ -571,6 +571,42 @@ struct MeetingAudioCaptureTests {
     }
 
     @Test
+    func staleConfigurationNotificationDoesNotResetARecoveredEngine() async throws {
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 48_000,
+            channels: 2
+        ))
+        let engine = RecordingMicrophoneAudioEngine(format: format)
+        let source = AVAudioEngineMeetingAudioSource(
+            selection: .systemDefault,
+            inventory: FixedMicrophoneInventory(devices: [
+                MeetingMicrophoneDevice(
+                    id: "default-microphone",
+                    name: "Default microphone",
+                    coreAudioID: 42,
+                    isSystemDefault: true
+                ),
+            ], defaultDeviceUID: "default-microphone"),
+            engine: engine,
+            authorizationStatus: { .authorized }
+        )
+        try await source.start { _ in }
+
+        // The notification scheduler observes a stale stopped state, but by
+        // the time its task runs another recovery has made the engine healthy.
+        engine.postConfigurationChange(
+            finalRunningState: true,
+            isRunningReadOverrides: [false]
+        )
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(engine.startCount == 1)
+        #expect(engine.stopCount == 0)
+        #expect(engine.isRunning)
+        await source.stop()
+    }
+
+    @Test
     func pinnedSelectionPersistsAndDoesNotFallBackWhenDeviceDisappears() throws {
         let suite = "MeetingAudioCaptureTests.Selection.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
@@ -826,7 +862,14 @@ private final class RecordingMicrophoneAudioEngine: MeetingMicrophoneAudioEngine
     private(set) var removeTapCount = 0
     private(set) var stopCount = 0
     private(set) var startCount = 0
-    private(set) var isRunning = false
+    private var runningState = false
+    private var isRunningReadOverrides: [Bool] = []
+    var isRunning: Bool {
+        if !isRunningReadOverrides.isEmpty {
+            return isRunningReadOverrides.removeFirst()
+        }
+        return runningState
+    }
     private(set) var didSelectBeforeInstallingTap = false
     private var transientStartFailureCount: Int
 
@@ -868,10 +911,10 @@ private final class RecordingMicrophoneAudioEngine: MeetingMicrophoneAudioEngine
             transientStartFailureCount -= 1
             throw NativeMeetingAudioSourceError.startFailed
         }
-        isRunning = true
+        runningState = true
     }
     func stop() {
-        isRunning = false
+        runningState = false
         stopCount += 1
     }
 
@@ -880,7 +923,19 @@ private final class RecordingMicrophoneAudioEngine: MeetingMicrophoneAudioEngine
     }
 
     func interruptForConfigurationChange() {
-        isRunning = false
+        runningState = false
+        NotificationCenter.default.post(
+            name: .AVAudioEngineConfigurationChange,
+            object: notificationObject
+        )
+    }
+
+    func postConfigurationChange(
+        finalRunningState: Bool,
+        isRunningReadOverrides: [Bool]
+    ) {
+        runningState = finalRunningState
+        self.isRunningReadOverrides = isRunningReadOverrides
         NotificationCenter.default.post(
             name: .AVAudioEngineConfigurationChange,
             object: notificationObject

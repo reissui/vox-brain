@@ -1238,6 +1238,7 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
         }) else { return }
         do {
             try ensureSessionIsActive(generation)
+            guard !engineLifecycleLock.withLock({ engine.isRunning }) else { return }
             resetEngineGraph()
             try await startEngineWithRetries(generation: generation)
             try ensureSessionIsActive(generation)

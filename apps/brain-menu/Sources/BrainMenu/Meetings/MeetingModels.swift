@@ -72,6 +72,7 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     var id: UUID
     var title: String
     var recordingKind: MeetingRecordingKind
+    var recordingKindNeedsReview: Bool
     var titleSource: MeetingTitleSource
     var detectedApplication: String?
     var startedAt: Date
@@ -95,6 +96,7 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         id: UUID = UUID(),
         title: String,
         recordingKind: MeetingRecordingKind = .meeting,
+        recordingKindNeedsReview: Bool = false,
         titleSource: MeetingTitleSource? = nil,
         detectedApplication: String? = nil,
         startedAt: Date,
@@ -113,6 +115,7 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         self.id = id
         self.title = title
         self.recordingKind = recordingKind
+        self.recordingKindNeedsReview = recordingKindNeedsReview
         self.titleSource = titleSource ?? Self.inferredTitleSource(for: title)
         self.detectedApplication = detectedApplication
         self.startedAt = startedAt
@@ -134,6 +137,7 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         case id
         case title
         case recordingKind
+        case recordingKindNeedsReview
         case titleSource
         case detectedApplication
         case startedAt
@@ -159,17 +163,23 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
             String.self,
             forKey: .detectedApplication
         )
+        let persistedRecordingKind = try container.decodeIfPresent(
+            MeetingRecordingKind.self,
+            forKey: .recordingKind
+        )
+        let legacyMigration = Self.legacyRecordingKindMigration(
+            title: title,
+            titleSource: titleSource,
+            detectedApplication: detectedApplication
+        )
         self.init(
             id: try container.decode(UUID.self, forKey: .id),
             title: title,
-            recordingKind: try container.decodeIfPresent(
-                MeetingRecordingKind.self,
-                forKey: .recordingKind
-            ) ?? Self.inferredLegacyRecordingKind(
-                title: title,
-                titleSource: titleSource,
-                detectedApplication: detectedApplication
-            ),
+            recordingKind: persistedRecordingKind ?? legacyMigration.kind,
+            recordingKindNeedsReview: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .recordingKindNeedsReview
+            ) ?? (persistedRecordingKind == nil && legacyMigration.needsReview),
             titleSource: titleSource,
             detectedApplication: detectedApplication,
             startedAt: try container.decode(Date.self, forKey: .startedAt),
@@ -208,16 +218,23 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
             : .manual
     }
 
-    private static func inferredLegacyRecordingKind(
+    private static func legacyRecordingKindMigration(
         title: String,
         titleSource: MeetingTitleSource,
         detectedApplication: String?
-    ) -> MeetingRecordingKind {
-        guard titleSource == .manual, detectedApplication == nil else { return .meeting }
+    ) -> (kind: MeetingRecordingKind, needsReview: Bool) {
+        guard titleSource == .manual, detectedApplication == nil else {
+            return (.meeting, false)
+        }
         let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        return normalized.caseInsensitiveCompare("Voice note") == .orderedSame
-            ? .voiceNote
-            : .meeting
+        if normalized.caseInsensitiveCompare("Voice note") == .orderedSame {
+            return (.voiceNote, false)
+        }
+
+        // Before recordingKind existed, a manually started meeting and a
+        // renamed voice note had identical metadata. Keep ambiguous records in
+        // Meetings and surface an explicit section choice instead of guessing.
+        return (.meeting, true)
     }
 }
 

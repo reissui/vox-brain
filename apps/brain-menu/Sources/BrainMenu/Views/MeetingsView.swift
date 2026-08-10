@@ -17,6 +17,7 @@ enum MeetingBadgeKind: String, CaseIterable, Equatable, Sendable {
     case analysis
     case audio
     case upload
+    case classification
     case corrupt
 }
 
@@ -296,7 +297,7 @@ final class MeetingsController {
     }
 
     static func badges(for meeting: MeetingRecord) -> [MeetingStatusBadge] {
-        [
+        var badges = [
             MeetingStatusBadge(
                 kind: .recording,
                 title: lifecycleTitle(meeting.lifecycleState),
@@ -323,6 +324,14 @@ final class MeetingsController {
                 systemImage: uploadSymbol(meeting.uploadState)
             ),
         ]
+        if meeting.recordingKindNeedsReview {
+            badges.append(MeetingStatusBadge(
+                kind: .classification,
+                title: "Choose section",
+                systemImage: "questionmark.folder"
+            ))
+        }
+        return badges
     }
 
     nonisolated static func durationText(from start: Date, to end: Date) -> String {

@@ -164,10 +164,14 @@ final class BrainAppControllerGraph {
         }
         switch meeting.state {
         case .finalizing:
-            return .transcribing("Finalizing meeting")
+            return .transcribing(
+                meeting.currentMeeting?.recordingKind == .voiceNote
+                    ? "Finalizing voice note"
+                    : "Finalizing meeting"
+            )
         case .starting, .recording, .paused, .stopSuggested:
             if let startedAt = meeting.currentMeeting?.startedAt {
-                if meeting.currentMeeting?.title == "Voice note" {
+                if meeting.currentMeeting?.recordingKind == .voiceNote {
                     return .dictation(
                         label: meeting.state == .paused
                             ? "Voice note paused"
