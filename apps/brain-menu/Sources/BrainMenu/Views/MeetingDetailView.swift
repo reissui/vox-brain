@@ -213,10 +213,11 @@ struct FileMeetingLocalAudioChecker: MeetingLocalAudioChecking {
     }
 
     func hasLocalAudio(for meeting: MeetingRecord) -> Bool {
-        guard meeting.retainedAudio != nil else { return false }
+        guard let metadata = meeting.retainedAudio,
+              AudioRetentionController.supports(metadata) else { return false }
         let url = rootURL
             .appendingPathComponent(meeting.id.uuidString, isDirectory: true)
-            .appendingPathComponent(AudioRetentionController.retainedFilename)
+            .appendingPathComponent(metadata.filename)
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else {
             return false
         }
@@ -1471,7 +1472,10 @@ struct MeetingDetailView: View {
 
     private func exportAudio() {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "\(controller.titleDraft).caf"
+        let pathExtension = controller.meeting?.retainedAudio.map {
+            URL(fileURLWithPath: $0.filename).pathExtension
+        } ?? "m4a"
+        panel.nameFieldStringValue = "\(controller.titleDraft).\(pathExtension)"
         panel.allowedContentTypes = [.audio]
         guard panel.runModal() == .OK else { return }
         Task { await controller.perform(.exportAudio(panel.url)) }

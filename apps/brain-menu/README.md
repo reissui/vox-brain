@@ -166,9 +166,9 @@ The included VoxType login item requests its own macOS permissions when the
 speech engine first needs them; Brain cannot grant those permissions on the
 user's behalf.
 
-Local and remote modes always keep Meeting and Voice Note audio on the recording
-Mac until the user explicitly deletes it. Only finalized transcript text can
-enter the configured Brain vault.
+Local and remote modes always keep compact AAC Meeting and Voice Note audio on
+the recording Mac until the user explicitly deletes it. Only finalized
+transcript text can enter the configured Brain vault.
 
 ## Development verification
 

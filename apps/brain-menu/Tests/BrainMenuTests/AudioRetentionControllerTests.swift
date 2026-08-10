@@ -65,18 +65,20 @@ struct AudioRetentionControllerTests {
         }
         #expect(FileManager.default.fileExists(atPath: recordingFixture.manifestURL.path))
         #expect(!FileManager.default.fileExists(atPath: recordingFixture.recordingURL.path))
-        #expect(try recordingFixture.store.load(
-            recordingFixture.meeting.id
-        ).meeting.retainedAudio == nil)
+        let preserved = try recordingFixture.store.load(recordingFixture.meeting.id)
+        #expect(preserved.meeting.transcriptionState == .processing)
+        #expect(preserved.meeting.retainedAudio == nil)
+        #expect(preserved.utterances == recordingFixture.utterances)
     }
 
     @Test
-    func writesVerifiedPrivateCAFWithMicrophoneThenSystemChannels() throws {
+    func writesCompactPrivateM4AWithMicrophoneThenSystemChannels() throws {
         let fixture = try AudioRetentionFixture()
         let controller = fixture.controller()
+        let frameCount = MeetingAudioWriter.sampleRate
         let summary = try fixture.makeAudio(
-            microphone: [Float](repeating: 0.25, count: 160),
-            system: [Float](repeating: -0.5, count: 160)
+            microphone: [Float](repeating: 0.25, count: frameCount),
+            system: [Float](repeating: -0.5, count: frameCount)
         )
 
         let completed = try controller.finalize(
@@ -89,8 +91,9 @@ struct AudioRetentionControllerTests {
         #expect(metadata.filename == AudioRetentionController.retainedFilename)
         #expect(metadata.format == AudioRetentionController.retainedFormat)
         #expect(metadata.channelCount == 2)
-        #expect(metadata.durationMilliseconds == 10)
+        #expect(metadata.durationMilliseconds == 1_000)
         #expect(metadata.sizeBytes > 0)
+        #expect(metadata.sizeBytes < Int64(frameCount * 2 * MemoryLayout<Float>.size))
         #expect(try permissions(of: fixture.recordingURL) == 0o600)
         #expect(try permissions(of: fixture.meetingDirectory) == 0o700)
         #expect(summary.tracks.allSatisfy {
@@ -108,24 +111,24 @@ struct AudioRetentionControllerTests {
         ].sorted())
         #expect(try fixture.store.load(fixture.meeting.id).meeting == completed)
 
-        let caf = try AVAudioFile(
+        let recording = try AVAudioFile(
             forReading: fixture.recordingURL,
             commonFormat: .pcmFormatFloat32,
             interleaved: false
         )
-        #expect(caf.fileFormat.channelCount == 2)
-        #expect(Int(caf.fileFormat.sampleRate.rounded()) == MeetingAudioWriter.sampleRate)
-        #expect(caf.length == 160)
+        #expect(recording.fileFormat.streamDescription.pointee.mFormatID == kAudioFormatMPEG4AAC)
+        #expect(recording.fileFormat.channelCount == 2)
+        #expect(Int(recording.fileFormat.sampleRate.rounded()) == MeetingAudioWriter.sampleRate)
+        #expect(recording.length == AVAudioFramePosition(frameCount))
         let buffer = try #require(AVAudioPCMBuffer(
-            pcmFormat: caf.processingFormat,
-            frameCapacity: AVAudioFrameCount(caf.length)
+            pcmFormat: recording.processingFormat,
+            frameCapacity: AVAudioFrameCount(recording.length)
         ))
-        try caf.read(into: buffer)
+        try recording.read(into: buffer)
         let channels = try #require(buffer.floatChannelData)
-        #expect(abs(channels[AudioRetentionController.microphoneChannel - 1][0] - 0.25) < 0.000_01)
-        #expect(abs(channels[AudioRetentionController.systemAudioChannel - 1][0] + 0.5) < 0.000_01)
-        #expect(abs(channels[0][159] - 0.25) < 0.000_01)
-        #expect(abs(channels[1][159] + 0.5) < 0.000_01)
+        let midpoint = frameCount / 2
+        #expect(abs(channels[AudioRetentionController.microphoneChannel - 1][midpoint] - 0.25) < 0.05)
+        #expect(abs(channels[AudioRetentionController.systemAudioChannel - 1][midpoint] + 0.5) < 0.05)
     }
 
     @Test
@@ -178,7 +181,7 @@ struct AudioRetentionControllerTests {
 
         let cancelled = try controller.exportRecording(for: fixture.meeting.id, to: nil)
         #expect(cancelled == nil)
-        let exportURL = fixture.rootURL.appendingPathComponent("Selected export.caf")
+        let exportURL = fixture.rootURL.appendingPathComponent("Selected export.m4a")
         #expect(try controller.exportRecording(
             for: fixture.meeting.id,
             to: exportURL
@@ -203,6 +206,32 @@ struct AudioRetentionControllerTests {
         #expect(FileManager.default.fileExists(atPath: fixture.recordingURL.path))
         #expect(try fixture.store.load(fixture.meeting.id).meeting.retainedAudio != nil)
 
+        let microphoneURL = fixture.meetingDirectory.appendingPathComponent(
+            "microphone.f32le.pcm"
+        )
+        let manifestURL = fixture.meetingDirectory.appendingPathComponent(
+            MeetingAudioWriter.manifestFilename
+        )
+        let backupURL = fixture.meetingDirectory.appendingPathComponent(
+            ".recording.\(UUID().uuidString).backup"
+        )
+        let recoveryURL = fixture.meetingDirectory.appendingPathComponent(
+            ".recovery-\(UUID().uuidString)-microphone.pcm"
+        )
+        let transcriptionDirectory = fixture.meetingDirectory.appendingPathComponent(
+            ".transcription",
+            isDirectory: true
+        )
+        let wavURL = transcriptionDirectory.appendingPathComponent("final-microphone-0.wav")
+        let unrelatedURL = transcriptionDirectory.appendingPathComponent("keep.txt")
+        try FileManager.default.createDirectory(
+            at: transcriptionDirectory,
+            withIntermediateDirectories: false
+        )
+        for url in [microphoneURL, manifestURL, backupURL, recoveryURL, wavURL, unrelatedURL] {
+            try Data("private".utf8).write(to: url)
+        }
+
         let deleteFailure = FailingAudioRetentionFileSystem(failure: .deleteRemoval)
         let deleteFailingController = fixture.controller(fileSystem: deleteFailure)
         #expect(throws: AudioRetentionControllerError.deleteFailed) {
@@ -214,6 +243,10 @@ struct AudioRetentionControllerTests {
         let deleted = try controller.deleteRecording(for: fixture.meeting.id, confirmed: true)
         #expect(deleted.retainedAudio == nil)
         #expect(!FileManager.default.fileExists(atPath: fixture.recordingURL.path))
+        for url in [microphoneURL, manifestURL, backupURL, recoveryURL, wavURL] {
+            #expect(!FileManager.default.fileExists(atPath: url.path))
+        }
+        #expect(FileManager.default.fileExists(atPath: unrelatedURL.path))
         #expect(try fixture.store.load(fixture.meeting.id).meeting.retainedAudio == nil)
         #expect(FileManager.default.fileExists(atPath: exportURL.path))
     }
@@ -382,6 +415,14 @@ private final class FailingAudioRetentionFileSystem: AudioRetentionFileSystem, @
         try base.attributes(at: url)
     }
 
+    func contentsOfDirectory(at url: URL) throws -> [URL] {
+        try base.contentsOfDirectory(at: url)
+    }
+
+    func createOwnerOnlyDirectory(at url: URL) throws {
+        try base.createOwnerOnlyDirectory(at: url)
+    }
+
     func fileExists(at url: URL) -> Bool {
         base.fileExists(at: url)
     }
@@ -421,6 +462,14 @@ private final class SelectiveCleanupFailureAudioRetentionFileSystem:
 
     func attributes(at url: URL) throws -> [FileAttributeKey: Any] {
         try base.attributes(at: url)
+    }
+
+    func contentsOfDirectory(at url: URL) throws -> [URL] {
+        try base.contentsOfDirectory(at: url)
+    }
+
+    func createOwnerOnlyDirectory(at url: URL) throws {
+        try base.createOwnerOnlyDirectory(at: url)
     }
 
     func fileExists(at url: URL) -> Bool {

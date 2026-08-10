@@ -370,7 +370,7 @@ final class MeetingStore: @unchecked Sendable {
         return hasValidRawCapture(
             in: directory,
             fileManager: fileManager
-        ) || hasValidRetainedCAF(
+        ) || hasValidRetainedAudio(
             meeting: meeting,
             in: directory,
             fileManager: fileManager
@@ -433,15 +433,13 @@ final class MeetingStore: @unchecked Sendable {
         }
     }
 
-    private static func hasValidRetainedCAF(
+    private static func hasValidRetainedAudio(
         meeting: MeetingRecord,
         in directory: URL,
         fileManager: FileManager
     ) -> Bool {
         guard let metadata = meeting.retainedAudio,
-              metadata.filename == AudioRetentionController.retainedFilename,
-              metadata.format == AudioRetentionController.retainedFormat,
-              metadata.channelCount == AudioRetentionController.channelCount else {
+              AudioRetentionController.supports(metadata) else {
             return false
         }
         let url = directory.appendingPathComponent(metadata.filename).standardizedFileURL

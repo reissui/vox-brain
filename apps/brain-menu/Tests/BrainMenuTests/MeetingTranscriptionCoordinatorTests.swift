@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Testing
 @testable import BrainMenu
@@ -350,14 +351,13 @@ struct MeetingTranscriptionCoordinatorTests {
             text: "[Transcript unavailable for this audio span.]",
             baseSpeakerID: "you"
         )
-        let retained = try fixture.retention.finalize(
+        let current = try fixture.retention.finalize(
             meeting: fixture.meeting,
             utterances: [placeholder],
             audio: capture
         )
-        let retainedURL = fixture.meetingDirectory.appendingPathComponent(
-            AudioRetentionController.retainedFilename
-        )
+        let retained = try fixture.replaceWithLegacyCAF(current)
+        let retainedURL = fixture.meetingDirectory.appendingPathComponent("recording.caf")
         let originalCAF = try Data(contentsOf: retainedURL)
         try fixture.removeTranscriptionFields()
 
@@ -385,16 +385,21 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(completed.transcriptionAttemptCount == 2)
         #expect(stored.meeting == completed)
         #expect(!stored.utterances.isEmpty)
-        #expect(FileManager.default.fileExists(atPath: retainedURL.path))
+        #expect(!FileManager.default.fileExists(atPath: retainedURL.path))
+        #expect(FileManager.default.fileExists(
+            atPath: fixture.meetingDirectory
+                .appendingPathComponent(AudioRetentionController.retainedFilename).path
+        ))
     }
 
     @Test
-    func committedTranscriptStillSchedulesUploadWhenStrictCAFStepFails() async throws {
+    func archiveFailureKeepsTranscriptAndSourceAudioRetryable() async throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()
+        let rawURLs = fixture.rawURLs(for: capture)
         let retention = AudioRetentionController(
             store: fixture.store,
-            fileSystem: CoordinatorCAFWriteFailureFileSystem()
+            fileSystem: CoordinatorRecordingWriteFailureFileSystem()
         )
         var scheduledUploads: [UUID] = []
         let client = CoordinatorSuccessClient()
@@ -405,17 +410,24 @@ struct MeetingTranscriptionCoordinatorTests {
         )
         let processing = try coordinator.stage(meeting: fixture.meeting, capture: capture)
 
-        let completed = await coordinator.complete(
+        let failed = await coordinator.complete(
             meeting: processing,
             capture: capture,
             transcript: try fixture.transcript(client: client, capture: capture)
         )
         let stored = try fixture.store.load(fixture.meeting.id)
 
-        #expect(completed.transcriptionState == .completed)
-        #expect(stored.meeting.transcriptionState == .completed)
+        #expect(failed.transcriptionState == .failed)
+        #expect(stored.meeting.transcriptionState == .failed)
+        #expect(stored.meeting.retainedAudio == nil)
         #expect(!stored.utterances.isEmpty)
-        #expect(scheduledUploads == [fixture.meeting.id])
+        #expect(rawURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        #expect(scheduledUploads.isEmpty)
+
+        let completed = try await fixture.coordinator(client: CoordinatorSuccessClient())
+            .retry(meetingID: fixture.meeting.id)
+        #expect(completed.transcriptionState == .completed)
+        #expect(completed.retainedAudio != nil)
     }
 
     @Test
@@ -466,17 +478,22 @@ struct MeetingTranscriptionCoordinatorTests {
     @Test
     func launchRecoverySchedulesUploadAfterCompletedTranscriptCrashWindow() async throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
-        var completed = fixture.meeting
-        completed.transcriptionState = .completed
-        completed.transcriptionAttemptCount = 1
-        completed.uploadState = .notUploaded
-        try fixture.store.save(completed, utterances: [try MeetingUtterance(
+        let capture = try fixture.makeCapture()
+        var candidate = fixture.meeting
+        candidate.transcriptionState = .completed
+        candidate.transcriptionAttemptCount = 1
+        candidate.uploadState = .notUploaded
+        let completed = try fixture.retention.finalize(
+            meeting: candidate,
+            utterances: [try MeetingUtterance(
             source: .microphone,
             startMilliseconds: 0,
             endMilliseconds: 500,
             text: "The transcript was already persisted.",
             baseSpeakerID: "you"
-        )])
+            )],
+            audio: capture
+        )
 
         var scheduledUploads: [UUID] = []
         let client = CoordinatorSuccessClient()
@@ -509,6 +526,35 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(stored.meeting.transcriptionErrorMessage?.contains("Retry") == true)
         #expect(stored.meeting.endedAt == processing.endedAt)
         #expect(await client.callCount == 0)
+    }
+
+    @Test
+    func launchReconciliationMakesIncompleteArchiveRetryable() throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        let capture = try fixture.makeCapture()
+        let rawURLs = fixture.rawURLs(for: capture)
+        var incomplete = fixture.meeting
+        incomplete.transcriptionState = .completed
+        incomplete.transcriptionAttemptCount = 1
+        incomplete.retainedAudio = nil
+        let transcript = [try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 1_000,
+            text: "The transcript committed before archival.",
+            baseSpeakerID: "you"
+        )]
+        try fixture.store.save(incomplete, utterances: transcript)
+
+        let reconciled = fixture.coordinator(client: CoordinatorSuccessClient())
+            .reconcileInterruptedJobs(at: incomplete.endedAt ?? incomplete.startedAt)
+        let stored = try fixture.store.load(incomplete.id)
+
+        #expect(reconciled.map(\.id) == [incomplete.id])
+        #expect(stored.meeting.transcriptionState == .failed)
+        #expect(stored.meeting.transcriptionErrorMessage?.contains("archived") == true)
+        #expect(stored.utterances == transcript)
+        #expect(rawURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
     }
 
     @Test
@@ -553,8 +599,6 @@ struct MeetingTranscriptionCoordinatorTests {
 
 private final class MeetingTranscriptionCoordinatorFixture {
     let rootURL: URL
-    let defaultsSuite: String
-    let defaults: UserDefaults
     let store: MeetingStore
     let retention: AudioRetentionController
     let meeting: MeetingRecord
@@ -572,12 +616,6 @@ private final class MeetingTranscriptionCoordinatorFixture {
             at: rootURL,
             withIntermediateDirectories: true
         )
-        defaultsSuite = "BrainMeetingTranscriptionCoordinatorTests.\(UUID().uuidString)"
-        guard let defaults = UserDefaults(suiteName: defaultsSuite) else {
-            throw CoordinatorFixtureError.defaultsUnavailable
-        }
-        self.defaults = defaults
-        defaults.removePersistentDomain(forName: defaultsSuite)
         store = MeetingStore(rootURL: rootURL)
         retention = AudioRetentionController(store: store)
         meeting = MeetingRecord(
@@ -594,7 +632,6 @@ private final class MeetingTranscriptionCoordinatorFixture {
     }
 
     deinit {
-        defaults.removePersistentDomain(forName: defaultsSuite)
         try? FileManager.default.removeItem(at: rootURL)
     }
 
@@ -680,6 +717,64 @@ private final class MeetingTranscriptionCoordinatorFixture {
                 MeetingAudioWriter.manifestFilename
             ))
         )
+    }
+
+    func replaceWithLegacyCAF(_ meeting: MeetingRecord) throws -> MeetingRecord {
+        let currentURL = meetingDirectory.appendingPathComponent(
+            AudioRetentionController.retainedFilename
+        )
+        let legacyURL = meetingDirectory.appendingPathComponent("recording.caf")
+        let input = try AVAudioFile(
+            forReading: currentURL,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: Double(MeetingAudioWriter.sampleRate),
+            channels: AVAudioChannelCount(AudioRetentionController.channelCount),
+            interleaved: false
+        ) else {
+            throw CoordinatorFixtureError.legacyConversionFailed
+        }
+        var settings = format.settings
+        settings.removeValue(forKey: AVLinearPCMIsNonInterleaved)
+        var output: AVAudioFile? = try AVAudioFile(
+            forWriting: legacyURL,
+            settings: settings,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        while input.framePosition < input.length {
+            let count = AVAudioFrameCount(min(Int64(8_192), input.length - input.framePosition))
+            guard let buffer = AVAudioPCMBuffer(
+                pcmFormat: input.processingFormat,
+                frameCapacity: count
+            ) else {
+                throw CoordinatorFixtureError.legacyConversionFailed
+            }
+            try input.read(into: buffer, frameCount: count)
+            try output?.write(from: buffer)
+        }
+        output = nil
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o600)],
+            ofItemAtPath: legacyURL.path
+        )
+        let attributes = try FileManager.default.attributesOfItem(atPath: legacyURL.path)
+        let size = try #require((attributes[.size] as? NSNumber)?.int64Value)
+        var legacy = meeting
+        legacy.retainedAudio = RetainedAudioMetadata(
+            filename: "recording.caf",
+            format: "CAF/Linear PCM",
+            sizeBytes: size,
+            durationMilliseconds: meeting.retainedAudio?.durationMilliseconds ?? 0,
+            channelCount: AudioRetentionController.channelCount
+        )
+        let utterances = try store.load(meeting.id).utterances
+        try store.save(legacy, utterances: utterances)
+        try FileManager.default.removeItem(at: currentURL)
+        return legacy
     }
 }
 
@@ -772,6 +867,14 @@ private final class CoordinatorCleanupFailureFileSystem:
         try base.attributes(at: url)
     }
 
+    func contentsOfDirectory(at url: URL) throws -> [URL] {
+        try base.contentsOfDirectory(at: url)
+    }
+
+    func createOwnerOnlyDirectory(at url: URL) throws {
+        try base.createOwnerOnlyDirectory(at: url)
+    }
+
     func fileExists(at url: URL) -> Bool {
         base.fileExists(at: url)
     }
@@ -796,7 +899,7 @@ private final class CoordinatorCleanupFailureFileSystem:
     }
 }
 
-private final class CoordinatorCAFWriteFailureFileSystem:
+private final class CoordinatorRecordingWriteFailureFileSystem:
     AudioRetentionFileSystem,
     @unchecked Sendable
 {
@@ -804,6 +907,14 @@ private final class CoordinatorCAFWriteFailureFileSystem:
 
     func attributes(at url: URL) throws -> [FileAttributeKey: Any] {
         try base.attributes(at: url)
+    }
+
+    func contentsOfDirectory(at url: URL) throws -> [URL] {
+        try base.contentsOfDirectory(at: url)
+    }
+
+    func createOwnerOnlyDirectory(at url: URL) throws {
+        try base.createOwnerOnlyDirectory(at: url)
     }
 
     func fileExists(at url: URL) -> Bool {
@@ -823,7 +934,7 @@ private final class CoordinatorCAFWriteFailureFileSystem:
     }
 
     func setOwnerOnlyPermissions(at url: URL) throws {
-        if url.pathExtension == "caf" {
+        if url.pathExtension == "m4a" {
             throw CoordinatorFixtureError.injectedCAFWriteFailure
         }
         try base.setOwnerOnlyPermissions(at: url)
@@ -831,7 +942,7 @@ private final class CoordinatorCAFWriteFailureFileSystem:
 }
 
 private enum CoordinatorFixtureError: Error {
-    case defaultsUnavailable
     case injectedCleanupFailure
     case injectedCAFWriteFailure
+    case legacyConversionFailed
 }

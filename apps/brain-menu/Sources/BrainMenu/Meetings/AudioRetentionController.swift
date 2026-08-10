@@ -12,6 +12,8 @@ extension MeetingStore: AudioRetentionMeetingStoring {}
 
 protocol AudioRetentionFileSystem {
     func attributes(at url: URL) throws -> [FileAttributeKey: Any]
+    func contentsOfDirectory(at url: URL) throws -> [URL]
+    func createOwnerOnlyDirectory(at url: URL) throws
     func fileExists(at url: URL) -> Bool
     func copyItem(at source: URL, to destination: URL) throws
     func moveItem(at source: URL, to destination: URL) throws
@@ -26,6 +28,21 @@ struct LocalAudioRetentionFileSystem: AudioRetentionFileSystem {
 
     func fileExists(at url: URL) -> Bool {
         FileManager.default.fileExists(atPath: url.path)
+    }
+
+    func contentsOfDirectory(at url: URL) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: nil
+        )
+    }
+
+    func createOwnerOnlyDirectory(at url: URL) throws {
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o700)],
+            ofItemAtPath: url.path
+        )
     }
 
     func copyItem(at source: URL, to destination: URL) throws {
@@ -97,12 +114,15 @@ enum AudioRetentionControllerError: Error, Equatable, LocalizedError, Sendable {
 /// capture or upload dependency: audio is read only from a meeting's private
 /// Application Support directory and is never represented by an API model.
 final class AudioRetentionController: @unchecked Sendable {
-    static let retainedFilename = "recording.caf"
-    static let retainedFormat = "CAF/Linear PCM"
+    static let retainedFilename = "recording.m4a"
+    static let retainedFormat = "M4A/AAC-LC"
     static let channelCount = 2
     static let microphoneChannel = 1
     static let systemAudioChannel = 2
 
+    private static let legacyRetainedFilename = "recording.caf"
+    private static let legacyRetainedFormat = "CAF/Linear PCM"
+    private static let retainedBitRate = 48_000
     private static let framesPerWrite = 8_192
 
     private let store: any AudioRetentionMeetingStoring
@@ -135,8 +155,10 @@ final class AudioRetentionController: @unchecked Sendable {
             throw AudioRetentionControllerError.invalidTemporaryAudio
         }
 
+        var archiving = meeting
+        archiving.transcriptionState = .processing
         do {
-            try store.save(meeting, utterances: utterances)
+            try store.save(archiving, utterances: utterances)
         } catch {
             throw AudioRetentionControllerError.transcriptPersistenceFailed
         }
@@ -222,24 +244,44 @@ final class AudioRetentionController: @unchecked Sendable {
             throw AudioRetentionControllerError.retainedAudioUnavailable
         }
         let source = try retainedAudioURL(for: stored.meeting)
-        let quarantine = source.deletingLastPathComponent().appendingPathComponent(
+        let directory = source.deletingLastPathComponent()
+        let quarantine = directory.appendingPathComponent(
             ".recording.\(UUID().uuidString).deleting",
-            isDirectory: false
+            isDirectory: true
         )
+        let artifacts: [URL]
+        do {
+            artifacts = try audioArtifacts(in: directory, retainedURL: source)
+            try fileSystem.createOwnerOnlyDirectory(at: quarantine)
+        } catch {
+            throw AudioRetentionControllerError.deleteFailed
+        }
+        let moves = artifacts.enumerated().map { index, artifact in
+            AudioArtifactMove(
+                original: artifact,
+                quarantined: quarantine.appendingPathComponent(
+                    "\(index)-\(artifact.lastPathComponent)",
+                    isDirectory: false
+                )
+            )
+        }
 
         var updated = stored.meeting
         updated.retainedAudio = nil
 
         do {
-            try fileSystem.moveItem(at: source, to: quarantine)
+            for move in moves {
+                try fileSystem.moveItem(at: move.original, to: move.quarantined)
+            }
         } catch {
+            restore(moves, quarantine: quarantine)
             throw AudioRetentionControllerError.deleteFailed
         }
 
         do {
             try store.save(updated, utterances: stored.utterances)
         } catch {
-            try? fileSystem.moveItem(at: quarantine, to: source)
+            restore(moves, quarantine: quarantine)
             throw AudioRetentionControllerError.deleteFailed
         }
 
@@ -247,10 +289,10 @@ final class AudioRetentionController: @unchecked Sendable {
             try fileSystem.removeItem(at: quarantine)
             return updated
         } catch {
-            // Restore both pieces when the destructive step fails. Even if the
-            // metadata rollback itself fails, the last audio copy is retained.
-            try? fileSystem.moveItem(at: quarantine, to: source)
-            try? store.save(stored.meeting, utterances: stored.utterances)
+            restore(moves, quarantine: quarantine)
+            if fileSystem.fileExists(at: source) {
+                try? store.save(stored.meeting, utterances: stored.utterances)
+            }
             throw AudioRetentionControllerError.deleteFailed
         }
     }
@@ -264,7 +306,7 @@ final class AudioRetentionController: @unchecked Sendable {
         let directory = store.directoryURL(for: meeting.id).standardizedFileURL
         let destination = directory.appendingPathComponent(Self.retainedFilename)
         let staged = directory.appendingPathComponent(
-            ".recording.\(UUID().uuidString).caf",
+            ".recording.\(UUID().uuidString).m4a",
             isDirectory: false
         )
         let backup = directory.appendingPathComponent(
@@ -274,7 +316,7 @@ final class AudioRetentionController: @unchecked Sendable {
 
         let metadata: RetainedAudioMetadata
         do {
-            metadata = try Self.writeAndVerifyCAF(
+            metadata = try Self.writeAndVerifyRecording(
                 audio,
                 validated: validated,
                 destination: staged,
@@ -314,17 +356,26 @@ final class AudioRetentionController: @unchecked Sendable {
         }
 
         if hadPriorRecording, fileSystem.fileExists(at: backup) {
-            // The new CAF and its metadata are already durable. Leaving an
+            // The new recording and its metadata are already durable. Leaving an
             // owner-only backup is safer than downgrading a completed
             // transcription when disposable-file cleanup fails.
             try? fileSystem.removeItem(at: backup)
+        }
+
+        if let priorMetadata = meeting.retainedAudio,
+           Self.supports(priorMetadata),
+           priorMetadata.filename != Self.retainedFilename {
+            let priorURL = directory.appendingPathComponent(priorMetadata.filename)
+            if fileSystem.fileExists(at: priorURL) {
+                try? fileSystem.removeItem(at: priorURL)
+            }
         }
 
         cleanupTemporaryAudio(validated)
         return updated
     }
 
-    /// Transcript and retained-CAF persistence have committed
+    /// Transcript and retained-audio persistence have committed
     /// before this runs. Cleanup is therefore best-effort: one failed deletion
     /// must not prevent the remaining disposable files from being removed or
     /// turn a durable transcript into a retryable transcription failure.
@@ -390,9 +441,7 @@ final class AudioRetentionController: @unchecked Sendable {
 
     private func retainedAudioURL(for meeting: MeetingRecord) throws -> URL {
         guard let metadata = meeting.retainedAudio,
-              metadata.filename == Self.retainedFilename,
-              metadata.format == Self.retainedFormat,
-              metadata.channelCount == Self.channelCount else {
+              Self.supports(metadata) else {
             throw AudioRetentionControllerError.retainedAudioUnavailable
         }
         let directory = store.directoryURL(for: meeting.id).standardizedFileURL
@@ -404,6 +453,97 @@ final class AudioRetentionController: @unchecked Sendable {
         return url
     }
 
+    static func supports(_ metadata: RetainedAudioMetadata) -> Bool {
+        guard metadata.channelCount == Self.channelCount else { return false }
+        return (metadata.filename, metadata.format) == (
+            Self.retainedFilename,
+            Self.retainedFormat
+        ) || (metadata.filename, metadata.format) == (
+            Self.legacyRetainedFilename,
+            Self.legacyRetainedFormat
+        )
+    }
+
+    private func audioArtifacts(in directory: URL, retainedURL: URL) throws -> [URL] {
+        let directory = directory.standardizedFileURL
+        let transcriptionDirectory = directory.appendingPathComponent(
+            ".transcription",
+            isDirectory: true
+        )
+        var artifacts: [URL] = []
+        for entry in try fileSystem.contentsOfDirectory(at: directory) {
+            let candidate = entry.standardizedFileURL
+            guard candidate.deletingLastPathComponent() == directory else {
+                throw AudioRetentionControllerError.deleteFailed
+            }
+            if Self.isTopLevelAudioArtifact(candidate.lastPathComponent) {
+                let type = try fileSystem.attributes(at: candidate)[.type] as? FileAttributeType
+                guard type == .typeRegular || (
+                    type == .typeDirectory
+                        && candidate.lastPathComponent.hasSuffix(".deleting")
+                ) else {
+                    throw AudioRetentionControllerError.deleteFailed
+                }
+                artifacts.append(candidate)
+            } else if candidate == transcriptionDirectory {
+                guard try fileSystem.attributes(at: candidate)[.type] as? FileAttributeType
+                        == .typeDirectory else {
+                    throw AudioRetentionControllerError.deleteFailed
+                }
+                for entry in try fileSystem.contentsOfDirectory(at: candidate) {
+                    let wav = entry.standardizedFileURL
+                    let name = wav.lastPathComponent
+                    guard wav.deletingLastPathComponent() == candidate else {
+                        throw AudioRetentionControllerError.deleteFailed
+                    }
+                    guard name.hasSuffix(".wav"),
+                          name.hasPrefix("preview-") || name.hasPrefix("final-") else {
+                        continue
+                    }
+                    guard try fileSystem.attributes(at: wav)[.type] as? FileAttributeType
+                            == .typeRegular else {
+                        throw AudioRetentionControllerError.deleteFailed
+                    }
+                    artifacts.append(wav)
+                }
+            }
+        }
+        guard artifacts.contains(retainedURL.standardizedFileURL) else {
+            throw AudioRetentionControllerError.deleteFailed
+        }
+        return artifacts.sorted { $0.path < $1.path }
+    }
+
+    private static func isTopLevelAudioArtifact(_ name: String) -> Bool {
+        if [
+            Self.retainedFilename,
+            Self.legacyRetainedFilename,
+            "microphone.f32le.pcm",
+            "system.f32le.pcm",
+            MeetingAudioWriter.manifestFilename,
+        ].contains(name) {
+            return true
+        }
+        if name.hasPrefix(".recording.") {
+            return [".backup", ".caf", ".m4a", ".deleting"].contains {
+                name.hasSuffix($0)
+            }
+        }
+        return name.hasPrefix(".recovery-")
+            && [".pcm", ".json"].contains { name.hasSuffix($0) }
+    }
+
+    private func restore(_ moves: [AudioArtifactMove], quarantine: URL) {
+        for move in moves.reversed()
+        where fileSystem.fileExists(at: move.quarantined)
+            && !fileSystem.fileExists(at: move.original) {
+            try? fileSystem.moveItem(at: move.quarantined, to: move.original)
+        }
+        if fileSystem.fileExists(at: quarantine) {
+            try? fileSystem.removeItem(at: quarantine)
+        }
+    }
+
     private func regularFileSize(at url: URL) throws -> Int64 {
         let attributes = try fileSystem.attributes(at: url)
         guard attributes[.type] as? FileAttributeType == .typeRegular,
@@ -413,7 +553,7 @@ final class AudioRetentionController: @unchecked Sendable {
         return size
     }
 
-    private static func writeAndVerifyCAF(
+    private static func writeAndVerifyRecording(
         _ summary: MeetingAudioCaptureSummary,
         validated: ValidatedTemporaryAudio,
         destination: URL,
@@ -433,8 +573,13 @@ final class AudioRetentionController: @unchecked Sendable {
             throw AudioRetentionControllerError.recordingPersistenceFailed
         }
 
-        var fileSettings = format.settings
-        fileSettings.removeValue(forKey: AVLinearPCMIsNonInterleaved)
+        let fileSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: Double(MeetingAudioWriter.sampleRate),
+            AVNumberOfChannelsKey: Self.channelCount,
+            AVEncoderBitRateKey: Self.retainedBitRate,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+        ]
         var output: AVAudioFile? = try AVAudioFile(
             forWriting: destination,
             settings: fileSettings,
@@ -498,7 +643,7 @@ final class AudioRetentionController: @unchecked Sendable {
             try output.write(from: buffer)
             outputStart = outputEnd
         }
-        // AVAudioFile finalizes its CAF header when released. Verify only after
+        // AVAudioFile finalizes its container when released. Verify only after
         // that point so a short or malformed file can never become retained.
         output = nil
 
@@ -507,6 +652,8 @@ final class AudioRetentionController: @unchecked Sendable {
         let verification = try AVAudioFile(forReading: destination)
         guard verification.fileFormat.channelCount == AVAudioChannelCount(Self.channelCount),
               Int(verification.fileFormat.sampleRate.rounded()) == MeetingAudioWriter.sampleRate,
+              verification.fileFormat.streamDescription.pointee.mFormatID
+                == kAudioFormatMPEG4AAC,
               verification.length == totalFrames,
               size > 0 else {
             throw AudioRetentionControllerError.recordingPersistenceFailed
@@ -571,4 +718,9 @@ private struct PreparedAudioChunk {
     let startFrame: Int64
     let endFrame: Int64
     let sourceFrameOffset: Int64
+}
+
+private struct AudioArtifactMove {
+    let original: URL
+    let quarantined: URL
 }

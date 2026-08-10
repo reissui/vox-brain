@@ -403,6 +403,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 results.append(retried)
             } else if meeting.transcriptionState == .completed,
                       meeting.transcriptionAttemptCount > 0,
+                      meeting.retainedAudio != nil,
                       meeting.uploadState == .notUploaded {
                 scheduleUpload(meeting.id)
             }
@@ -438,14 +439,21 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             ].contains(meeting.lifecycleState)
             let interruptedTranscript = [.pending, .processing]
                 .contains(meeting.transcriptionState)
+            let interruptedArchive = meeting.transcriptionState == .completed
+                && meeting.transcriptionAttemptCount > 0
+                && meeting.retainedAudio == nil
 
-            if interruptedCapture || interruptedTranscript {
+            if interruptedCapture || interruptedTranscript || interruptedArchive {
                 meeting.endedAt = meeting.endedAt ?? date
                 meeting.lifecycleState = interruptedCapture ? .failed : .completed
                 meeting.transcriptionState = .failed
-                meeting.transcriptionErrorMessage = interruptedCapture
-                    ? "Brain stopped before this recording finished. Its local audio was preserved; retry the transcript when ready."
-                    : "Brain stopped before this transcript finished. Retry it when ready."
+                meeting.transcriptionErrorMessage = if interruptedCapture {
+                    "Brain stopped before this recording finished. Its local audio was preserved; retry the transcript when ready."
+                } else if interruptedArchive {
+                    "Brain stopped before this recording was archived. Its transcript and source audio were preserved; retry when ready."
+                } else {
+                    "Brain stopped before this transcript finished. Retry it when ready."
+                }
                 meeting.analysisState = .notRequested
                 meeting.uploadState = .notUploaded
                 if (try? store.save(meeting, utterances: stored.utterances)) != nil {
@@ -453,6 +461,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 }
             } else if meeting.transcriptionState == .completed,
                       meeting.transcriptionAttemptCount > 0,
+                      meeting.retainedAudio != nil,
                       meeting.uploadState == .notUploaded {
                 scheduleUpload(meeting.id)
             }
@@ -557,7 +566,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             if let committed = try? store.load(meeting.id),
                committed.meeting.transcriptionAttemptCount
                 == meeting.transcriptionAttemptCount,
-               committed.meeting.transcriptionState == .completed {
+               committed.meeting.transcriptionState == .completed,
+               committed.meeting.retainedAudio != nil {
                 return MeetingTranscriptionPersistenceOutcome(
                     meeting: committed.meeting,
                     shouldScheduleUpload: true
@@ -581,7 +591,14 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         message: String,
         store: MeetingStore
     ) -> MeetingRecord {
-        guard isCurrentProcessingGeneration(meeting, store: store) else {
+        guard let current = try? store.load(meeting.id),
+              current.meeting.transcriptionAttemptCount
+                == meeting.transcriptionAttemptCount,
+              current.meeting.transcriptionState == .processing
+                || (
+                    current.meeting.transcriptionState == .completed
+                        && current.meeting.retainedAudio == nil
+                ) else {
             return currentRecord(for: meeting.id, fallback: meeting, store: store)
         }
         var failed = meeting
@@ -653,7 +670,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                     fileManager: fileManager
                 )
             } catch {
-                return try recoverCaptureFromRetainedCAF(
+                return try recoverCaptureFromRetainedAudio(
                     meeting: meeting,
                     directory: directory,
                     fileManager: fileManager
@@ -818,7 +835,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         return capture
     }
 
-    private nonisolated static func recoverCaptureFromRetainedCAF(
+    private nonisolated static func recoverCaptureFromRetainedAudio(
         meeting: MeetingRecord,
         directory: URL,
         fileManager: FileManager
@@ -832,9 +849,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
               ),
               directoryAttributes[.type] as? FileAttributeType == .typeDirectory,
               let metadata = meeting.retainedAudio,
-              metadata.filename == AudioRetentionController.retainedFilename,
-              metadata.format == AudioRetentionController.retainedFormat,
-              metadata.channelCount == AudioRetentionController.channelCount else {
+              AudioRetentionController.supports(metadata) else {
             throw MeetingTranscriptionCoordinatorError.unsafeAudioManifest
         }
 
