@@ -4,6 +4,7 @@ enum MeetingLifecycleState: String, Codable, CaseIterable, Sendable {
     case idle
     case startSuggested
     case starting
+    case sourceSelectionRequired
     case recording
     case paused
     case stopSuggested

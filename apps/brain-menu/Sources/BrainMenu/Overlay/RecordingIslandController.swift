@@ -60,6 +60,7 @@ struct RecordingIslandDictationPresentation: Equatable, Sendable {
 
 enum RecordingIslandMeetingPhase: String, Equatable, Sendable {
     case starting
+    case chooseMicrophone
     case recording
     case paused
     case stopSuggested
@@ -69,6 +70,7 @@ enum RecordingIslandMeetingPhase: String, Equatable, Sendable {
     var title: String {
         switch self {
         case .starting: "Starting recording"
+        case .chooseMicrophone: "Choose microphone"
         case .recording: "Recording"
         case .paused: "Paused"
         case .stopSuggested: "Has the meeting ended?"
@@ -184,6 +186,8 @@ struct RecordingIslandMeetingPresentation: Equatable, Sendable {
 
     var audioStatusText: String {
         switch phase {
+        case .chooseMicrophone:
+            return "Choose another microphone, then start again."
         case .paused:
             return "Audio capture paused."
         case .finalizing:
@@ -269,7 +273,7 @@ enum RecordingIslandPresentation: Equatable, Sendable {
             }
         case .meeting(let presentation):
             switch presentation.phase {
-            case .starting, .finalizing, .saved:
+            case .starting, .chooseMicrophone, .finalizing, .saved:
                 []
             case .recording:
                 [.pause, .stop]
@@ -316,6 +320,9 @@ enum RecordingIslandPresentation: Equatable, Sendable {
                 return presentation.isVoiceNote
                     ? "Voice note may be ready to finish."
                     : "Meeting may have ended."
+            }
+            if presentation.phase == .chooseMicrophone {
+                return "\(item) needs another microphone. Choose an available input, then start again."
             }
             return "\(item) \(presentation.phaseTitle.lowercased())."
         }
@@ -646,7 +653,7 @@ final class RecordingIslandController: NSObject, NSWindowDelegate {
     func selectMicrophone(_ selection: MeetingMicrophoneSelection) {
         guard case .meeting(let value) = presentation,
               let microphone = value.microphone,
-              [.recording, .paused, .stopSuggested].contains(value.phase),
+              [.chooseMicrophone, .recording, .paused, .stopSuggested].contains(value.phase),
               !microphone.switchState.isSwitching,
               selection != microphone.selectedPreference,
               microphone.contains(selection) else { return }
@@ -895,6 +902,7 @@ private extension RecordingIslandMeetingPhase {
     init?(_ lifecycle: MeetingLifecycleState) {
         switch lifecycle {
         case .starting: self = .starting
+        case .sourceSelectionRequired: self = .chooseMicrophone
         case .recording: self = .recording
         case .paused: self = .paused
         case .stopSuggested: self = .stopSuggested

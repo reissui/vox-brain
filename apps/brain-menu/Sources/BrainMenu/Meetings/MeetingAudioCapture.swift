@@ -613,7 +613,7 @@ final class MeetingMicrophoneReadiness: @unchecked Sendable {
     }
 }
 
-enum NativeMeetingAudioSourceError: Error, LocalizedError, Sendable {
+enum NativeMeetingAudioSourceError: Error, Equatable, LocalizedError, Sendable {
     case permissionDenied
     case unavailable
     case configurationFailed

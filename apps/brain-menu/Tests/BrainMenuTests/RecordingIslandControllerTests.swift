@@ -256,6 +256,32 @@ struct RecordingIslandControllerTests {
         )
         controller.selectMicrophone(.device(uid: "desk"))
         #expect(selections == [.device(uid: "desk"), .device(uid: "desk")])
+
+        var unavailable = ready
+        unavailable.activeDevice = nil
+        unavailable.selectedPreference = .device(uid: "disconnected")
+        unavailable.switchState = .failed(message: "Choose a different microphone.")
+        controller.updateMeeting(
+            .sourceSelectionRequired,
+            meeting: nil,
+            guidance: [.microphone: "Choose a different microphone, then start again."],
+            microphone: unavailable
+        )
+        guard case .meeting(let prompt) = controller.presentation else {
+            Issue.record("Expected the microphone selection prompt to remain visible")
+            return
+        }
+        #expect(prompt.phase == .chooseMicrophone)
+        #expect(prompt.audioStatusText == "Choose another microphone, then start again.")
+        #expect(prompt.guidance == "Choose a different microphone, then start again.")
+        #expect(controller.isVisible)
+
+        controller.selectMicrophone(.device(uid: "desk"))
+        #expect(selections == [
+            .device(uid: "desk"),
+            .device(uid: "desk"),
+            .device(uid: "desk"),
+        ])
     }
 
     @Test

@@ -218,6 +218,13 @@ struct OverviewView: View {
                     "Connecting microphone and computer audio.",
                     "mic"
                 ))
+            case .sourceSelectionRequired:
+                items.append(.active(
+                    "meeting-microphone",
+                    "Choose another microphone",
+                    "The selected input could not start. Use the microphone picker, then start again.",
+                    "mic.badge.xmark"
+                ))
             case .recording:
                 items.append(.active(
                     "meeting-recording",

@@ -104,9 +104,13 @@ extension MeetingController {
         switch state {
         case .starting, .recording, .paused, .stopSuggested, .finalizing:
             true
-        case .idle, .startSuggested, .completed, .failed:
+        case .idle, .startSuggested, .sourceSelectionRequired, .completed, .failed:
             false
         }
+    }
+
+    var shouldPresentRecordingIsland: Bool {
+        isCapturingAudio || state == .sourceSelectionRequired
     }
 }
 
@@ -184,7 +188,7 @@ final class BrainAppControllerGraph {
                     startedAt: startedAt
                 )
             }
-        case .idle, .startSuggested, .completed, .failed:
+        case .idle, .startSuggested, .sourceSelectionRequired, .completed, .failed:
             break
         }
         switch dictation.state {
@@ -362,7 +366,7 @@ final class BrainAppControllerGraph {
             if meeting.state == .completed { meeting.resetCompletedMeeting() }
             if meeting.state == .failed { meeting.resetFailedMeeting() }
             await meeting.startRecording(application: nil)
-        case .finalizing:
+        case .sourceSelectionRequired, .finalizing:
             return
         }
     }
@@ -455,7 +459,7 @@ final class BrainAppControllerGraph {
     }
 
     private func syncRecordingIsland() {
-        if meeting.isCapturingAudio {
+        if meeting.shouldPresentRecordingIsland {
             recordingIsland.updateMeeting(
                 meeting.state,
                 meeting: meeting.currentMeeting,
@@ -795,6 +799,30 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
     func start(_ request: MeetingRecordingRequest) async throws {
         guard writer == nil else { return }
         sessionGeneration &+= 1
+        let inventory = try microphoneInventory.snapshot()
+        let microphoneSelection = microphoneSelections.selection
+        let selectedMicrophone = activeMicrophone(
+            for: microphoneSelection,
+            inventory: inventory
+        )
+        do {
+            _ = try inventory.deviceID(for: microphoneSelection)
+        } catch {
+            let startError = MeetingRecordingStartError.microphoneSelectionRequired(
+                deviceName: selectedMicrophone?.name
+            )
+            updateMicrophonePresentation(
+                inventory: inventory,
+                selection: microphoneSelection,
+                switchState: .failed(message: startError.localizedDescription)
+            )
+            audioMonitor.warn(MeetingAudioWarning(
+                source: .microphone,
+                message: startError.localizedDescription
+            ))
+            throw startError
+        }
+
         let discoveredClient = try? VoxTypeClient.discover()
         let transcriptionClient: any LiveTranscriptionClient = if let discoveredClient {
             FallbackLiveTranscriptionClient(client: discoveredClient)
@@ -824,30 +852,6 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             utterances: []
         )
         let systemAudio = ScreenCaptureKitMeetingAudioSource()
-        let inventory: MeetingMicrophoneInventorySnapshot
-        do {
-            inventory = try microphoneInventory.snapshot()
-        } catch {
-            await transcript.cancel()
-            try? persistRetryableRecord(
-                for: request,
-                at: Date(),
-                lifecycleState: .failed,
-                message: "Meeting capture could not inspect the available microphones: \(error.localizedDescription)"
-            )
-            throw error
-        }
-        let microphoneSelection = resolvedMicrophoneSelection(
-            microphoneSelections.selection,
-            inventory: inventory
-        )
-        if microphoneSelection != microphoneSelections.selection {
-            microphoneSelections.select(microphoneSelection)
-            audioMonitor.warn(MeetingAudioWarning(
-                source: .microphone,
-                message: "The previously selected microphone is unavailable. Brain is using the system default microphone."
-            ))
-        }
         let microphone = AVAudioEngineMeetingAudioSource(
             selection: microphoneSelection,
             inventory: microphoneInventory
@@ -884,9 +888,40 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
                 gate.stopAccepting()
                 await systemAudio.stop()
                 await gate.waitUntilIdle()
-                throw error
+                guard shouldRequestAnotherMicrophone(after: error) else { throw error }
+                let startError = MeetingRecordingStartError.microphoneSelectionRequired(
+                    deviceName: selectedMicrophone?.name
+                )
+                updateMicrophonePresentation(
+                    inventory: inventory,
+                    selection: microphoneSelection,
+                    switchState: .failed(message: startError.localizedDescription)
+                )
+                audioMonitor.warn(MeetingAudioWarning(
+                    source: .microphone,
+                    message: startError.localizedDescription
+                ))
+                throw startError
             }
-            let readiness = try await microphoneReadiness.wait(timeout: .seconds(3))
+            let readiness: MeetingMicrophoneReadinessResult
+            do {
+                readiness = try await microphoneReadiness.wait(timeout: .seconds(3))
+            } catch {
+                guard shouldRequestAnotherMicrophone(after: error) else { throw error }
+                let startError = MeetingRecordingStartError.microphoneSelectionRequired(
+                    deviceName: selectedMicrophone?.name
+                )
+                updateMicrophonePresentation(
+                    inventory: inventory,
+                    selection: microphoneSelection,
+                    switchState: .failed(message: startError.localizedDescription)
+                )
+                audioMonitor.warn(MeetingAudioWarning(
+                    source: .microphone,
+                    message: startError.localizedDescription
+                ))
+                throw startError
+            }
             switch readiness {
             case .signalDetected:
                 break
@@ -941,7 +976,14 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
               let priorSelection = currentMicrophoneSelection,
               selection != priorSelection else {
             if writer == nil {
+                guard let inventory = try? microphoneInventory.snapshot(),
+                      (try? inventory.deviceID(for: selection)) != nil else { return }
                 microphoneSelections.select(selection)
+                updateMicrophonePresentation(
+                    inventory: inventory,
+                    selection: selection,
+                    switchState: .ready
+                )
             }
             return
         }
@@ -1213,20 +1255,6 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         }
     }
 
-    private func resolvedMicrophoneSelection(
-        _ selection: MeetingMicrophoneSelection,
-        inventory: MeetingMicrophoneInventorySnapshot
-    ) -> MeetingMicrophoneSelection {
-        switch selection {
-        case .systemDefault:
-            return .systemDefault
-        case .device(let uid):
-            return inventory.devices.contains(where: { $0.id == uid })
-                ? selection
-                : .systemDefault
-        }
-    }
-
     private func activeMicrophone(
         for selection: MeetingMicrophoneSelection,
         inventory: MeetingMicrophoneInventorySnapshot
@@ -1238,6 +1266,16 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         case .device(let uid):
             return inventory.devices.first { $0.id == uid }
         }
+    }
+
+    private func shouldRequestAnotherMicrophone(after error: Error) -> Bool {
+        if let native = error as? NativeMeetingAudioSourceError {
+            return native != .permissionDenied
+        }
+        if case .sourceStartFailed(.microphone, let reason) = error as? MeetingAudioCaptureError {
+            return reason != .permissionDenied && reason != .permissionRevoked
+        }
+        return true
     }
 
     private func updateMicrophonePresentation(

@@ -170,6 +170,8 @@ struct MeetingLiveViewModel: Equatable, Sendable {
         case .starting, .recording, .paused, .stopSuggested: .active
         case .finalizing: .finalizing
         case .completed: .completed
+        case .sourceSelectionRequired:
+            .failed("Choose a different microphone, then start the recording again.")
         case .failed: .failed("The meeting recording failed.")
         case .idle, .startSuggested: .unavailable
         }
@@ -178,6 +180,7 @@ struct MeetingLiveViewModel: Equatable, Sendable {
     private static func statusText(_ state: MeetingLifecycleState) -> String {
         switch state {
         case .starting: "Starting recording"
+        case .sourceSelectionRequired: "Choose microphone"
         case .recording: "Recording"
         case .paused: "Paused"
         case .stopSuggested: "Recording — stop suggested"
@@ -195,6 +198,7 @@ struct MeetingLiveViewModel: Equatable, Sendable {
         hasConnectedAudio: Bool
     ) -> String {
         switch lifecycle {
+        case .sourceSelectionRequired: "Choose a different microphone before trying again."
         case .paused: "Audio capture paused."
         case .finalizing: "Processing captured audio."
         case .completed: "Audio capture complete."
@@ -212,7 +216,7 @@ struct MeetingLiveViewModel: Equatable, Sendable {
     ) -> Bool {
         switch lifecycle {
         case .starting, .recording, .stopSuggested: reception.isReceiving
-        case .idle, .startSuggested, .paused, .finalizing, .completed, .failed: false
+        case .idle, .startSuggested, .sourceSelectionRequired, .paused, .finalizing, .completed, .failed: false
         }
     }
 
@@ -256,6 +260,7 @@ struct MeetingLiveViewModel: Equatable, Sendable {
     private static func failureMessage(_ failure: MeetingControllerFailure) -> String {
         switch failure {
         case .startFailed(let message): "Start failed: \(message)"
+        case .microphoneSelectionRequired(let message): message
         case .pauseFailed(let message): "Pause failed: \(message)"
         case .resumeFailed(let message): "Resume failed: \(message)"
         case .stopFailed(let message): "Stop failed: \(message)"
