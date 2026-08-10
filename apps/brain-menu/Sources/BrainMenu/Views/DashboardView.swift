@@ -166,7 +166,6 @@ struct DashboardView: View {
                                 meetingHotkey: graph.meetingHotkey,
                                 speech: graph.speechSettings,
                                 updates: graph.updates,
-                                audioRetention: graph.audioRetention,
                                 onboarding: graph.onboarding
                             )
                         } else {

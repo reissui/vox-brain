@@ -36,14 +36,13 @@ extension MeetingTranscriptionRetrying {
 
 /// Owns the post-recording transcript job. The captured source tracks and
 /// manifest remain private and durable until a final transcript succeeds.
-/// Only then is the user's normal audio-retention preference applied and the
-/// text made eligible for analysis and upload.
+/// A successful transcript replaces those working files with a private,
+/// durable recording; failed attempts keep their source audio retryable.
 @MainActor
 final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     typealias ClientFactory = @Sendable () throws -> any LiveTranscriptionClient
     typealias UploadScheduler = @MainActor (UUID) -> Void
 
-    private nonisolated static let accidentalMeetingDuration: TimeInterval = 30
     private static let registry = MeetingTranscriptionJobRegistry.shared
     private let store: MeetingStore
     private let retention: AudioRetentionController
@@ -508,28 +507,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         var currentMeeting = currentStored.meeting
         currentMeeting.speechEngine = meeting.speechEngine
         currentMeeting.speechModel = meeting.speechModel
-        if shouldDiscardAccidentalMeeting(
-            currentMeeting,
-            utterances: utterances
-        ) {
-            do {
-                try store.delete(currentMeeting.id, confirmed: true)
-                return MeetingTranscriptionPersistenceOutcome(
-                    meeting: currentMeeting,
-                    shouldScheduleUpload: false
-                )
-            } catch {
-                return MeetingTranscriptionPersistenceOutcome(
-                    meeting: persistFailureIfCurrent(
-                        meeting: currentMeeting,
-                        utterances: utterances,
-                        message: "Brain could not remove the short empty meeting: \(bounded(error))",
-                        store: store
-                    ),
-                    shouldScheduleUpload: false
-                )
-            }
-        }
         let systemicFailures = failures.filter(\.isSystemic)
         guard systemicFailures.isEmpty && (utterances.isEmpty ? failures.isEmpty : true) else {
             let blockingFailures = systemicFailures.isEmpty ? failures : systemicFailures
@@ -595,18 +572,6 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 ),
                 shouldScheduleUpload: false
             )
-        }
-    }
-
-    private nonisolated static func shouldDiscardAccidentalMeeting(
-        _ meeting: MeetingRecord,
-        utterances: [MeetingUtterance]
-    ) -> Bool {
-        guard let endedAt = meeting.endedAt else { return false }
-        let duration = endedAt.timeIntervalSince(meeting.startedAt)
-        guard duration >= 0, duration < accidentalMeetingDuration else { return false }
-        return !utterances.contains {
-            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
 

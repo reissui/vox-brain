@@ -461,7 +461,7 @@ struct MeetingViewsTests {
         #expect(audio.exports.map(\.path) == ["/tmp/export.caf"])
         await controller.perform(.requestAudioDeletion)
         #expect(audio.deleteCalls == 0)
-        #expect(controller.viewModel.audioDeletionWarning?.contains("retained recording") == true)
+        #expect(controller.viewModel.audioDeletionWarning?.contains("saved recording") == true)
         await controller.perform(.confirmAudioDeletion)
         #expect(audio.deleteCalls == 1)
 

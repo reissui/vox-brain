@@ -47,8 +47,8 @@ Audio never enters either capture request.
 4. In **Audio Tests**, speak for the full microphone test and require visible
    input. A pinned input uses its persistent Core Audio UID and never silently
    switches when missing.
-5. Leave **Keep Meeting and Voice Note recordings** off unless local retention
-   is an explicit choice.
+5. Brain keeps every Meeting and Voice Note recording privately on this Mac
+   until you explicitly delete the recording or its item.
 6. Keep meeting and Voice Note AI disabled or select and test a local CLI
    provider. Brain discloses that transcript text goes to that provider and may
    consume its billing or credits.
@@ -76,9 +76,11 @@ starts or stops recording automatically.
    once. Voice Notes remain in the Voice Notes list even after they are renamed.
 6. Upload the finalized transcript. Later edits require an explicit revision.
 
-With retention off, Brain removes local audio after final transcript
-persistence. With retention on, local reveal/export/delete controls appear,
-but the capture payload still contains no audio.
+Brain archives each completed recording locally and exposes reveal, export, and
+explicit delete controls. Failed or interrupted transcripts keep their private
+source audio available for recovery. Short or empty transcripts are saved too;
+Brain never auto-deletes their recordings. Capture payloads still contain no
+audio.
 
 Recording and transcription work is bounded. A failing speech source stops
 after repeated errors, partial transcripts remain reviewable, and interrupted
@@ -103,7 +105,8 @@ Before relying on Meetings or Voice Notes:
 3. Record a short Voice Note and confirm it appears only in **Voice Notes**.
 4. End, process, review, and correct Meeting speakers where applicable. Confirm
    the Voice Note is plain paragraph text and copies in full.
-5. Confirm the default reports no retained recording.
+5. Confirm both items report a saved recording and expose local
+   reveal/export/delete controls after transcription completes.
 6. Confirm both transcripts reach the selected local or remote inbox.
 7. Inspect each capture and verify it contains text but no audio.
 

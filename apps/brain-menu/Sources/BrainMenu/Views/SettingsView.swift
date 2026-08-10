@@ -34,7 +34,6 @@ struct SettingsView: View {
     @State private var meetingHotkey: MeetingHotkeyController?
     @State private var speech: SpeechSettingsController?
     @State private var updates: UpdateController?
-    @State private var audioRetention: AudioRetentionController
     @State private var onboarding: OnboardingController
     @State private var internalSelection: SettingsSection? = .general
     private let externalSelection: Binding<SettingsSection?>?
@@ -47,7 +46,6 @@ struct SettingsView: View {
         meetingHotkey: MeetingHotkeyController? = nil,
         speech: SpeechSettingsController? = nil,
         updates: UpdateController? = nil,
-        audioRetention: AudioRetentionController = AudioRetentionController(),
         onboarding: OnboardingController = OnboardingController()
     ) {
         self.store = store
@@ -57,7 +55,6 @@ struct SettingsView: View {
         _meetingHotkey = State(initialValue: meetingHotkey)
         _speech = State(initialValue: speech)
         _updates = State(initialValue: updates)
-        _audioRetention = State(initialValue: audioRetention)
         _onboarding = State(initialValue: onboarding)
     }
 
@@ -102,10 +99,7 @@ struct SettingsView: View {
                     unavailable("Speech", "Open Settings from the Brain app dashboard to inspect VoxType and model readiness.")
                 }
             case .audioPrivacy:
-                AudioPrivacySettingsView(
-                    retention: audioRetention,
-                    onboarding: onboarding
-                )
+                AudioPrivacySettingsView(onboarding: onboarding)
             case .updates:
                 if let updates {
                     UpdateSettingsView(controller: updates)
@@ -354,24 +348,17 @@ private struct MeetingShortcutSettingsView: View {
 }
 
 private struct AudioPrivacySettingsView: View {
-    let retention: AudioRetentionController
     @State var onboarding: OnboardingController
-    @State private var keepRecordings: Bool
 
-    init(retention: AudioRetentionController, onboarding: OnboardingController) {
-        self.retention = retention
+    init(onboarding: OnboardingController) {
         _onboarding = State(initialValue: onboarding)
-        _keepRecordings = State(initialValue: retention.keepMeetingRecordings)
     }
 
     var body: some View {
         Form {
             Section("Audio/Privacy") {
-                Toggle("Keep Meeting and Voice Note recordings", isOn: $keepRecordings)
-                    .onChange(of: keepRecordings) { _, value in
-                        retention.keepMeetingRecordings = value
-                    }
-                Text("Off by default. Microphone and system audio never leave this Mac; only the final transcript is saved to your vault.")
+                Label("Recordings stay on this Mac", systemImage: "internaldrive.fill")
+                Text("Brain always saves Meeting and Voice Note audio until you explicitly delete the recording or its item. Audio never leaves this Mac; only the final transcript is saved to your vault.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

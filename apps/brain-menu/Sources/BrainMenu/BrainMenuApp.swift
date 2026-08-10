@@ -669,8 +669,8 @@ private struct UnavailableMeetingTranscriptionClient: LiveTranscriptionClient {
 }
 
 /// Joins the already-tested native dual-source recorder to MeetingController.
-/// Final text is persisted before the optional local-audio retention policy is
-/// applied. This object has no remote API and can never upload audio.
+/// Final text and a durable local recording are persisted together. This object
+/// has no remote API and can never upload audio.
 private enum BrainNativeMeetingRecorderError: LocalizedError {
     case startupFailure(String)
 

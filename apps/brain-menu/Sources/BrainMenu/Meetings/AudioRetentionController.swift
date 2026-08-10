@@ -97,7 +97,6 @@ enum AudioRetentionControllerError: Error, Equatable, LocalizedError, Sendable {
 /// capture or upload dependency: audio is read only from a meeting's private
 /// Application Support directory and is never represented by an API model.
 final class AudioRetentionController: @unchecked Sendable {
-    static let keepMeetingRecordingsKey = "brain.meetings.keep-recordings"
     static let retainedFilename = "recording.caf"
     static let retainedFormat = "CAF/Linear PCM"
     static let channelCount = 2
@@ -106,28 +105,18 @@ final class AudioRetentionController: @unchecked Sendable {
 
     private static let framesPerWrite = 8_192
 
-    private let defaults: UserDefaults
     private let store: any AudioRetentionMeetingStoring
     private let fileSystem: any AudioRetentionFileSystem
     private let revealer: any MeetingAudioRevealing
 
     init(
-        defaults: UserDefaults = .standard,
         store: any AudioRetentionMeetingStoring = MeetingStore(),
         fileSystem: any AudioRetentionFileSystem = LocalAudioRetentionFileSystem(),
         revealer: any MeetingAudioRevealing = FinderMeetingAudioRevealer()
     ) {
-        self.defaults = defaults
         self.store = store
         self.fileSystem = fileSystem
         self.revealer = revealer
-    }
-
-    /// A missing preference is deliberately false, giving new installs a
-    /// privacy-preserving default without writing any additional preference.
-    var keepMeetingRecordings: Bool {
-        get { defaults.object(forKey: Self.keepMeetingRecordingsKey) as? Bool ?? false }
-        set { defaults.set(newValue, forKey: Self.keepMeetingRecordingsKey) }
     }
 
     /// Persists the final structured transcript before changing audio files.
@@ -150,11 +139,6 @@ final class AudioRetentionController: @unchecked Sendable {
             try store.save(meeting, utterances: utterances)
         } catch {
             throw AudioRetentionControllerError.transcriptPersistenceFailed
-        }
-
-        guard keepMeetingRecordings else {
-            cleanupTemporaryAudio(validated)
-            return meeting
         }
 
         return try retain(
@@ -340,7 +324,7 @@ final class AudioRetentionController: @unchecked Sendable {
         return updated
     }
 
-    /// Transcript (and, when selected, retained-CAF) persistence has committed
+    /// Transcript and retained-CAF persistence have committed
     /// before this runs. Cleanup is therefore best-effort: one failed deletion
     /// must not prevent the remaining disposable files from being removed or
     /// turn a durable transcript into a retryable transcription failure.

@@ -269,7 +269,7 @@ enum MeetingDetailAction: Equatable, Sendable {
 final class MeetingDetailController {
     static let meetingDeletionWarning = "Delete this meeting from this Mac? This removes only local application state. It does not retract a capture already delivered to the Brain vault."
     static let voiceNoteDeletionWarning = "Delete this voice note from this Mac? This removes only local application state. It does not retract a capture already delivered to the Brain vault."
-    static let audioDeletionWarning = "Delete this retained recording from this Mac? The transcript and any delivered vault capture remain available."
+    static let audioDeletionWarning = "Delete this saved recording from this Mac? The transcript and any delivered vault capture remain available."
 
     private(set) var state: MeetingDetailLoadState = .idle
     private(set) var meeting: MeetingRecord?
@@ -1224,7 +1224,11 @@ struct MeetingDetailView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Local audio").font(.title3.bold())
             if model.audioControls.isEmpty {
-                Text("No retained recording. Audio retention is off by default.")
+                Text(model.transcriptionState == .failed
+                    || model.transcriptionState == .pending
+                    || model.transcriptionState == .processing
+                    ? "Brain keeps source audio available for transcript recovery. A playable recording will appear here after transcription completes."
+                    : "No playable recording is available for this item.")
                     .foregroundStyle(.secondary)
             } else {
                 HStack {

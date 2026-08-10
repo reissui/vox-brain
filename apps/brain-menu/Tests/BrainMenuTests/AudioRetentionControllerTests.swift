@@ -6,16 +6,11 @@ import Testing
 @Suite(.serialized)
 struct AudioRetentionControllerTests {
     @Test
-    func defaultsOffAndCleansTemporaryAudioOnlyAfterTranscriptPersists() throws {
+    func alwaysRetainsRecordingAndCleansTemporaryAudioOnlyAfterPersistence() throws {
         let fixture = try AudioRetentionFixture()
         let controller = fixture.controller()
         let summary = try fixture.makeAudio()
         let temporaryURLs = summary.tracks.map(\.fileURL) + [fixture.manifestURL]
-
-        #expect(fixture.defaults.object(
-            forKey: AudioRetentionController.keepMeetingRecordingsKey
-        ) == nil)
-        #expect(controller.keepMeetingRecordings == false)
 
         let completed = try controller.finalize(
             meeting: fixture.meeting,
@@ -23,18 +18,10 @@ struct AudioRetentionControllerTests {
             audio: summary
         )
 
-        #expect(completed == fixture.meeting)
-        #expect(try fixture.store.load(fixture.meeting.id) == StoredMeeting(
-            meeting: fixture.meeting,
-            utterances: fixture.utterances
-        ))
+        #expect(completed.retainedAudio != nil)
+        #expect(try fixture.store.load(fixture.meeting.id).meeting == completed)
         #expect(temporaryURLs.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
-        #expect(!FileManager.default.fileExists(atPath: fixture.recordingURL.path))
-
-        controller.keepMeetingRecordings = true
-        let domain = try #require(fixture.defaults.persistentDomain(forName: fixture.defaultsSuite))
-        #expect(domain.keys.sorted() == [AudioRetentionController.keepMeetingRecordingsKey])
-        #expect(domain[AudioRetentionController.keepMeetingRecordingsKey] as? Bool == true)
+        #expect(FileManager.default.fileExists(atPath: fixture.recordingURL.path))
     }
 
     @Test
@@ -66,8 +53,6 @@ struct AudioRetentionControllerTests {
         let recordingSummary = try recordingFixture.makeAudio()
         let recordingFailure = FailingAudioRetentionFileSystem(failure: .permissions)
         let recordingController = recordingFixture.controller(fileSystem: recordingFailure)
-        recordingController.keepMeetingRecordings = true
-
         #expect(throws: AudioRetentionControllerError.recordingPersistenceFailed) {
             try recordingController.finalize(
                 meeting: recordingFixture.meeting,
@@ -86,10 +71,9 @@ struct AudioRetentionControllerTests {
     }
 
     @Test
-    func optInWritesVerifiedPrivateCAFWithMicrophoneThenSystemChannels() throws {
+    func writesVerifiedPrivateCAFWithMicrophoneThenSystemChannels() throws {
         let fixture = try AudioRetentionFixture()
         let controller = fixture.controller()
-        controller.keepMeetingRecordings = true
         let summary = try fixture.makeAudio(
             microphone: [Float](repeating: 0.25, count: 160),
             system: [Float](repeating: -0.5, count: 160)
@@ -173,41 +157,8 @@ struct AudioRetentionControllerTests {
         #expect(FileManager.default.fileExists(atPath: microphoneURL.path))
         #expect(!FileManager.default.fileExists(atPath: systemURL.path))
         #expect(!FileManager.default.fileExists(atPath: fixture.manifestURL.path))
-        #expect(completed.retainedAudio == nil)
-    }
-
-    @Test
-    func retainedMetadataStaysAccurateWhenDisposableCleanupFails() throws {
-        let fixture = try AudioRetentionFixture()
-        let summary = try fixture.makeAudio()
-        let microphoneURL = try #require(
-            summary.tracks.first(where: { $0.source == .microphone })?.fileURL
-        )
-        let systemURL = try #require(
-            summary.tracks.first(where: { $0.source == .system })?.fileURL
-        )
-        let controller = fixture.controller(
-            fileSystem: SelectiveCleanupFailureAudioRetentionFileSystem(
-                failingFilename: microphoneURL.lastPathComponent
-            )
-        )
-        controller.keepMeetingRecordings = true
-
-        let completed = try controller.finalize(
-            meeting: fixture.meeting,
-            utterances: fixture.utterances,
-            audio: summary
-        )
-        let stored = try fixture.store.load(fixture.meeting.id)
-
-        #expect(completed.transcriptionState == .completed)
         #expect(completed.retainedAudio != nil)
-        #expect(stored.meeting == completed)
-        #expect(stored.utterances == fixture.utterances)
         #expect(FileManager.default.fileExists(atPath: fixture.recordingURL.path))
-        #expect(FileManager.default.fileExists(atPath: microphoneURL.path))
-        #expect(!FileManager.default.fileExists(atPath: systemURL.path))
-        #expect(!FileManager.default.fileExists(atPath: fixture.manifestURL.path))
     }
 
     @Test
@@ -215,7 +166,6 @@ struct AudioRetentionControllerTests {
         let fixture = try AudioRetentionFixture()
         let revealer = RecordingRevealerSpy()
         let controller = fixture.controller(revealer: revealer)
-        controller.keepMeetingRecordings = true
         let summary = try fixture.makeAudio()
         _ = try controller.finalize(
             meeting: fixture.meeting,
@@ -272,7 +222,6 @@ struct AudioRetentionControllerTests {
     func retainedAudioNeverEntersCaptureRequestOrUploadSpy() async throws {
         let fixture = try AudioRetentionFixture()
         let controller = fixture.controller()
-        controller.keepMeetingRecordings = true
         let summary = try fixture.makeAudio()
         _ = try controller.finalize(
             meeting: fixture.meeting,
@@ -319,8 +268,6 @@ struct AudioRetentionControllerTests {
 
 private final class AudioRetentionFixture {
     let rootURL: URL
-    let defaults: UserDefaults
-    let defaultsSuite: String
     let store: MeetingStore
     let meeting: MeetingRecord
     let utterances: [MeetingUtterance]
@@ -346,9 +293,6 @@ private final class AudioRetentionFixture {
             isDirectory: true
         )
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
-        defaultsSuite = "BrainAudioRetentionTests.\(UUID().uuidString)"
-        defaults = try #require(UserDefaults(suiteName: defaultsSuite))
-        defaults.removePersistentDomain(forName: defaultsSuite)
         store = MeetingStore(rootURL: rootURL)
         meeting = MeetingRecord(
             title: "Private planning",
@@ -369,7 +313,6 @@ private final class AudioRetentionFixture {
     }
 
     deinit {
-        defaults.removePersistentDomain(forName: defaultsSuite)
         try? FileManager.default.removeItem(at: rootURL)
     }
 
@@ -379,7 +322,6 @@ private final class AudioRetentionFixture {
         revealer: any MeetingAudioRevealing = RecordingRevealerSpy()
     ) -> AudioRetentionController {
         AudioRetentionController(
-            defaults: defaults,
             store: selectedStore ?? store,
             fileSystem: fileSystem,
             revealer: revealer

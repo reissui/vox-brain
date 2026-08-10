@@ -29,9 +29,10 @@ struct MeetingTranscriptionCoordinatorTests {
     }
 
     @Test
-    func finalizationDiscardsOnlyShortMeetingsWithoutMeaningfulTranscript() async throws {
+    func finalizationKeepsShortAndEmptyRecordings() async throws {
         let shortEmpty = try MeetingTranscriptionCoordinatorFixture(duration: 29.999)
         let shortEmptyCapture = try shortEmpty.makeCapture()
+        let shortEmptyRawURLs = shortEmpty.rawURLs(for: shortEmptyCapture)
         let shortEmptyClient = CoordinatorEmptyClient()
         let shortEmptyCoordinator = shortEmpty.coordinator(client: shortEmptyClient)
         let shortEmptyProcessing = try shortEmptyCoordinator.stage(
@@ -39,7 +40,7 @@ struct MeetingTranscriptionCoordinatorTests {
             capture: shortEmptyCapture
         )
 
-        _ = await shortEmptyCoordinator.complete(
+        let shortEmptyCompleted = await shortEmptyCoordinator.complete(
             meeting: shortEmptyProcessing,
             capture: shortEmptyCapture,
             transcript: try shortEmpty.transcript(
@@ -48,10 +49,13 @@ struct MeetingTranscriptionCoordinatorTests {
             )
         )
 
-        #expect(!FileManager.default.fileExists(atPath: shortEmpty.meetingDirectory.path))
-        #expect(throws: MeetingStoreError.meetingNotFound(shortEmpty.meeting.id)) {
-            try shortEmpty.store.load(shortEmpty.meeting.id)
-        }
+        #expect(FileManager.default.fileExists(atPath: shortEmpty.meetingDirectory.path))
+        #expect(shortEmptyCompleted.transcriptionState == .failed)
+        #expect(shortEmptyCompleted.retainedAudio == nil)
+        #expect(shortEmptyRawURLs.allSatisfy {
+            FileManager.default.fileExists(atPath: $0.path)
+        })
+        #expect(try shortEmpty.store.load(shortEmpty.meeting.id).utterances.isEmpty)
 
         let shortSpoken = try MeetingTranscriptionCoordinatorFixture(duration: 5)
         let shortSpokenCapture = try shortSpoken.makeCapture()
@@ -72,10 +76,12 @@ struct MeetingTranscriptionCoordinatorTests {
         )
 
         #expect(completed.transcriptionState == .completed)
+        #expect(completed.retainedAudio != nil)
         #expect(!(try shortSpoken.store.load(shortSpoken.meeting.id)).utterances.isEmpty)
 
         let boundaryEmpty = try MeetingTranscriptionCoordinatorFixture(duration: 30)
         let boundaryCapture = try boundaryEmpty.makeCapture()
+        let boundaryRawURLs = boundaryEmpty.rawURLs(for: boundaryCapture)
         let boundaryClient = CoordinatorEmptyClient()
         let boundaryCoordinator = boundaryEmpty.coordinator(client: boundaryClient)
         let boundaryProcessing = try boundaryCoordinator.stage(
@@ -93,6 +99,10 @@ struct MeetingTranscriptionCoordinatorTests {
         )
 
         #expect(FileManager.default.fileExists(atPath: boundaryEmpty.meetingDirectory.path))
+        #expect(try boundaryEmpty.store.load(boundaryEmpty.meeting.id).meeting.retainedAudio == nil)
+        #expect(boundaryRawURLs.allSatisfy {
+            FileManager.default.fileExists(atPath: $0.path)
+        })
         #expect(try boundaryEmpty.store.load(boundaryEmpty.meeting.id).utterances.isEmpty)
     }
 
@@ -157,7 +167,7 @@ struct MeetingTranscriptionCoordinatorTests {
     }
 
     @Test
-    func successfulRetryCompletesTranscriptAndCleansRawAudioWhenRetentionIsOff() async throws {
+    func successfulRetryCompletesTranscriptAndArchivesRecording() async throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()
         let rawURLs = fixture.rawURLs(for: capture)
@@ -186,14 +196,14 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(completed.transcriptionState == .completed)
         #expect(completed.transcriptionAttemptCount == 2)
         #expect(completed.transcriptionErrorMessage == nil)
-        #expect(completed.retainedAudio == nil)
+        #expect(completed.retainedAudio != nil)
         #expect(stored.meeting == completed)
         #expect(!stored.utterances.isEmpty)
         #expect(stored.utterances.allSatisfy { !$0.text.contains("unavailable") })
         #expect(rawURLs.allSatisfy {
             !FileManager.default.fileExists(atPath: $0.path)
         })
-        #expect(!FileManager.default.fileExists(
+        #expect(FileManager.default.fileExists(
             atPath: fixture.meetingDirectory
                 .appendingPathComponent(AudioRetentionController.retainedFilename).path
         ))
@@ -332,7 +342,6 @@ struct MeetingTranscriptionCoordinatorTests {
     @Test
     func legacyRetainedCAFCanRetryAndFailedAttemptPreservesOriginalRecording() async throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
-        fixture.retention.keepMeetingRecordings = true
         let capture = try fixture.makeCapture()
         let placeholder = try MeetingUtterance(
             source: .microphone,
@@ -384,11 +393,9 @@ struct MeetingTranscriptionCoordinatorTests {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()
         let retention = AudioRetentionController(
-            defaults: fixture.defaults,
             store: fixture.store,
             fileSystem: CoordinatorCAFWriteFailureFileSystem()
         )
-        retention.keepMeetingRecordings = true
         var scheduledUploads: [UUID] = []
         let client = CoordinatorSuccessClient()
         let coordinator = fixture.coordinator(
@@ -422,7 +429,6 @@ struct MeetingTranscriptionCoordinatorTests {
             capture.tracks.first(where: { $0.source == .system })?.fileURL
         )
         let retention = AudioRetentionController(
-            defaults: fixture.defaults,
             store: fixture.store,
             fileSystem: CoordinatorCleanupFailureFileSystem(
                 failingFilename: microphoneURL.lastPathComponent
@@ -573,7 +579,7 @@ private final class MeetingTranscriptionCoordinatorFixture {
         self.defaults = defaults
         defaults.removePersistentDomain(forName: defaultsSuite)
         store = MeetingStore(rootURL: rootURL)
-        retention = AudioRetentionController(defaults: defaults, store: store)
+        retention = AudioRetentionController(store: store)
         meeting = MeetingRecord(
             title: "Meeting",
             detectedApplication: "Test Call",
