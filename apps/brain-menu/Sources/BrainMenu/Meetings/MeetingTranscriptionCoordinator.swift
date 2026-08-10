@@ -39,9 +39,9 @@ extension MeetingTranscriptionRetrying {
 }
 
 /// Owns the post-recording transcript job. The captured source tracks and
-/// manifest remain private and durable until a final transcript succeeds.
-/// A successful transcript replaces those working files with a private,
-/// durable recording; failed attempts keep their source audio retryable.
+/// manifest remain private and durable until a final transcript replaces them
+/// with a private recording or the user explicitly deletes the audio. Failed
+/// or cancelled attempts keep their source audio retryable.
 @MainActor
 final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     typealias ClientFactory = @Sendable () throws -> any LiveTranscriptionClient
@@ -79,8 +79,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     }
 
     /// Atomically exposes a completed recording as a processing job before any
-    /// final speech command starts. A crash after this point can be resumed
-    /// from `audio-capture.json` on the next launch.
+    /// final speech command starts. A crash after this point is recovered from
+    /// `audio-capture.json` into a saved item that waits for explicit retry.
     func stage(
         meeting: MeetingRecord,
         capture: MeetingAudioCaptureSummary

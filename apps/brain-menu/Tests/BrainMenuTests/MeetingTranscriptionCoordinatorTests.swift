@@ -105,6 +105,42 @@ struct MeetingTranscriptionCoordinatorTests {
             FileManager.default.fileExists(atPath: $0.path)
         })
         #expect(try boundaryEmpty.store.load(boundaryEmpty.meeting.id).utterances.isEmpty)
+
+        let shortEmptyStored = try shortEmpty.store.load(shortEmpty.meeting.id)
+        let shortSpokenStored = try shortSpoken.store.load(shortSpoken.meeting.id)
+        let boundaryStored = try boundaryEmpty.store.load(boundaryEmpty.meeting.id)
+        try writeEvidence([
+            "scenario": "Short and empty recordings are retained instead of auto-deleted",
+            "under30SecondsEmpty": [
+                "durationMilliseconds": 29_999,
+                "meetingDirectoryExists": FileManager.default.fileExists(
+                    atPath: shortEmpty.meetingDirectory.path
+                ),
+                "terminalTranscriptionState": shortEmptyStored.meeting.transcriptionState.rawValue,
+                "sourceAudioFilesExist": shortEmptyRawURLs.allSatisfy {
+                    FileManager.default.fileExists(atPath: $0.path)
+                },
+                "durableTranscriptUtteranceCount": shortEmptyStored.utterances.count,
+            ],
+            "fiveSecondsSpoken": [
+                "durationMilliseconds": 5_000,
+                "terminalTranscriptionState": shortSpokenStored.meeting.transcriptionState.rawValue,
+                "audioRetentionState": shortSpokenStored.meeting.audioRetentionState.rawValue,
+                "retainedFilename": shortSpokenStored.meeting.retainedAudio?.filename ?? "missing",
+                "durableTranscriptUtteranceCount": shortSpokenStored.utterances.count,
+            ],
+            "exactly30SecondsEmpty": [
+                "durationMilliseconds": 30_000,
+                "meetingDirectoryExists": FileManager.default.fileExists(
+                    atPath: boundaryEmpty.meetingDirectory.path
+                ),
+                "terminalTranscriptionState": boundaryStored.meeting.transcriptionState.rawValue,
+                "sourceAudioFilesExist": boundaryRawURLs.allSatisfy {
+                    FileManager.default.fileExists(atPath: $0.path)
+                },
+                "durableTranscriptUtteranceCount": boundaryStored.utterances.count,
+            ],
+        ], named: "short-recording-retention.json")
     }
 
     @Test
@@ -171,6 +207,7 @@ struct MeetingTranscriptionCoordinatorTests {
     func initialSystemicFailurePreservesSuccessfulPartialTranscript() async throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()
+        let rawURLs = fixture.rawURLs(for: capture)
         let client = CoordinatorPartialSystemicClient()
         let coordinator = fixture.coordinator(client: client)
         let processing = try coordinator.stage(meeting: fixture.meeting, capture: capture)
@@ -187,6 +224,19 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(stored.utterances.count == 1)
         #expect(stored.utterances.first?.source == .microphone)
         #expect(stored.utterances.first?.text == "Keep this successful partial transcript.")
+        try writeEvidence([
+            "scenario": "Systemic transcription failure preserves partial transcript and source audio",
+            "lifecycleState": stored.meeting.lifecycleState.rawValue,
+            "terminalTranscriptionState": stored.meeting.transcriptionState.rawValue,
+            "transcriptionAttemptCount": stored.meeting.transcriptionAttemptCount,
+            "transcriptionErrorMessage": stored.meeting.transcriptionErrorMessage ?? "missing",
+            "partialTranscript": stored.utterances.map(\.text),
+            "partialTranscriptSources": stored.utterances.map(\.source.rawValue),
+            "sourceAudioFilesExist": rawURLs.allSatisfy {
+                FileManager.default.fileExists(atPath: $0.path)
+            },
+            "audioRetentionState": stored.meeting.audioRetentionState.rawValue,
+        ], named: "transcription-failure-preservation.json")
     }
 
     @Test
@@ -331,11 +381,40 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(stored.meeting == deleted)
         #expect(stored.utterances == originalTranscript)
         #expect(launchReconciled.isEmpty)
-        await #expect(
-            throws: MeetingTranscriptionCoordinatorError.transcriptionNotRetryable
-        ) {
-            try await coordinator.retry(meetingID: fixture.meeting.id)
+        let retryRejectedAfterDeletion: Bool
+        do {
+            _ = try await coordinator.retry(meetingID: fixture.meeting.id)
+            retryRejectedAfterDeletion = false
+        } catch MeetingTranscriptionCoordinatorError.transcriptionNotRetryable {
+            retryRejectedAfterDeletion = true
+        } catch {
+            retryRejectedAfterDeletion = false
         }
+        #expect(retryRejectedAfterDeletion)
+
+        let remainingFiles = try FileManager.default.contentsOfDirectory(
+            atPath: fixture.meetingDirectory.path
+        ).sorted()
+        try writeEvidence([
+            "scenario": "Explicit audio deletion atomically wins over retry and launch recovery",
+            "inFlightTranscriptionState": inFlight.meeting.transcriptionState.rawValue,
+            "terminalTranscriptionState": stored.meeting.transcriptionState.rawValue,
+            "terminalAttemptCount": stored.meeting.transcriptionAttemptCount,
+            "terminalErrorMessage": stored.meeting.transcriptionErrorMessage ?? "missing",
+            "audioRetentionState": stored.meeting.audioRetentionState.rawValue,
+            "retainedMetadataCleared": stored.meeting.retainedAudio == nil,
+            "recordingFileExists": FileManager.default.fileExists(
+                atPath: fixture.meetingDirectory
+                    .appendingPathComponent(AudioRetentionController.retainedFilename).path
+            ),
+            "durableTranscript": stored.utterances.map(\.text),
+            "analysisState": stored.meeting.analysisState.rawValue,
+            "uploadState": stored.meeting.uploadState.rawValue,
+            "retryRejectedAfterDeletion": retryRejectedAfterDeletion,
+            "launchRecoveryChangedDeletedItem": !launchReconciled.isEmpty,
+            "retryStillRunning": coordinator.isRunning(meetingID: fixture.meeting.id),
+            "directoryFilesAfterDeletion": remainingFiles,
+        ], named: "deletion-wins-over-retry-recovery.json")
     }
 
     @Test
@@ -693,6 +772,17 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(stored.meeting.uploadState == .delivered)
         #expect(stored.meeting.retainedAudio == archived.retainedAudio)
         #expect(stored.utterances == transcript)
+        try writeEvidence([
+            "scenario": "Launch recovery preserves durable retry state",
+            "terminalTranscriptionState": stored.meeting.transcriptionState.rawValue,
+            "transcriptionAttemptCount": stored.meeting.transcriptionAttemptCount,
+            "transcriptionErrorMessage": stored.meeting.transcriptionErrorMessage ?? "missing",
+            "retainedFilename": stored.meeting.retainedAudio?.filename ?? "missing",
+            "audioRetentionState": stored.meeting.audioRetentionState.rawValue,
+            "durableTranscript": stored.utterances.map(\.text),
+            "analysisState": stored.meeting.analysisState.rawValue,
+            "uploadState": stored.meeting.uploadState.rawValue,
+        ], named: "launch-recovery-durable-state.json")
     }
 
     @Test
@@ -796,6 +886,17 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(stored.meeting.retainedAudio == nil)
         #expect(stored.utterances == transcript)
         #expect(rawURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        try writeEvidence([
+            "scenario": "Ambiguous legacy recording remains conservative and compatible",
+            "terminalTranscriptionState": stored.meeting.transcriptionState.rawValue,
+            "audioRetentionState": stored.meeting.audioRetentionState.rawValue,
+            "retainedMetadataPresent": stored.meeting.retainedAudio != nil,
+            "durableTranscript": stored.utterances.map(\.text),
+            "sourceAudioFilesExist": rawURLs.allSatisfy {
+                FileManager.default.fileExists(atPath: $0.path)
+            },
+            "launchRecoveryStartedRetry": !reconciled.isEmpty,
+        ], named: "legacy-recording-conservative-recovery.json")
     }
 
     @Test
@@ -881,6 +982,21 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(stored.meeting.title == "Recovered recording")
         #expect(stored.meeting.transcriptionState == .failed)
         #expect(FileManager.default.fileExists(atPath: system.fileURL.path))
+    }
+
+    private func writeEvidence(_ object: [String: Any], named filename: String) throws {
+        guard let directory = ProcessInfo.processInfo.environment["BRAIN_TEST_EVIDENCE_DIR"] else {
+            return
+        }
+        let data = try JSONSerialization.data(
+            withJSONObject: object,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try data.write(
+            to: URL(fileURLWithPath: directory, isDirectory: true)
+                .appendingPathComponent(filename),
+            options: .atomic
+        )
     }
 }
 
