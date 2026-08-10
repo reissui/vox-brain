@@ -1454,6 +1454,13 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
                 hostTimestamp: value.hostTimestamp,
                 detail: value.detail
             )
+            if value.reason == .streamInterrupted {
+                audioMonitor.warn(MeetingAudioWarning(
+                    source: source,
+                    message: value.detail
+                        ?? "Audio callbacks were interrupted. Brain is rebuilding the stream."
+                ))
+            }
 
         case .failure(let value):
             if source == .microphone, isSwitchingMicrophone {

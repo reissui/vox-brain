@@ -7,6 +7,125 @@ import Testing
 @MainActor
 struct MeetingTranscriptionCoordinatorTests {
     @Test
+    func severelySparseMicrophoneCaptureSkipsFinalSpeechAndRemainsRetryable() async throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture(duration: 10)
+        let writer = try MeetingAudioWriter(
+            meetingDirectory: fixture.meetingDirectory,
+            origin: fixture.meeting.startedAt
+        )
+        let frames = [Float](repeating: 0.25, count: 320) // 20 ms at 16 kHz
+        for second in 0..<10 {
+            for callback in 0..<10 {
+                let timestamp = 100 + Double(second) + Double(callback) * 0.02
+                _ = try writer.append(MeetingAudioSampleBuffer(
+                    source: .microphone,
+                    sourceTimestamp: timestamp,
+                    hostTimestamp: timestamp,
+                    sampleRate: 16_000,
+                    channelCount: 1,
+                    interleavedSamples: frames
+                ))
+            }
+        }
+        let capture = try writer.finalize()
+        let microphoneDiagnostics = try #require(
+            capture.diagnostics?.sources.first { $0.source == .microphone }
+        )
+        #expect(microphoneDiagnostics.detectedDropoutCount == 9)
+        #expect(microphoneDiagnostics.coverageRatio < 0.25)
+
+        let partial = [try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 700,
+            text: "Keep this trustworthy partial transcript.",
+            baseSpeakerID: "you"
+        )]
+        let client = CoordinatorSuccessClient()
+        let coordinator = fixture.coordinator(client: client)
+        let processing = try coordinator.stage(
+            meeting: fixture.meeting,
+            capture: capture,
+            utterances: partial
+        )
+        let failed = await coordinator.complete(
+            meeting: processing,
+            capture: capture,
+            transcript: try fixture.transcript(client: client, capture: capture)
+        )
+        let stored = try fixture.store.load(fixture.meeting.id)
+
+        #expect(await client.callCount == 0)
+        #expect(failed.transcriptionState == .failed)
+        #expect(failed.transcriptionErrorMessage?.contains("severely incomplete") == true)
+        #expect(stored.utterances == partial)
+        #expect(failed.retainedAudio == nil)
+        #expect(fixture.rawURLs(for: capture).allSatisfy {
+            FileManager.default.fileExists(atPath: $0.path)
+        })
+    }
+
+    @Test
+    func continuousQuietCallbacksPassCaptureCoverageGate() throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture(duration: 10)
+        let writer = try MeetingAudioWriter(
+            meetingDirectory: fixture.meetingDirectory,
+            origin: fixture.meeting.startedAt
+        )
+        for callback in 0..<500 {
+            var frames = [Float](repeating: 0, count: 320)
+            if callback == 0 { frames[0] = 0.01 }
+            let timestamp = 100 + Double(callback) * 0.02
+            _ = try writer.append(MeetingAudioSampleBuffer(
+                source: .microphone,
+                sourceTimestamp: timestamp,
+                hostTimestamp: timestamp,
+                sampleRate: 16_000,
+                channelCount: 1,
+                interleavedSamples: frames
+            ))
+        }
+        let capture = try writer.finalize()
+        let diagnostics = try #require(
+            capture.diagnostics?.sources.first { $0.source == .microphone }
+        )
+
+        #expect(diagnostics.callbackCount == 500)
+        #expect(diagnostics.coverageRatio > 0.99)
+        #expect(diagnostics.detectedDropoutCount == 0)
+        #expect(MeetingAudioCaptureQuality.issue(in: capture) == nil)
+    }
+
+    @Test
+    func terminalMicrophoneInterruptionRejectsEvenOtherwiseCompleteCoverage() throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture(duration: 1)
+        let writer = try MeetingAudioWriter(
+            meetingDirectory: fixture.meetingDirectory,
+            origin: fixture.meeting.startedAt
+        )
+        _ = try writer.append(MeetingAudioSampleBuffer(
+            source: .microphone,
+            sourceTimestamp: 100,
+            hostTimestamp: 100,
+            sampleRate: 16_000,
+            channelCount: 1,
+            interleavedSamples: [Float](repeating: 0.2, count: 16_000)
+        ))
+        _ = try writer.recordFailure(
+            source: .microphone,
+            reason: .interrupted,
+            hostTimestamp: 101,
+            message: "Callback delivery failed after one rebuild."
+        )
+        let capture = try writer.finalize()
+
+        #expect(capture.diagnostics?.sources.first?.coverageRatio == 1)
+        #expect(MeetingAudioCaptureQuality.issue(in: capture)?.message.contains(
+            "bounded recovery attempt"
+        ) == true)
+    }
+
+    @Test
     func stagePersistsProcessingAttemptWithPartialTranscriptAndPreservesAudio() throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()
