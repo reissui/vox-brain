@@ -76,20 +76,26 @@ starts or stops recording automatically.
 
 After successful transcription, Brain archives the recording locally as compact
 AAC and exposes reveal, export, and explicit delete controls. Failed or
-interrupted transcripts keep their private source audio available for recovery.
-Short or empty items remain saved, and Brain never auto-deletes their
-recordings. Capture payloads still contain no audio. Existing retained CAF
-recordings remain available for reveal, export, deletion, and transcription
-retry; a successful retry replaces the legacy recording with compact AAC.
+interrupted attempts keep their private source audio available for recovery.
+The most recently saved title and transcript, plus existing analysis and
+delivery results, remain intact while a retry is running, if it fails, or if it
+is cancelled. Isolated audio-span failures keep the successfully transcribed
+text reviewable with a warning. Short or empty items remain saved, and Brain
+never auto-deletes their recordings. Capture payloads still contain no audio.
+Existing retained CAF recordings remain available for reveal, export, deletion,
+and transcription retry; a successful retry replaces the legacy recording with
+compact AAC.
 
 Deleting a saved recording—or its entire item—removes both its playable archive
-and retry source audio. Brain cancels an in-flight retry first, and launch
-recovery does not recreate audio after that explicit deletion.
+and retry source audio. Deleting only the recording preserves the saved
+transcript and its metadata; deleting the entire item removes all of its data.
+Brain cancels an in-flight retry first, and launch recovery does not recreate
+audio after that explicit deletion.
 
 Recording and transcription work is bounded. A failing speech source stops
-after repeated errors, partial transcripts remain reviewable, and interrupted
-capture or processing is surfaced as a retryable saved recording at the next
-launch; Brain does not restart transcription automatically.
+after repeated errors, and interrupted capture or processing is surfaced as a
+retryable saved recording at the next launch; Brain does not restart
+transcription automatically.
 
 ## Delivery behavior
 
