@@ -91,7 +91,7 @@ struct OverviewView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Nothing running right now")
                             .font(.body.weight(.medium))
-                        Text("New meeting transcription and Librarian work will appear here as soon as it starts.")
+                        Text("New meeting and Voice Note transcription and Librarian work will appear here as soon as it starts.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
@@ -155,7 +155,7 @@ struct OverviewView: View {
                 .font(.title3.weight(.semibold))
 
             if recentItems.isEmpty {
-                Text("Completed meetings and Librarian runs will appear here.")
+                Text("Completed meetings, Voice Notes, and Librarian runs will appear here.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 10)
@@ -207,28 +207,59 @@ struct OverviewView: View {
         var items: [OverviewActivityItem] = []
 
         if let graph {
+            let recordingLanguage = OverviewRecordingLanguage(
+                isVoiceNote: graph.meeting.currentMeeting?.isVoiceNote == true
+            )
             switch graph.meeting.state {
             case .starting:
-                items.append(.active("meeting-starting", "Starting meeting", "Connecting microphone and computer audio.", "mic"))
+                items.append(.active(
+                    "meeting-starting",
+                    recordingLanguage.startingTitle,
+                    "Connecting microphone and computer audio.",
+                    "mic"
+                ))
             case .recording:
-                items.append(.active("meeting-recording", "Recording meeting", "Capturing microphone and computer audio locally.", "record.circle.fill", color: .red))
+                items.append(.active(
+                    "meeting-recording",
+                    recordingLanguage.recordingTitle,
+                    "Capturing microphone and computer audio locally.",
+                    "record.circle.fill",
+                    color: .red
+                ))
             case .paused:
-                items.append(.active("meeting-paused", "Meeting paused", "Recording is paused until you resume or stop.", "pause.circle"))
+                items.append(.active(
+                    "meeting-paused",
+                    recordingLanguage.pausedTitle,
+                    "Recording is paused until you resume or stop.",
+                    "pause.circle"
+                ))
             case .stopSuggested:
-                items.append(.active("meeting-stop", "Recording meeting", "Brain thinks the meeting may be finished and is waiting for you to stop it.", "record.circle.fill", color: .red))
+                items.append(.active(
+                    "meeting-stop",
+                    recordingLanguage.recordingTitle,
+                    recordingLanguage.stopSuggestedDetail,
+                    "record.circle.fill",
+                    color: .red
+                ))
             case .finalizing:
-                items.append(.active("meeting-finalizing", "Preparing transcript", "Saving the recording and completing the local transcript.", "waveform"))
+                items.append(.active(
+                    "meeting-finalizing",
+                    recordingLanguage.finalizingTitle,
+                    recordingLanguage.finalizingDetail,
+                    "waveform"
+                ))
             case .idle, .startSuggested, .completed, .failed:
                 break
             }
 
             for row in graph.meetings.rows.prefix(6) {
+                let rowLanguage = OverviewRecordingLanguage(isVoiceNote: row.isVoiceNote)
                 if let transcription = row.badges.first(where: {
                     $0.kind == .transcription && ["Transcribing", "Transcript pending"].contains($0.title)
                 }) {
                     items.append(.active(
                         "transcript-\(row.stableID)",
-                        transcription.title,
+                        rowLanguage.processingTitle(for: transcription),
                         row.title,
                         transcription.systemImage
                     ))
@@ -237,7 +268,7 @@ struct OverviewView: View {
                 }) {
                     items.append(.active(
                         "analysis-\(row.stableID)",
-                        "Analyzing meeting",
+                        rowLanguage.processingTitle(for: analysis),
                         row.title,
                         analysis.systemImage
                     ))
@@ -279,10 +310,11 @@ struct OverviewView: View {
         var items = (graph?.meetings.rows.prefix(5) ?? []).map { row in
             let stage = row.badges.first(where: { $0.kind == .analysis })
                 ?? row.badges.first(where: { $0.kind == .transcription })
+            let recordingLanguage = OverviewRecordingLanguage(isVoiceNote: row.isVoiceNote)
             return OverviewActivityItem(
                 id: "meeting-\(row.stableID)",
                 title: row.title,
-                detail: stage?.title ?? "Meeting saved locally",
+                detail: stage.map(recordingLanguage.processingTitle) ?? recordingLanguage.savedDetail,
                 symbolName: stage?.systemImage ?? "person.2.wave.2",
                 color: .secondary,
                 isActive: false,
@@ -332,6 +364,38 @@ struct OverviewView: View {
                     ? "Opened the local vault in Obsidian."
                     : "Obsidian could not open the vault: \(error?.localizedDescription ?? "Unknown error")"
             }
+        }
+    }
+}
+
+struct OverviewRecordingLanguage: Equatable, Sendable {
+    let isVoiceNote: Bool
+
+    private var noun: String { isVoiceNote ? "voice note" : "meeting" }
+    private var titledNoun: String { isVoiceNote ? "Voice note" : "Meeting" }
+
+    var startingTitle: String { "Starting \(noun)" }
+    var recordingTitle: String { "Recording \(noun)" }
+    var pausedTitle: String { "\(titledNoun) paused" }
+    var finalizingTitle: String { "Preparing \(noun) transcript" }
+    var stopSuggestedDetail: String {
+        "Brain thinks the \(noun) may be finished and is waiting for you to stop it."
+    }
+    var finalizingDetail: String {
+        "Saving the \(noun) recording and completing the local transcript."
+    }
+    var savedDetail: String { "\(titledNoun) saved locally" }
+
+    func processingTitle(for badge: MeetingStatusBadge) -> String {
+        switch (badge.kind, badge.title) {
+        case (.analysis, "Analyzing"):
+            "Analyzing \(noun)"
+        case (.transcription, "Transcribing"):
+            "Transcribing \(noun)"
+        case (.transcription, "Transcript pending"):
+            "\(titledNoun) transcript pending"
+        default:
+            badge.title
         }
     }
 }

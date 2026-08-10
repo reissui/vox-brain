@@ -222,6 +222,47 @@ struct DashboardPresentationTests {
         #expect(!allSources.contains("pages.dev"))
         #expect(!allSources.contains("private.example"))
     }
+
+    @Test
+    func activityRecordingLanguageDistinguishesMeetingsAndVoiceNotes() {
+        let voiceNote = OverviewRecordingLanguage(isVoiceNote: true)
+        let meeting = OverviewRecordingLanguage(isVoiceNote: false)
+        let analysis = MeetingStatusBadge(
+            kind: .analysis,
+            title: "Analyzing",
+            systemImage: "sparkles"
+        )
+        let transcription = MeetingStatusBadge(
+            kind: .transcription,
+            title: "Transcribing",
+            systemImage: "waveform"
+        )
+        let pendingTranscript = MeetingStatusBadge(
+            kind: .transcription,
+            title: "Transcript pending",
+            systemImage: "clock"
+        )
+
+        #expect(voiceNote.startingTitle == "Starting voice note")
+        #expect(voiceNote.recordingTitle == "Recording voice note")
+        #expect(voiceNote.pausedTitle == "Voice note paused")
+        #expect(voiceNote.finalizingTitle == "Preparing voice note transcript")
+        #expect(voiceNote.stopSuggestedDetail.contains("the voice note"))
+        #expect(voiceNote.finalizingDetail.contains("the voice note recording"))
+        #expect(voiceNote.processingTitle(for: analysis) == "Analyzing voice note")
+        #expect(voiceNote.processingTitle(for: transcription) == "Transcribing voice note")
+        #expect(voiceNote.processingTitle(for: pendingTranscript) == "Voice note transcript pending")
+        #expect(voiceNote.savedDetail == "Voice note saved locally")
+
+        #expect(meeting.startingTitle == "Starting meeting")
+        #expect(meeting.recordingTitle == "Recording meeting")
+        #expect(meeting.pausedTitle == "Meeting paused")
+        #expect(meeting.finalizingTitle == "Preparing meeting transcript")
+        #expect(meeting.processingTitle(for: analysis) == "Analyzing meeting")
+        #expect(meeting.processingTitle(for: transcription) == "Transcribing meeting")
+        #expect(meeting.processingTitle(for: pendingTranscript) == "Meeting transcript pending")
+        #expect(meeting.savedDetail == "Meeting saved locally")
+    }
 }
 
 private func check(
