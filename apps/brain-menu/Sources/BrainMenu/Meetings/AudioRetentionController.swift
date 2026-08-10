@@ -154,7 +154,12 @@ final class AudioRetentionController: @unchecked Sendable {
             throw AudioRetentionControllerError.invalidTemporaryAudio
         }
 
-        if meeting.transcriptionAttemptCount <= 1,
+        let hasPriorDurableAudio = previous.map {
+            $0.meeting.retainedAudio != nil
+                || $0.meeting.audioRetentionState != .pending
+        } ?? false
+        if !hasPriorDurableAudio,
+           meeting.transcriptionAttemptCount <= 1,
            previous?.utterances.isEmpty != false {
             var archiving = meeting
             archiving.transcriptionState = .processing
@@ -252,8 +257,7 @@ final class AudioRetentionController: @unchecked Sendable {
         } catch {
             throw AudioRetentionControllerError.retainedAudioUnavailable
         }
-        let source = try retainedAudioURL(for: stored.meeting)
-        let directory = source.deletingLastPathComponent()
+        let directory = store.directoryURL(for: meetingID).standardizedFileURL
         let quarantine = directory.appendingPathComponent(
             ".recording.\(UUID().uuidString).deleting",
             isDirectory: true
@@ -261,7 +265,7 @@ final class AudioRetentionController: @unchecked Sendable {
         let artifacts: [URL]
         do {
             artifacts = try audioArtifacts(in: directory)
-            guard artifacts.contains(source.standardizedFileURL) else {
+            guard !artifacts.isEmpty else {
                 throw AudioRetentionControllerError.deleteFailed
             }
             try fileSystem.createOwnerOnlyDirectory(at: quarantine)
@@ -301,7 +305,7 @@ final class AudioRetentionController: @unchecked Sendable {
             return updated
         } catch {
             restore(moves, quarantine: quarantine)
-            if fileSystem.fileExists(at: source) {
+            if moves.contains(where: { fileSystem.fileExists(at: $0.original) }) {
                 try? store.save(stored.meeting, utterances: stored.utterances)
             }
             throw AudioRetentionControllerError.deleteFailed

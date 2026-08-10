@@ -22,6 +22,10 @@ enum MeetingTranscriptionCoordinatorError: Error, Equatable, LocalizedError, Sen
     }
 }
 
+private enum RetainedAudioRecoveryError: Error {
+    case promotionFailed
+}
+
 @MainActor
 protocol MeetingTranscriptionRetrying: AnyObject {
     func retry(meetingID: UUID) async throws -> MeetingRecord
@@ -767,6 +771,12 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                     directory: directory,
                     fileManager: fileManager
                 )
+            } catch RetainedAudioRecoveryError.promotionFailed {
+                // Canonical recovery files may have been replaced already.
+                // Never reinterpret that partial transaction as authoritative
+                // raw capture; the intact retained archive remains the source
+                // for the next retry.
+                throw MeetingTranscriptionCoordinatorError.unsafeAudioManifest
             } catch {
                 return try recoverCaptureFromRawPCM(
                     meeting: meeting,
@@ -1196,14 +1206,14 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 at: directory.appendingPathComponent(MeetingAudioWriter.manifestFilename),
                 fileManager: fileManager
             )
+            return try validatedManifest(
+                capture,
+                directory: directory,
+                fileManager: fileManager
+            )
         } catch {
-            throw MeetingTranscriptionCoordinatorError.unsafeAudioManifest
+            throw RetainedAudioRecoveryError.promotionFailed
         }
-        return try validatedManifest(
-            capture,
-            directory: directory,
-            fileManager: fileManager
-        )
     }
 
     private nonisolated static func createOwnerOnlyFile(

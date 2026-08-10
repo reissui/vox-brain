@@ -484,6 +484,43 @@ struct AudioRetentionControllerTests {
     }
 
     @Test
+    func confirmedDeletionRemovesInterruptedArchiveArtifactsWithoutCanonicalFile() throws {
+        let fixture = try AudioRetentionFixture()
+        let controller = fixture.controller()
+        let completed = try controller.finalize(
+            meeting: fixture.meeting,
+            utterances: fixture.utterances,
+            audio: fixture.makeAudio()
+        )
+        let backup = fixture.meetingDirectory.appendingPathComponent(
+            ".recording.interrupted.backup"
+        )
+        try FileManager.default.moveItem(at: fixture.recordingURL, to: backup)
+        let staged = fixture.meetingDirectory.appendingPathComponent(
+            ".recording.interrupted.m4a"
+        )
+        try Data("staged recording".utf8).write(to: staged)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o600)],
+            ofItemAtPath: staged.path
+        )
+
+        let deleted = try controller.deleteRecording(
+            for: completed.id,
+            confirmed: true
+        )
+
+        #expect(deleted.audioRetentionState == .deleted)
+        #expect(deleted.retainedAudio == nil)
+        #expect(!FileManager.default.fileExists(atPath: backup.path))
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+        #expect(try FileManager.default.contentsOfDirectory(
+            at: fixture.meetingDirectory,
+            includingPropertiesForKeys: nil
+        ).allSatisfy { !$0.lastPathComponent.hasSuffix(".deleting") })
+    }
+
+    @Test
     func launchReconciliationFinishesDeletionWithoutUsableMetadata() throws {
         let fixture = try AudioRetentionFixture()
         let controller = fixture.controller()

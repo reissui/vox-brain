@@ -601,6 +601,47 @@ struct MeetingTranscriptionCoordinatorTests {
     }
 
     @Test
+    func legacyStyleFirstRetryArchiveFailurePreservesDurableMetadata() async throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        var completed = fixture.meeting
+        completed.transcriptionState = .completed
+        completed.transcriptionAttemptCount = 1
+        let retained = try fixture.retention.finalize(
+            meeting: completed,
+            utterances: [],
+            audio: fixture.makeCapture()
+        )
+        var legacy = retained
+        legacy.title = "Durable legacy title"
+        legacy.titleSource = .manual
+        legacy.transcriptionState = .failed
+        legacy.transcriptionAttemptCount = 0
+        legacy.transcriptionErrorMessage = "Durable legacy retry detail."
+        legacy.analysisState = .completed
+        legacy.uploadState = .delivered
+        try fixture.store.save(legacy, utterances: [])
+        let failingRetention = AudioRetentionController(
+            store: fixture.store,
+            fileSystem: CoordinatorRecordingWriteFailureFileSystem()
+        )
+
+        let result = try await fixture.coordinator(
+            client: CoordinatorSuccessClient(),
+            retention: failingRetention
+        ).retry(meetingID: legacy.id)
+        let stored = try fixture.store.load(legacy.id)
+
+        #expect(result.transcriptionState == .failed)
+        #expect(stored.meeting.title == legacy.title)
+        #expect(stored.meeting.titleSource == legacy.titleSource)
+        #expect(stored.meeting.analysisState == legacy.analysisState)
+        #expect(stored.meeting.uploadState == legacy.uploadState)
+        #expect(stored.meeting.retainedAudio == legacy.retainedAudio)
+        #expect(FileManager.default.fileExists(atPath: fixture.meetingDirectory
+            .appendingPathComponent(AudioRetentionController.retainedFilename).path))
+    }
+
+    @Test
     func archiveFailureKeepsTranscriptAndSourceAudioRetryable() async throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()
