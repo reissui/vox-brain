@@ -529,6 +529,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             return MeetingTranscriptionPersistenceOutcome(
                 meeting: persistFailureIfCurrent(
                     meeting: currentMeeting,
+                    attemptUtterances: utterances,
                     message: message,
                     store: store
                 ),
@@ -583,6 +584,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             return MeetingTranscriptionPersistenceOutcome(
                 meeting: persistFailureIfCurrent(
                     meeting: completed,
+                    attemptUtterances: utterances,
                     message: Self.bounded(error),
                     store: store
                 ),
@@ -593,6 +595,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
 
     private nonisolated static func persistFailureIfCurrent(
         meeting: MeetingRecord,
+        attemptUtterances: [MeetingUtterance] = [],
         message: String,
         store: MeetingStore
     ) -> MeetingRecord {
@@ -613,8 +616,14 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         failed.lifecycleState = .completed
         failed.transcriptionState = .failed
         failed.transcriptionErrorMessage = String(message.prefix(720))
+        // A retry cannot replace a durable transcript until it succeeds. On an
+        // initial attempt there is no prior transcript, so keep any successful
+        // spans that were produced before a systemic failure.
+        let durableUtterances = current.utterances.isEmpty
+            ? attemptUtterances
+            : current.utterances
         do {
-            try store.save(failed, utterances: current.utterances)
+            try store.save(failed, utterances: durableUtterances)
             return failed
         } catch {
             return currentRecord(for: meeting.id, fallback: failed, store: store)

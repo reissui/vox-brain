@@ -51,6 +51,10 @@ enum MeetingAudioRetentionState: String, Codable, CaseIterable, Sendable {
     case pending
     case retained
     case deleted
+    /// Records written before retention intent was persisted can be
+    /// indistinguishable from either an interrupted archive or an explicit
+    /// deletion. Preserve their source files without guessing either outcome.
+    case unresolvedLegacy
 }
 
 struct RetainedAudioMetadata: Codable, Equatable, Sendable {
@@ -254,7 +258,7 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
             return .retained
         }
         if lifecycleState == .completed, transcriptionState == .completed {
-            return .deleted
+            return .unresolvedLegacy
         }
         return .pending
     }

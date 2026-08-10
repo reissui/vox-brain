@@ -168,6 +168,28 @@ struct MeetingTranscriptionCoordinatorTests {
     }
 
     @Test
+    func initialSystemicFailurePreservesSuccessfulPartialTranscript() async throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        let capture = try fixture.makeCapture()
+        let client = CoordinatorPartialSystemicClient()
+        let coordinator = fixture.coordinator(client: client)
+        let processing = try coordinator.stage(meeting: fixture.meeting, capture: capture)
+
+        let failed = await coordinator.complete(
+            meeting: processing,
+            capture: capture,
+            transcript: try fixture.transcript(client: client, capture: capture)
+        )
+        let stored = try fixture.store.load(fixture.meeting.id)
+
+        #expect(failed.transcriptionState == .failed)
+        #expect(stored.meeting == failed)
+        #expect(stored.utterances.count == 1)
+        #expect(stored.utterances.first?.source == .microphone)
+        #expect(stored.utterances.first?.text == "Keep this successful partial transcript.")
+    }
+
+    @Test
     func successfulRetryCompletesTranscriptAndArchivesRecording() async throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()
@@ -697,7 +719,7 @@ struct MeetingTranscriptionCoordinatorTests {
     }
 
     @Test
-    func launchReconciliationPurgesLegacyDeletedRawAudioWithoutRetrying() throws {
+    func launchReconciliationPreservesAmbiguousLegacyRawAudioWithoutRetrying() throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()
         let rawURLs = fixture.rawURLs(for: capture)
@@ -719,12 +741,12 @@ struct MeetingTranscriptionCoordinatorTests {
             .reconcileInterruptedJobs(at: legacyDeleted.startedAt)
         let stored = try fixture.store.load(legacyDeleted.id)
 
-        #expect(reconciled.map(\.id) == [legacyDeleted.id])
+        #expect(reconciled.isEmpty)
         #expect(stored.meeting.transcriptionState == .completed)
-        #expect(stored.meeting.audioRetentionState == .deleted)
+        #expect(stored.meeting.audioRetentionState == .unresolvedLegacy)
         #expect(stored.meeting.retainedAudio == nil)
         #expect(stored.utterances == transcript)
-        #expect(rawURLs.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+        #expect(rawURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
     }
 
     @Test
@@ -987,6 +1009,15 @@ private actor CoordinatorPartialInvalidClient: LiveTranscriptionClient {
             throw VoxTypeClientError.invalidTranscript
         }
         return "The computer transcript succeeded."
+    }
+}
+
+private actor CoordinatorPartialSystemicClient: LiveTranscriptionClient {
+    func transcribe(wavURL: URL, engine: String) async throws -> String {
+        if wavURL.lastPathComponent.contains("microphone") {
+            return "Keep this successful partial transcript."
+        }
+        throw VoxTypeUnsupportedEngineError(engine: engine)
     }
 }
 

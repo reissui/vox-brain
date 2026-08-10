@@ -84,7 +84,9 @@ text reviewable with a warning. Short or empty items remain saved, and Brain
 never auto-deletes their recordings. Capture payloads still contain no audio.
 Existing retained CAF recordings remain available for reveal, export, deletion,
 and transcription retry; a successful retry replaces the legacy recording with
-compact AAC.
+compact AAC. If an older record predates durable retention intent and could
+represent either an interrupted archive or a prior deletion, Brain preserves
+any remaining source audio without automatically restoring or deleting it.
 
 Deleting a saved recording—or its entire item—removes both its playable archive
 and retry source audio. Deleting only the recording preserves the saved
