@@ -101,6 +101,12 @@ struct MeetingViewsTests {
         #expect(controller.viewModel.visibleRows(in: .voiceNotes).map(\.id) == [voiceNoteID])
         #expect(controller.viewModel.visibleRows(in: .voiceNotes).first?.accessibilityLabel
             .contains("New voice note") == true)
+        #expect(MeetingLibraryScope.meetings.loadingTitle == "Loading meetings")
+        #expect(MeetingLibraryScope.voiceNotes.loadingTitle == "Loading voice notes")
+        #expect(MeetingLibraryScope.meetings.loadingAccessibilityLabel
+            == "Loading local meetings and processing states")
+        #expect(MeetingLibraryScope.voiceNotes.loadingAccessibilityLabel
+            == "Loading local voice notes and processing states")
 
         controller.query = "planning"
         #expect(controller.viewModel.visibleRows(in: .meetings).map(\.id) == [meetingID])

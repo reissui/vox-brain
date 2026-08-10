@@ -547,7 +547,7 @@ struct AppIntegrationTests {
         )
         #expect(
             info["NSMicrophoneUsageDescription"] as? String
-                == "Brain records your microphone for dictation and meetings."
+                == "Brain records your microphone for dictation, meetings, and Voice Notes."
         )
         #expect(
             info["NSScreenCaptureUsageDescription"] as? String

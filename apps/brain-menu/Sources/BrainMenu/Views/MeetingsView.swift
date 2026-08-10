@@ -69,6 +69,12 @@ enum MeetingLibraryScope: Equatable, Sendable {
         }
     }
 
+    var loadingTitle: String { "Loading \(title.lowercased())" }
+
+    var loadingAccessibilityLabel: String {
+        "Loading local \(title.lowercased()) and processing states"
+    }
+
     var emptyDescription: String {
         switch self {
         case .meetings: "Completed and active meetings stored on this Mac appear here."
@@ -460,7 +466,7 @@ struct MeetingsView: View {
                                 .controlSize(.small)
                                 .padding(.top, 2)
                             VStack(alignment: .leading, spacing: 5) {
-                                Text(index == 0 ? "Loading meetings" : "Reading local details")
+                                Text(index == 0 ? scope.loadingTitle : "Reading local details")
                                     .font(.body.weight(.medium))
                                 Text(index == 0
                                      ? "Brain is checking saved transcripts and processing states."
@@ -477,7 +483,7 @@ struct MeetingsView: View {
                 .padding()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Loading local meetings and processing states")
+                .accessibilityLabel(scope.loadingAccessibilityLabel)
             case .failed(let message):
                 ContentUnavailableView(
                     "\(scope.title) unavailable",
