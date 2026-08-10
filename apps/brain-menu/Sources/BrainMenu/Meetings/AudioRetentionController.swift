@@ -111,8 +111,9 @@ enum AudioRetentionControllerError: Error, Equatable, LocalizedError, Sendable {
     }
 }
 
-/// Owns the post-transcription lifetime of meeting audio. This type has no
-/// capture or upload dependency: audio is read only from a meeting's private
+/// Owns the durable post-capture lifetime of Meeting and Voice Note audio,
+/// including recovery sources and compact retained recordings. This type has
+/// no capture or upload dependency: audio is read only from the item's private
 /// Application Support directory and is never represented by an API model.
 final class AudioRetentionController: @unchecked Sendable {
     static let retainedFilename = "recording.m4a"

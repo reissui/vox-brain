@@ -1150,12 +1150,16 @@ struct MeetingViewsTests {
         )
     }
 
-    private func renderEvidence<V: View>(_ view: V, named filename: String) throws {
+    private func renderEvidence<V: View>(
+        _ view: V,
+        named filename: String,
+        height: CGFloat = 700
+    ) throws {
         let hostingView = NSHostingView(rootView: view
-            .frame(width: 900, height: 700)
+            .frame(width: 900, height: height)
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(\.colorScheme, .light))
-        hostingView.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 900, height: height)
         let window = NSWindow(
             contentRect: hostingView.frame,
             styleMask: [.titled, .closable, .resizable],
@@ -1213,6 +1217,11 @@ struct MeetingViewsTests {
         _ = controller.viewModel
         _ = controller.viewModel
         #expect(audio.deletionAvailabilityChecks == 1)
+        try renderEvidence(
+            MeetingDetailView(controller: controller),
+            named: "source-only-audio-deletion.png",
+            height: 900
+        )
         await controller.perform(.requestAudioDeletion)
         #expect(controller.isAudioDeletionPending)
         await controller.perform(.confirmAudioDeletion)
