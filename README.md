@@ -1,8 +1,9 @@
 # Vox Brain
 
-Vox Brain turns links, transcripts, designs, images, meetings, and thoughts into a
-connected plain-Markdown knowledge vault. The vault stays readable in Finder,
-Obsidian, a text editor, or any agent that can work with files.
+Vox Brain turns links, transcripts, designs, images, meetings, Voice Notes, and
+thoughts into a connected plain-Markdown knowledge vault. The vault stays
+readable in Finder, Obsidian, a text editor, or any agent that can work with
+files.
 
 Brain is local-first. Remote infrastructure is optional and stays out of the
 app unless it has been configured.
@@ -25,8 +26,8 @@ server, pairing, or MCP:
 3. Brain creates the local vault and stores all new knowledge there.
 4. Brain automatically runs the Librarian after new captures so inbox items are
    enriched, filed, linked, and reflected in maps and evidence-backed profiles.
-5. Use **AI Setup** to give the Librarian and meeting post-processing their own
-   CLI command templates, for example
+5. Use **AI Setup** to give the Librarian and meeting or Voice Note
+   post-processing their own CLI command templates, for example
    `codex exec --skip-git-repo-check --model gpt-5.6-sol`, or use **Activity**
    to follow current work.
 

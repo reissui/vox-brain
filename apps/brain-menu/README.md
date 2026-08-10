@@ -16,9 +16,13 @@ Brain asks where the canonical vault should live:
 Activity is the local-first home screen. It shows current recording,
 transcription, analysis, and Librarian work using actual local process state,
 plus recent completed work. Remote services stay hidden unless configured.
+Meetings and Voice Notes have separate top-level workspaces and saved lists;
+see the [native capture guide](../../integrations/meetings.md) for the recording
+and review workflow.
 
-Speech and meeting setup no longer blocks first launch. Brain includes VoxType
-as an optional speech engine for dictation and meeting transcription.
+Speech and recording setup no longer blocks first launch. Brain includes
+VoxType as an optional speech engine for dictation, meeting transcription, and
+Voice Note transcription.
 
 ## Included VoxType speech
 
@@ -41,9 +45,10 @@ History and records text only after VoxType logs successful output. Brain
 changes only an explicitly selected speech engine/model and leaves the rest of
 VoxType's configuration untouched.
 
-For meetings, Brain records microphone plus system audio and uses VoxType for
-local transcription. Failed or interrupted jobs retain their private source
-audio for explicit retry and never resume automatically when Brain launches.
+For meetings and Voice Notes, Brain records microphone plus system audio and
+uses VoxType for local transcription. Failed or interrupted jobs retain their
+private source audio for explicit retry and never resume automatically when
+Brain launches.
 The app checks **Microphone**, **Screen & System Audio
 Recording**, and **Accessibility** permissions only when their related features
 are used.
@@ -57,8 +62,8 @@ Local mode provides:
 - accurate local activity and Librarian progress;
 - automatic local Librarian processing after capture and every 15 minutes;
 - separate, single-line CLI command templates for Librarian work and meeting
-  post-processing under **AI Setup**; and
-- local meetings and optional VoxType speech.
+  or Voice Note post-processing under **AI Setup**; and
+- local Meetings and Voice Notes, plus optional VoxType speech.
 
 The app package contains `Contents/Resources/BrainRuntime` with the generic
 Librarian charter, prompts, templates, and CLI helpers. It contains no personal
@@ -149,8 +154,8 @@ OAuth files, source-control history, or machine-specific paths.
 
 Brain requests permissions only for features the user enables:
 
-- Microphone for meeting audio;
-- Screen & System Audio Recording for system meeting audio;
+- Microphone for meeting and Voice Note audio;
+- Screen & System Audio Recording for system audio in meetings and Voice Notes;
 - Accessibility for selected-text context and paste-related features; and
 - Notifications for app status.
 
@@ -158,9 +163,9 @@ The included VoxType login item requests its own macOS permissions when the
 speech engine first needs them; Brain cannot grant those permissions on the
 user's behalf.
 
-Meeting audio retention is off by default. Local and remote modes both keep
-recording audio on the recording Mac; only finalized transcript text can enter
-the configured Brain vault.
+Recording audio retention is off by default. Local and remote modes both keep
+meeting and Voice Note audio on the recording Mac; only finalized transcript
+text can enter the configured Brain vault.
 
 ## Development verification
 

@@ -196,7 +196,7 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
                 forKey: .retainedAudio
             ),
             // Records written before unread tracking existed are treated as
-            // already seen. Only newly completed meetings receive the New state.
+            // already seen. Only newly completed recordings receive the New state.
             isUnread: try container.decodeIfPresent(Bool.self, forKey: .isUnread) ?? false
         )
     }

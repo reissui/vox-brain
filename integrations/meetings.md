@@ -1,4 +1,4 @@
-# Native meeting capture
+# Native Meetings and Voice Notes capture
 
 Brain.app records microphone plus system audio on the Mac where the meeting
 occurs. Its included VoxType speech engine transcribes locally; a compatible
@@ -6,8 +6,12 @@ standalone VoxType installation can be used instead and takes precedence. The
 user reviews the transcript before Brain sends finalized text to the active
 local or remote vault.
 
+Meetings and Voice Notes use the same local recording and transcription
+pipeline, but they have separate top-level workspaces and saved lists in
+Brain.app.
+
 ```text
-Brain.app audio capture
+Brain.app Meeting or Voice Note capture
   → local VoxType transcription
   → local review, speakers, talk time, and optional AI analysis
   → This Mac: local inbox
@@ -26,34 +30,38 @@ Audio never enters either capture request.
    Recording**, and **Accessibility**. Accessibility supports selected-text
    context and paste-related features; Brain does not monitor global keys.
 3. Download and activate the recommended model in Brain's Speech Setup. Brain
-   defaults English meetings to Parakeet TDT 0.6B v3; Whisper large-v3-turbo is
-   the multilingual fallback. Additional catalog models remain available in
-   Speech settings. See the
+   defaults English transcription to Whisper Small (English); Whisper Large v3
+   Turbo is the multilingual fallback. Additional catalog models remain
+   available in Speech settings. See the
    [VoxType model guide](https://voxtype.io/docs/MODEL_SELECTION_GUIDE).
 4. In **Audio Tests**, speak for the full microphone test and require visible
    input. A pinned input uses its persistent Core Audio UID and never silently
    switches when missing.
 5. Leave **Keep meeting recordings** off unless local retention is an explicit
-   choice.
-6. Keep meeting AI disabled or select and test a local CLI provider. Brain
-   discloses that transcript text goes to that provider and may consume its
-   billing or credits.
+   choice. This setting also governs Voice Note audio.
+6. Keep meeting and Voice Note AI disabled or select and test a local CLI
+   provider. Brain discloses that transcript text goes to that provider and may
+   consume its billing or credits.
 
 ## Start, finish, and review
 
 Brain may suggest a meeting when a supported call app is active, but it never
 starts or stops recording automatically.
 
-1. Choose **Start Meeting**, or **Record Voice Note** for a solo dictated
-   session, and confirm the microphone meter moves.
-2. Brain warns when no usable microphone signal arrives during startup and
-   keeps recording so a muted or temporarily quiet input does not discard the
+1. Open **Meetings** and choose **Start Meeting**, or open the separate **Voice
+   Notes** section and choose **Record Voice Note** for a solo dictated session.
+   Confirm the microphone meter moves.
+2. Brain automatically retries transient macOS microphone startup failures. A
+   genuinely unavailable source still ends startup with an error. Once
+   connected, Brain warns when no usable microphone signal arrives and keeps
+   recording so a muted or temporarily quiet input does not discard the
    session.
-3. Pause/resume explicitly. Dictation cannot take the microphone during a
-   meeting.
+3. Pause/resume explicitly. Dictation cannot take the microphone during either
+   kind of recording.
 4. Choose **End & Process**. Dismissing the prompt keeps recording.
-5. Review transcript, speakers, talk-time totals, summary, action items, and
-   any email draft.
+5. Review the saved item in its own section. Meetings include transcript,
+   speakers, talk-time totals, summary, action items, and any email draft;
+   Voice Notes remain in the Voice Notes list even after they are renamed.
 6. Upload the finalized transcript. Later edits require an explicit revision.
 
 With retention off, Brain removes local audio after final transcript
@@ -62,7 +70,8 @@ but the capture payload still contains no audio.
 
 Recording and transcription work is bounded. A failing speech source stops
 after repeated errors, partial transcripts remain reviewable, and interrupted
-capture or processing is surfaced as a retryable meeting at the next launch.
+capture or processing is surfaced as a retryable saved recording at the next
+launch.
 
 ## Delivery behavior
 
@@ -75,14 +84,15 @@ remote inbox.
 
 ## Smoke test
 
-Before relying on meeting capture:
+Before relying on Meetings or Voice Notes:
 
 1. Run one VoxType dictation.
 2. Record a short meeting with audible microphone and system audio.
-3. End, process, review, and correct speakers.
-4. Confirm the default reports no retained recording.
-5. Confirm the transcript reaches the selected local or remote inbox.
-6. Inspect the capture and verify it contains text but no audio.
+3. Record a short Voice Note and confirm it appears only in **Voice Notes**.
+4. End, process, review, and correct speakers where applicable.
+5. Confirm the default reports no retained recording.
+6. Confirm both transcripts reach the selected local or remote inbox.
+7. Inspect each capture and verify it contains text but no audio.
 
 Retain the previous app artifact until this passes.
 
