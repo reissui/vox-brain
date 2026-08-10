@@ -93,11 +93,12 @@ struct RemoteFirstAcceptanceTests {
         // windows. The package's controller stress suite runs in parallel with
         // this acceptance suite, so wait for its deliberately held job to
         // finish before exercising this app window's real confirmation flow.
-        try await Task.sleep(for: .seconds(2))
-        #expect(actions.request(.process) == .confirmationRequired(.process))
+        #expect(try await requestWhenAvailable(.process, from: actions)
+            == .confirmationRequired(.process))
         _ = await actions.confirmPendingAction()
         #expect(actions.displayedState == .completed)
-        #expect(actions.request(.digest) == .confirmationRequired(.digest))
+        #expect(try await requestWhenAvailable(.digest, from: actions)
+            == .confirmationRequired(.digest))
         _ = await actions.confirmPendingAction()
         #expect(actions.displayedState == .completed)
 
@@ -244,6 +245,20 @@ struct RemoteFirstAcceptanceTests {
             detail: id,
             remediation: nil
         )
+    }
+
+    private func requestWhenAvailable(
+        _ action: RemoteBrainAction,
+        from controller: RemoteBrainController
+    ) async throws -> RemoteBrainRequestResult {
+        for _ in 0..<1_000 {
+            let result = controller.request(action)
+            guard result == .rejected(RemoteBrainController.concurrentMutationMessage) else {
+                return result
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return controller.request(action)
     }
 }
 

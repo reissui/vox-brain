@@ -251,8 +251,10 @@ struct MeetingControllerTests {
 
         #expect(fixture.controller.state == .recording)
         #expect(fixture.controller.currentMeeting?.detectedApplication == "Huddle")
+        #expect(fixture.controller.currentMeeting?.recordingKind == .meeting)
         #expect(fixture.recorder.actions == [.start(MeetingRecordingRequest(
             meetingID: try #require(fixture.controller.currentMeeting?.id),
+            recordingKind: .meeting,
             application: unknownApp,
             startedAt: fixture.clock.now,
             title: "Meeting in Huddle",
@@ -270,10 +272,12 @@ struct MeetingControllerTests {
         let meeting = try #require(fixture.controller.currentMeeting)
         #expect(fixture.controller.state == .recording)
         #expect(meeting.title == "Voice note")
+        #expect(meeting.recordingKind == .voiceNote)
         #expect(meeting.titleSource == .manual)
         #expect(meeting.detectedApplication == nil)
         #expect(fixture.recorder.actions == [.start(MeetingRecordingRequest(
             meetingID: meeting.id,
+            recordingKind: .voiceNote,
             application: nil,
             startedAt: fixture.clock.now,
             title: "Voice note",

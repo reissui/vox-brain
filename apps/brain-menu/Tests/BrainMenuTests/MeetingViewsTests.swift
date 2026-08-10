@@ -53,7 +53,13 @@ struct MeetingViewsTests {
 
         #expect(controller.state == .loaded)
         #expect(controller.rows.map(\.id) == [newID, oldID])
-        #expect(controller.rows[0].badges.map(\.kind) == MeetingBadgeKind.allCases.dropLast())
+        #expect(controller.rows[0].badges.map(\.kind) == [
+            .recording,
+            .transcription,
+            .analysis,
+            .audio,
+            .upload,
+        ])
         #expect(controller.rows[0].badges.allSatisfy { !$0.accessibilityLabel.isEmpty })
         #expect(controller.rows[0].accessibilityLabel.contains("Upload status: Delivered"))
 
@@ -65,6 +71,53 @@ struct MeetingViewsTests {
         #expect(controller.viewModel.hasNoSearchResults)
         #expect(store.listCalls == 1)
         #expect(store.loadCalls == 2)
+    }
+
+    @Test
+    func voiceNotesAndMeetingsAppearOnlyInTheirOwnLibraries() {
+        let meetingID = UUID()
+        let voiceNoteID = UUID()
+        let meeting = meeting(
+            id: meetingID,
+            title: "Planning",
+            start: Date(timeIntervalSince1970: 1_000)
+        )
+        let voiceNote = MeetingRecord(
+            id: voiceNoteID,
+            title: "Voice note",
+            recordingKind: .voiceNote,
+            titleSource: .manual,
+            startedAt: Date(timeIntervalSince1970: 2_000),
+            endedAt: Date(timeIntervalSince1970: 2_060),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+        let controller = MeetingsController(
+            store: MemoryMeetingViewStore(values: [
+                meetingID: StoredMeeting(meeting: meeting, utterances: []),
+                voiceNoteID: StoredMeeting(meeting: voiceNote, utterances: []),
+            ], listOrder: [meetingID, voiceNoteID]),
+            analysisStore: MemoryMeetingViewAnalysisStore()
+        )
+
+        controller.load()
+
+        #expect(controller.viewModel.visibleRows(in: .meetings).map(\.id) == [meetingID])
+        #expect(controller.viewModel.visibleRows(in: .voiceNotes).map(\.id) == [voiceNoteID])
+        #expect(controller.viewModel.visibleRows(in: .voiceNotes).first?.accessibilityLabel
+            .contains("New voice note") == true)
+        #expect(MeetingLibraryScope.meetings.loadingTitle == "Loading meetings")
+        #expect(MeetingLibraryScope.voiceNotes.loadingTitle == "Loading voice notes")
+        #expect(MeetingLibraryScope.meetings.loadingAccessibilityLabel
+            == "Loading local meetings and processing states")
+        #expect(MeetingLibraryScope.voiceNotes.loadingAccessibilityLabel
+            == "Loading local voice notes and processing states")
+
+        controller.query = "planning"
+        #expect(controller.viewModel.visibleRows(in: .meetings).map(\.id) == [meetingID])
+        #expect(controller.viewModel.visibleRows(in: .voiceNotes).isEmpty)
+        #expect(controller.viewModel.hasNoSearchResults(in: .voiceNotes))
     }
 
     @Test
@@ -166,6 +219,14 @@ struct MeetingViewsTests {
         )
         #expect(microphoneOnly.isReceivingAudio)
         #expect(microphoneOnly.audioStatusText == "Receiving microphone audio…")
+
+        let voiceNoteStop = RecordingIslandMeetingPresentation(
+            phase: .stopSuggested,
+            title: "Field note",
+            recordingKind: .voiceNote,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+        #expect(voiceNoteStop.phaseTitle == "Finish this voice note?")
     }
 
     @Test
@@ -472,6 +533,89 @@ struct MeetingViewsTests {
             return
         }
         #expect(message.contains("test failure"))
+    }
+
+    @Test
+    func voiceNoteDetailKeepsItsKindThroughRenameValidationAndDeletion() async throws {
+        let id = UUID()
+        let record = MeetingRecord(
+            id: id,
+            title: "Field note",
+            recordingKind: .voiceNote,
+            titleSource: .manual,
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            endedAt: Date(timeIntervalSince1970: 1_060),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+        let store = MemoryMeetingViewStore(values: [
+            id: StoredMeeting(meeting: record, utterances: []),
+        ])
+        let controller = MeetingDetailController(
+            meetingID: id,
+            store: store,
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: MeetingDetailAudioSpy(meeting: record),
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: MeetingClipboardSpy()
+        )
+
+        controller.load()
+        await controller.perform(.saveTitle("Renamed thought"))
+        #expect(store.values[id]?.meeting.recordingKind == .voiceNote)
+        #expect(controller.viewModel.isVoiceNote)
+
+        await controller.perform(.saveTitle("   "))
+        #expect(controller.viewModel.errorMessage == "A voice note title cannot be empty.")
+
+        await controller.perform(.requestMeetingDeletion)
+        await controller.perform(.confirmMeetingDeletion)
+        #expect(controller.state == .deleted)
+        #expect(controller.viewModel.isVoiceNote)
+    }
+
+    @Test
+    func ambiguousLegacyRecordingCanBeExplicitlyMovedToVoiceNotes() async throws {
+        let id = UUID()
+        let record = MeetingRecord(
+            id: id,
+            title: "Renamed older recording",
+            recordingKind: .meeting,
+            recordingKindNeedsReview: true,
+            titleSource: .manual,
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            endedAt: Date(timeIntervalSince1970: 1_060),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+        let store = MemoryMeetingViewStore(values: [
+            id: StoredMeeting(meeting: record, utterances: []),
+        ])
+        let controller = MeetingDetailController(
+            meetingID: id,
+            store: store,
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: MeetingDetailAudioSpy(meeting: record),
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: MeetingClipboardSpy()
+        )
+
+        controller.load()
+        #expect(controller.viewModel.recordingKindNeedsReview)
+        #expect(MeetingsController.badges(for: record).contains {
+            $0.kind == .classification && $0.title == "Choose section"
+        })
+
+        await controller.perform(.setRecordingKind(.voiceNote))
+
+        #expect(controller.viewModel.isVoiceNote)
+        #expect(!controller.viewModel.recordingKindNeedsReview)
+        #expect(store.values[id]?.meeting.recordingKind == .voiceNote)
+        #expect(store.values[id]?.meeting.recordingKindNeedsReview == false)
     }
 
     @Test

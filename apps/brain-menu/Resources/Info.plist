@@ -35,8 +35,8 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Brain records your microphone for dictation and meetings.</string>
+	<string>Brain records your microphone for dictation, meetings, and Voice Notes.</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>Brain records system audio during meetings and captures only screenshots you explicitly select; it never records video.</string>
+	<string>Brain records system audio for Meetings and Voice Notes, and captures only screenshots you explicitly select; it never records video.</string>
 </dict>
 </plist>

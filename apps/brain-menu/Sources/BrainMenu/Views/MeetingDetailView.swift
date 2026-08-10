@@ -57,6 +57,8 @@ struct MeetingFollowUpViewModel: Equatable, Sendable {
 struct MeetingDetailViewModel: Equatable, Sendable {
     let state: MeetingDetailLoadState
     let meetingID: UUID?
+    let isVoiceNote: Bool
+    let recordingKindNeedsReview: Bool
     let title: String
     let dateText: String
     let durationText: String
@@ -184,6 +186,7 @@ final class SystemMeetingClipboard: MeetingClipboardWriting {
 
 enum MeetingDetailAction: Equatable, Sendable {
     case saveTitle(String)
+    case setRecordingKind(MeetingRecordingKind)
     case selectTab(MeetingDetailTab)
     case renameSpeaker(id: String, name: String)
     case mergeSpeakers(sourceIDs: Set<String>, into: String)
@@ -211,6 +214,7 @@ enum MeetingDetailAction: Equatable, Sendable {
 @Observable
 final class MeetingDetailController {
     static let meetingDeletionWarning = "Delete this meeting from this Mac? This removes only local application state. It does not retract a capture already delivered to the Brain vault."
+    static let voiceNoteDeletionWarning = "Delete this voice note from this Mac? This removes only local application state. It does not retract a capture already delivered to the Brain vault."
     static let audioDeletionWarning = "Delete this retained recording from this Mac? The transcript and any delivered vault capture remain available."
 
     private(set) var state: MeetingDetailLoadState = .idle
@@ -240,6 +244,7 @@ final class MeetingDetailController {
     @ObservationIgnored private let audioChecker: any MeetingLocalAudioChecking
     @ObservationIgnored private let clipboard: any MeetingClipboardWriting
     @ObservationIgnored private let transcriptionController: any MeetingTranscriptionRetrying
+    @ObservationIgnored private var lastKnownRecordingKind: MeetingRecordingKind = .meeting
 
     init(
         meetingID: UUID,
@@ -311,6 +316,8 @@ final class MeetingDetailController {
         return MeetingDetailViewModel(
             state: state,
             meetingID: meeting?.id,
+            isVoiceNote: (meeting?.recordingKind ?? lastKnownRecordingKind) == .voiceNote,
+            recordingKindNeedsReview: meeting?.recordingKindNeedsReview ?? false,
             title: meeting?.title ?? "Meeting",
             dateText: meeting.map { Self.dateFormatter.string(from: $0.startedAt) } ?? "",
             durationText: meeting.map {
@@ -346,7 +353,9 @@ final class MeetingDetailController {
             errorMessage: errorMessage ?? uploadController.errorMessage,
             copiedMessage: copiedMessage,
             meetingDeletionWarning: isMeetingDeletionPending
-                ? Self.meetingDeletionWarning
+                ? (meeting?.isVoiceNote == true
+                    ? Self.voiceNoteDeletionWarning
+                    : Self.meetingDeletionWarning)
                 : nil,
             audioDeletionWarning: isAudioDeletionPending
                 ? Self.audioDeletionWarning
@@ -373,6 +382,7 @@ final class MeetingDetailController {
                 stored = StoredMeeting(meeting: stored.meeting, utterances: cleanedUtterances)
             }
             meeting = stored.meeting
+            lastKnownRecordingKind = stored.meeting.recordingKind
             utterances = stored.utterances
             titleDraft = stored.meeting.title
             loadUploadRevision()
@@ -429,6 +439,8 @@ final class MeetingDetailController {
         switch action {
         case .saveTitle(let title):
             saveTitle(title)
+        case .setRecordingKind(let kind):
+            setRecordingKind(kind)
         case .selectTab(let tab):
             selectedTab = tab
         case .renameSpeaker(let id, let name):
@@ -505,7 +517,9 @@ final class MeetingDetailController {
         guard var meeting else { return }
         let title = proposed.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else {
-            errorMessage = "A meeting title cannot be empty."
+            errorMessage = meeting.isVoiceNote
+                ? "A voice note title cannot be empty."
+                : "A meeting title cannot be empty."
             titleDraft = meeting.title
             return
         }
@@ -520,6 +534,25 @@ final class MeetingDetailController {
         } catch {
             errorMessage = Self.bounded(error)
             titleDraft = self.meeting?.title ?? ""
+        }
+    }
+
+    private func setRecordingKind(_ recordingKind: MeetingRecordingKind) {
+        guard var meeting else { return }
+        guard meeting.recordingKind != recordingKind || meeting.recordingKindNeedsReview else {
+            return
+        }
+        let previousMeeting = meeting
+        meeting.recordingKind = recordingKind
+        meeting.recordingKindNeedsReview = false
+        do {
+            try store.save(meeting, utterances: utterances)
+            self.meeting = meeting
+            lastKnownRecordingKind = recordingKind
+            errorMessage = nil
+        } catch {
+            self.meeting = previousMeeting
+            errorMessage = "The recording section was not changed: \(Self.bounded(error))"
         }
     }
 
@@ -543,7 +576,9 @@ final class MeetingDetailController {
 
     private func acceptSpeakerSuggestion(_ utteranceID: UUID) {
         guard let analysisController else {
-            errorMessage = "Meeting analysis is not configured."
+            errorMessage = meeting?.isVoiceNote == true
+                ? "Voice note analysis is not configured."
+                : "Meeting analysis is not configured."
             return
         }
         var candidate = editor
@@ -588,7 +623,8 @@ final class MeetingDetailController {
         do {
             try store.save(result.meeting, utterances: result.utterances)
         } catch {
-            errorMessage = "Analysis finished, but its meeting state was not saved: \(Self.bounded(error))"
+            let item = result.meeting.isVoiceNote ? "voice note" : "meeting"
+            errorMessage = "Analysis finished, but its \(item) state was not saved: \(Self.bounded(error))"
             return
         }
         errorMessage = result.failure.map(Self.analysisFailureMessage)
@@ -720,7 +756,7 @@ final class MeetingDetailController {
         case .providerNotReady: "The configured local AI provider is not ready."
         case .providerFailure(let failure): failure.localizedDescription
         case .cancelled: "Analysis was cancelled."
-        case .schemaFailure: "The AI response did not match the meeting analysis schema."
+        case .schemaFailure: "The AI response did not match the expected analysis schema."
         case .persistenceFailure: "The previous analysis remains because the new result could not be saved."
         }
     }
@@ -750,7 +786,9 @@ struct MeetingDetailView: View {
                 unavailable(title: "Meeting unavailable", message: message)
             case .deleted:
                 ContentUnavailableView(
-                    "Meeting deleted locally",
+                    controller.viewModel.isVoiceNote
+                        ? "Voice note deleted locally"
+                        : "Meeting deleted locally",
                     systemImage: "trash",
                     description: Text("A previously delivered vault capture was not retracted.")
                 )
@@ -758,7 +796,7 @@ struct MeetingDetailView: View {
                 detail(controller.viewModel)
             }
         }
-        .navigationTitle("Meeting")
+        .navigationTitle(controller.viewModel.isVoiceNote ? "Voice Note" : "Meeting")
         .task {
             controller.load()
             await controller.resumeUploadIfNeeded()
@@ -781,11 +819,16 @@ struct MeetingDetailView: View {
             Text(controller.viewModel.audioDeletionWarning ?? "")
         }
         .confirmationDialog(
-            "Delete meeting from this Mac?",
+            controller.viewModel.isVoiceNote
+                ? "Delete voice note from this Mac?"
+                : "Delete meeting from this Mac?",
             isPresented: meetingConfirmationBinding,
             titleVisibility: .visible
         ) {
-            Button("Delete Local Meeting", role: .destructive) {
+            Button(
+                controller.viewModel.isVoiceNote ? "Delete Local Voice Note" : "Delete Local Meeting",
+                role: .destructive
+            ) {
                 Task { await controller.perform(.confirmMeetingDeletion) }
             }
             Button("Cancel", role: .cancel) {
@@ -809,7 +852,7 @@ struct MeetingDetailView: View {
         VStack(spacing: 0) {
             detailHeader(model)
             Divider()
-            Picker("Meeting section", selection: tabBinding) {
+            Picker(model.isVoiceNote ? "Voice note section" : "Meeting section", selection: tabBinding) {
                 ForEach(MeetingDetailTab.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
@@ -827,15 +870,29 @@ struct MeetingDetailView: View {
     private func detailHeader(_ model: MeetingDetailViewModel) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                TextField("Meeting title", text: $controller.titleDraft)
+                TextField(model.isVoiceNote ? "Voice note title" : "Meeting title", text: $controller.titleDraft)
                     .font(.title2.bold())
                     .onSubmit {
                         Task { await controller.perform(.saveTitle(controller.titleDraft)) }
                     }
-                    .accessibilityLabel("Meeting title")
+                    .accessibilityLabel(model.isVoiceNote ? "Voice note title" : "Meeting title")
                 Spacer()
-                Menu("Meeting actions", systemImage: "ellipsis.circle") {
-                    Button("Delete Local Meeting", systemImage: "trash", role: .destructive) {
+                Menu(model.isVoiceNote ? "Voice note actions" : "Meeting actions", systemImage: "ellipsis.circle") {
+                    Button(
+                        model.isVoiceNote ? "Move to Meetings" : "Move to Voice Notes",
+                        systemImage: "arrow.left.arrow.right"
+                    ) {
+                        Task {
+                            await controller.perform(.setRecordingKind(
+                                model.isVoiceNote ? .meeting : .voiceNote
+                            ))
+                        }
+                    }
+                    Button(
+                        model.isVoiceNote ? "Delete Local Voice Note" : "Delete Local Meeting",
+                        systemImage: "trash",
+                        role: .destructive
+                    ) {
                         Task { await controller.perform(.requestMeetingDeletion) }
                     }
                     .keyboardShortcut(.delete, modifiers: [.command, .shift])
@@ -848,6 +905,27 @@ struct MeetingDetailView: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+            if model.recordingKindNeedsReview {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Choose a section for this older recording", systemImage: "questionmark.folder")
+                        .font(.callout.weight(.semibold))
+                    Text("Brain kept it in Meetings because older recordings did not store whether they were a meeting or a voice note.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button("Keep in Meetings") {
+                            Task { await controller.perform(.setRecordingKind(.meeting)) }
+                        }
+                        Button("Move to Voice Notes") {
+                            Task { await controller.perform(.setRecordingKind(.voiceNote)) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityElement(children: .combine)
+            }
             HStack(spacing: 8) {
                 ForEach(model.badges) { badge in
                     Label(badge.title, systemImage: badge.systemImage)
@@ -1059,7 +1137,10 @@ struct MeetingDetailView: View {
                     }
                 }
                 if model.uploadCanReupload {
-                    Button("Re-upload Changed Meeting", systemImage: "icloud.and.arrow.up") {
+                    Button(
+                        model.isVoiceNote ? "Re-upload Changed Voice Note" : "Re-upload Changed Meeting",
+                        systemImage: "icloud.and.arrow.up"
+                    ) {
                         Task { await controller.perform(.reupload) }
                     }
                 }
@@ -1072,7 +1153,7 @@ struct MeetingDetailView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Local audio").font(.title3.bold())
             if model.audioControls.isEmpty {
-                Text("No retained recording. Meeting audio retention is off by default.")
+                Text("No retained recording. Audio retention is off by default.")
                     .foregroundStyle(.secondary)
             } else {
                 HStack {
@@ -1096,7 +1177,7 @@ struct MeetingDetailView: View {
             if model.transcriptionState == .processing || model.transcriptionState == .pending {
                 MeetingWorkPlaceholder(
                     title: model.transcriptionState == .processing
-                        ? "Transcribing meeting"
+                        ? (model.isVoiceNote ? "Transcribing voice note" : "Transcribing meeting")
                         : "Transcript queued",
                     detail: model.transcriptionState == .processing
                         ? "Brain is processing the saved recording locally. The transcript will appear here when it is ready."
@@ -1112,7 +1193,9 @@ struct MeetingDetailView: View {
                         : "text.quote",
                     description: Text(
                         model.transcriptionMessage
-                            ?? "The meeting completed without visible utterances."
+                            ?? (model.isVoiceNote
+                                ? "The voice note completed without visible utterances."
+                                : "The meeting completed without visible utterances.")
                     )
                 )
             }

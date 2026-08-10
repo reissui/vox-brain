@@ -54,17 +54,11 @@ The manual **Capture…** form accepts:
 Every remote request uses a stable idempotency key. Retryable failures preserve
 the request; accepted captures are polled without resubmitting their body.
 
-## Speech and meetings
+## Speech and native recordings
 
-Brain includes VoxType as an optional engine for dictation and local meeting
-transcription. Speech Setup enables it in-app, while a compatible standalone
-VoxType installation remains supported and takes precedence. Brain can also
-download and activate its recommended speech model in-app. Brain records
-microphone and system audio locally, lets the user review the transcript, and
-sends only finalized transcript text to the active Brain mode. Meeting audio
-is never uploaded.
-
-See [meetings.md](meetings.md).
+Brain's dictation, Meetings, and Voice Notes recording workflow—including
+local transcription, review, delivery, and audio privacy—is documented in
+[meetings.md](meetings.md).
 
 ## Remote-only capture clients
 

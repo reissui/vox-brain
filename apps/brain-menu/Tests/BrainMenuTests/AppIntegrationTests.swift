@@ -11,6 +11,7 @@ struct AppIntegrationTests {
         #expect(DashboardSection.allCases == [
             .activity,
             .dictation,
+            .voiceNotes,
             .meetings,
             .aiSetup,
             .settings,
@@ -263,6 +264,21 @@ struct AppIntegrationTests {
         #expect(meeting.state == .completed)
         #expect(graph.activity == .idle)
         #expect(graph.recordingIsland.presentation == .hidden)
+
+        recorder.suspendStop = true
+        await graph.startVoiceNote()
+        #expect(graph.activity == .dictation(
+            label: "Recording voice note",
+            startedAt: meeting.currentMeeting?.startedAt ?? .distantPast
+        ))
+        let stoppingVoiceNote = Task { await meeting.stop() }
+        await recorder.waitUntilStopSuspends()
+        #expect(meeting.state == .finalizing)
+        #expect(graph.activity == .transcribing("Finalizing voice note"))
+        recorder.releaseStop()
+        await stoppingVoiceNote.value
+        #expect(meeting.state == .completed)
+        #expect(graph.activity == .idle)
     }
 
     @Test
@@ -546,11 +562,11 @@ struct AppIntegrationTests {
         )
         #expect(
             info["NSMicrophoneUsageDescription"] as? String
-                == "Brain records your microphone for dictation and meetings."
+                == "Brain records your microphone for dictation, meetings, and Voice Notes."
         )
         #expect(
             info["NSScreenCaptureUsageDescription"] as? String
-                == "Brain records system audio during meetings and captures only screenshots you explicitly select; it never records video."
+                == "Brain records system audio for Meetings and Voice Notes, and captures only screenshots you explicitly select; it never records video."
         )
         for prohibited in [
             "NSCameraUsageDescription",

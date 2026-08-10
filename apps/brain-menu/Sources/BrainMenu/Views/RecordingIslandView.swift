@@ -103,7 +103,7 @@ struct RecordingIslandView: View {
                                 Text(application)
                                 Text("·")
                             }
-                            Text(value.phase.title)
+                            Text(value.phaseTitle)
                             Text("·")
                             Text(elapsed(from: value.startedAt, to: context.date))
                                 .monospacedDigit()
@@ -118,7 +118,7 @@ struct RecordingIslandView: View {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.title2)
                             .foregroundStyle(.green)
-                            .accessibilityLabel("Meeting saved")
+                            .accessibilityLabel(value.isVoiceNote ? "Voice note saved" : "Meeting saved")
                     } else {
                         VStack(alignment: .trailing, spacing: 4) {
                             if let microphone = value.microphone {
@@ -155,7 +155,7 @@ struct RecordingIslandView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityLabel(
                         value.latestTranscriptLine?.nilIfBlank == nil
-                            ? "Meeting audio status"
+                            ? (value.isVoiceNote ? "Voice note audio status" : "Meeting audio status")
                             : "Latest transcript"
                     )
                     .accessibilityValue(value.latestTranscriptLine?.nilIfBlank ?? value.audioStatusText)
@@ -165,7 +165,9 @@ struct RecordingIslandView: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityLabel("Meeting audio warning. \(guidance)")
+                        .accessibilityLabel(
+                            "\(value.isVoiceNote ? "Voice note" : "Meeting") audio warning. \(guidance)"
+                        )
                 }
 
                 if let message = value.microphone?.switchErrorMessage {

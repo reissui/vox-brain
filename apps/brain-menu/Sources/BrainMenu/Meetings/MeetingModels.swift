@@ -41,6 +41,11 @@ enum MeetingTitleSource: String, Codable, CaseIterable, Sendable {
     case manual
 }
 
+enum MeetingRecordingKind: String, Codable, CaseIterable, Sendable {
+    case meeting
+    case voiceNote
+}
+
 struct RetainedAudioMetadata: Codable, Equatable, Sendable {
     var filename: String
     var format: String
@@ -66,6 +71,8 @@ struct RetainedAudioMetadata: Codable, Equatable, Sendable {
 struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     var id: UUID
     var title: String
+    var recordingKind: MeetingRecordingKind
+    var recordingKindNeedsReview: Bool
     var titleSource: MeetingTitleSource
     var detectedApplication: String?
     var startedAt: Date
@@ -81,9 +88,15 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     var retainedAudio: RetainedAudioMetadata?
     var isUnread: Bool
 
+    var isVoiceNote: Bool {
+        recordingKind == .voiceNote
+    }
+
     init(
         id: UUID = UUID(),
         title: String,
+        recordingKind: MeetingRecordingKind = .meeting,
+        recordingKindNeedsReview: Bool = false,
         titleSource: MeetingTitleSource? = nil,
         detectedApplication: String? = nil,
         startedAt: Date,
@@ -101,6 +114,8 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     ) {
         self.id = id
         self.title = title
+        self.recordingKind = recordingKind
+        self.recordingKindNeedsReview = recordingKindNeedsReview
         self.titleSource = titleSource ?? Self.inferredTitleSource(for: title)
         self.detectedApplication = detectedApplication
         self.startedAt = startedAt
@@ -121,6 +136,8 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id
         case title
+        case recordingKind
+        case recordingKindNeedsReview
         case titleSource
         case detectedApplication
         case startedAt
@@ -140,15 +157,31 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let title = try container.decode(String.self, forKey: .title)
+        let titleSource = try container.decodeIfPresent(MeetingTitleSource.self, forKey: .titleSource)
+            ?? Self.inferredTitleSource(for: title)
+        let detectedApplication = try container.decodeIfPresent(
+            String.self,
+            forKey: .detectedApplication
+        )
+        let persistedRecordingKind = try container.decodeIfPresent(
+            MeetingRecordingKind.self,
+            forKey: .recordingKind
+        )
+        let legacyMigration = Self.legacyRecordingKindMigration(
+            title: title,
+            titleSource: titleSource,
+            detectedApplication: detectedApplication
+        )
         self.init(
             id: try container.decode(UUID.self, forKey: .id),
             title: title,
-            titleSource: try container.decodeIfPresent(MeetingTitleSource.self, forKey: .titleSource)
-                ?? Self.inferredTitleSource(for: title),
-            detectedApplication: try container.decodeIfPresent(
-                String.self,
-                forKey: .detectedApplication
-            ),
+            recordingKind: persistedRecordingKind ?? legacyMigration.kind,
+            recordingKindNeedsReview: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .recordingKindNeedsReview
+            ) ?? (persistedRecordingKind == nil && legacyMigration.needsReview),
+            titleSource: titleSource,
+            detectedApplication: detectedApplication,
             startedAt: try container.decode(Date.self, forKey: .startedAt),
             endedAt: try container.decodeIfPresent(Date.self, forKey: .endedAt),
             lifecycleState: try container.decode(MeetingLifecycleState.self, forKey: .lifecycleState),
@@ -173,7 +206,7 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
                 forKey: .retainedAudio
             ),
             // Records written before unread tracking existed are treated as
-            // already seen. Only newly completed meetings receive the New state.
+            // already seen. Only newly completed recordings receive the New state.
             isUnread: try container.decodeIfPresent(Bool.self, forKey: .isUnread) ?? false
         )
     }
@@ -183,6 +216,25 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         return normalized == "meeting" || normalized.hasPrefix("meeting in ")
             ? .application
             : .manual
+    }
+
+    private static func legacyRecordingKindMigration(
+        title: String,
+        titleSource: MeetingTitleSource,
+        detectedApplication: String?
+    ) -> (kind: MeetingRecordingKind, needsReview: Bool) {
+        guard titleSource == .manual, detectedApplication == nil else {
+            return (.meeting, false)
+        }
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.caseInsensitiveCompare("Voice note") == .orderedSame {
+            return (.voiceNote, false)
+        }
+
+        // Before recordingKind existed, a manually started meeting and a
+        // renamed voice note had identical metadata. Keep ambiguous records in
+        // Meetings and surface an explicit section choice instead of guessing.
+        return (.meeting, true)
     }
 }
 

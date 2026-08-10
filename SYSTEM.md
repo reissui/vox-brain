@@ -18,8 +18,9 @@ deployment modes: local-only and optional remote.
    deleted or merged.
 5. **Plain files remain sufficient.** A user can inspect, search, back up, and
    recover the vault without Brain.app or a remote service.
-6. **Audio stays local to the recording Mac.** Meeting audio is never uploaded.
-   Only an explicitly finalized transcript can enter the active Brain vault.
+6. **Audio stays local to the recording Mac.** Meeting and Voice Note audio is
+   never uploaded. Only an explicitly finalized transcript can enter the active
+   Brain vault.
 
 ## Local-only mode
 

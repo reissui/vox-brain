@@ -43,7 +43,8 @@ knowledge store.
 - macOS 14 or newer for Brain.app
 - Python 3 and standard macOS command-line tools for the CLI
 - Codex signed in with ChatGPT for `process`, `digest`, `ask`, and `journal`
-- VoxType only for optional dictation and meeting transcription
+- VoxType only for optional dictation, meeting transcription, and Voice Note
+  transcription
 
 Capture, Markdown storage, local knowledge search, and document reading do not
 depend on Codex, VoxType, Git, MCP, or any remote service.

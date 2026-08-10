@@ -149,6 +149,7 @@ struct RecordingIslandMicrophonePresentation: Equatable, Sendable {
 struct RecordingIslandMeetingPresentation: Equatable, Sendable {
     var phase: RecordingIslandMeetingPhase
     var title: String
+    var recordingKind: MeetingRecordingKind
     var applicationName: String?
     var startedAt: Date
     var microphone: RecordingIslandMicrophonePresentation?
@@ -160,6 +161,19 @@ struct RecordingIslandMeetingPresentation: Equatable, Sendable {
     var systemSignalState: MeetingAudioSignalState
     var latestTranscriptLine: String?
     var guidance: String?
+
+    var isVoiceNote: Bool { recordingKind == .voiceNote }
+
+    var phaseTitle: String {
+        guard isVoiceNote else { return phase.title }
+        return switch phase {
+        case .stopSuggested: "Finish this voice note?"
+        case .saved: "Voice note added"
+        default: phase.title
+        }
+    }
+
+    var libraryName: String { isVoiceNote ? "Voice Notes" : "Meetings" }
 
     var isReceivingAudio: Bool {
         guard phase == .starting || phase == .recording || phase == .stopSuggested else {
@@ -175,7 +189,7 @@ struct RecordingIslandMeetingPresentation: Equatable, Sendable {
         case .finalizing:
             return "Processing captured audio…"
         case .saved:
-            return "Added to Meetings. It is now at the top of the list."
+            return "Added to \(libraryName). It is now at the top of the list."
         case .starting, .recording, .stopSuggested:
             switch (microphoneSignalState == .active, systemSignalState == .active) {
             case (true, true):
@@ -194,6 +208,7 @@ struct RecordingIslandMeetingPresentation: Equatable, Sendable {
     init(
         phase: RecordingIslandMeetingPhase,
         title: String,
+        recordingKind: MeetingRecordingKind = .meeting,
         applicationName: String? = nil,
         startedAt: Date,
         microphone: RecordingIslandMicrophonePresentation? = nil,
@@ -208,6 +223,7 @@ struct RecordingIslandMeetingPresentation: Equatable, Sendable {
     ) {
         self.phase = phase
         self.title = title
+        self.recordingKind = recordingKind
         self.applicationName = applicationName
         self.startedAt = startedAt
         self.microphone = microphone
@@ -292,9 +308,16 @@ enum RecordingIslandPresentation: Equatable, Sendable {
             return "Dictation \(presentation.phase.title.lowercased())."
         case .meeting(let presentation):
             if presentation.phase == .saved {
-                return "Meeting added. \(presentation.title). It is now at the top of Meetings."
+                let item = presentation.isVoiceNote ? "Voice note" : "Meeting"
+                return "\(item) added. \(presentation.title). It is now at the top of \(presentation.libraryName)."
             }
-            return "Meeting \(presentation.phase.title.lowercased())."
+            let item = presentation.isVoiceNote ? "Voice note" : "Meeting"
+            if presentation.phase == .stopSuggested {
+                return presentation.isVoiceNote
+                    ? "Voice note may be ready to finish."
+                    : "Meeting may have ended."
+            }
+            return "\(item) \(presentation.phaseTitle.lowercased())."
         }
     }
 }
@@ -543,6 +566,7 @@ final class RecordingIslandController: NSObject, NSWindowDelegate {
         present(.meeting(RecordingIslandMeetingPresentation(
             phase: phase,
             title: record?.title ?? previous?.title ?? "Meeting",
+            recordingKind: record?.recordingKind ?? previous?.recordingKind ?? .meeting,
             applicationName: record?.detectedApplication ?? previous?.applicationName,
             startedAt: record?.startedAt ?? previous?.startedAt ?? now,
             microphone: microphone ?? previous?.microphone,
@@ -561,6 +585,7 @@ final class RecordingIslandController: NSObject, NSWindowDelegate {
         present(.meeting(RecordingIslandMeetingPresentation(
             phase: .saved,
             title: meeting.title,
+            recordingKind: meeting.recordingKind,
             applicationName: meeting.detectedApplication,
             startedAt: meeting.startedAt
         )))

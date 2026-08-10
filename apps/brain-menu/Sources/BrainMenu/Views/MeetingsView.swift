@@ -17,6 +17,7 @@ enum MeetingBadgeKind: String, CaseIterable, Equatable, Sendable {
     case analysis
     case audio
     case upload
+    case classification
     case corrupt
 }
 
@@ -38,14 +39,62 @@ struct MeetingListRowModel: Equatable, Identifiable, Sendable {
     let isUnread: Bool
     let badges: [MeetingStatusBadge]
     let isAvailable: Bool
+    let isVoiceNote: Bool
     let unavailableReason: String?
     fileprivate let searchableText: String
 
     var stableID: String { id?.uuidString ?? "unavailable-\(title)-\(dateText)" }
     var accessibilityLabel: String {
-        ([isUnread ? "New meeting" : "", title, dateText, durationText] + badges.map(\.accessibilityLabel))
+        ([isUnread ? (isVoiceNote ? "New voice note" : "New meeting") : "", title, dateText, durationText]
+            + badges.map(\.accessibilityLabel))
             .filter { !$0.isEmpty }
             .joined(separator: ", ")
+    }
+}
+
+enum MeetingLibraryScope: Equatable, Sendable {
+    case meetings
+    case voiceNotes
+
+    var title: String {
+        switch self {
+        case .meetings: "Meetings"
+        case .voiceNotes: "Voice Notes"
+        }
+    }
+
+    var emptyTitle: String {
+        switch self {
+        case .meetings: "No meetings yet"
+        case .voiceNotes: "No voice notes yet"
+        }
+    }
+
+    var loadingTitle: String { "Loading \(title.lowercased())" }
+
+    var loadingAccessibilityLabel: String {
+        "Loading local \(title.lowercased()) and processing states"
+    }
+
+    var emptyDescription: String {
+        switch self {
+        case .meetings: "Completed and active meetings stored on this Mac appear here."
+        case .voiceNotes: "Completed voice notes stored on this Mac appear here."
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .meetings: "person.2.wave.2"
+        case .voiceNotes: "mic.circle"
+        }
+    }
+
+    func includes(_ row: MeetingListRowModel) -> Bool {
+        switch self {
+        case .meetings: !row.isVoiceNote
+        case .voiceNotes: row.isVoiceNote
+        }
     }
 }
 
@@ -62,14 +111,31 @@ struct MeetingsViewModel: Equatable, Sendable {
     let query: String
 
     var visibleRows: [MeetingListRowModel] {
+        visibleRows(in: nil)
+    }
+
+    func visibleRows(in scope: MeetingLibraryScope?) -> [MeetingListRowModel] {
+        let scopedRows = scope.map { scope in rows.filter(scope.includes) } ?? rows
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !needle.isEmpty else { return rows }
-        return rows.filter { $0.searchableText.contains(needle) }
+        guard !needle.isEmpty else { return scopedRows }
+        return scopedRows.filter { $0.searchableText.contains(needle) }
     }
 
     var isEmpty: Bool { state == .loaded && rows.isEmpty }
+    func isEmpty(in scope: MeetingLibraryScope) -> Bool {
+        state == .loaded && rows.filter(scope.includes).isEmpty
+    }
+
     var hasNoSearchResults: Bool {
         state == .loaded && !rows.isEmpty && !query.isEmpty && visibleRows.isEmpty
+    }
+
+    func hasNoSearchResults(in scope: MeetingLibraryScope) -> Bool {
+        let scopedRows = rows.filter(scope.includes)
+        return state == .loaded
+            && !scopedRows.isEmpty
+            && !query.isEmpty
+            && visibleRows(in: scope).isEmpty
     }
 }
 
@@ -185,6 +251,7 @@ final class MeetingsController {
                     isUnread: meeting.isUnread,
                     badges: Self.badges(for: meeting),
                     isAvailable: true,
+                    isVoiceNote: meeting.isVoiceNote,
                     unavailableReason: nil,
                     searchableText: searchable
                 )
@@ -223,13 +290,14 @@ final class MeetingsController {
                 systemImage: "exclamationmark.triangle.fill"
             )],
             isAvailable: false,
+            isVoiceNote: false,
             unavailableReason: reason,
             searchableText: "unavailable corrupt \(directoryName) \(reason)".lowercased()
         )
     }
 
     static func badges(for meeting: MeetingRecord) -> [MeetingStatusBadge] {
-        [
+        var badges = [
             MeetingStatusBadge(
                 kind: .recording,
                 title: lifecycleTitle(meeting.lifecycleState),
@@ -256,6 +324,14 @@ final class MeetingsController {
                 systemImage: uploadSymbol(meeting.uploadState)
             ),
         ]
+        if meeting.recordingKindNeedsReview {
+            badges.append(MeetingStatusBadge(
+                kind: .classification,
+                title: "Choose section",
+                systemImage: "questionmark.folder"
+            ))
+        }
+        return badges
     }
 
     nonisolated static func durationText(from start: Date, to end: Date) -> String {
@@ -374,13 +450,17 @@ final class MeetingsController {
 
 struct MeetingsView: View {
     @State private var controller: MeetingsController
+    @State private var query = ""
+    private let scope: MeetingLibraryScope
     private let openMeeting: (UUID) -> Void
 
     init(
         controller: MeetingsController = MeetingsController(),
+        scope: MeetingLibraryScope = .meetings,
         openMeeting: @escaping (UUID) -> Void = { _ in }
     ) {
         _controller = State(initialValue: controller)
+        self.scope = scope
         self.openMeeting = openMeeting
     }
 
@@ -395,7 +475,7 @@ struct MeetingsView: View {
                                 .controlSize(.small)
                                 .padding(.top, 2)
                             VStack(alignment: .leading, spacing: 5) {
-                                Text(index == 0 ? "Loading meetings" : "Reading local details")
+                                Text(index == 0 ? scope.loadingTitle : "Reading local details")
                                     .font(.body.weight(.medium))
                                 Text(index == 0
                                      ? "Brain is checking saved transcripts and processing states."
@@ -412,34 +492,38 @@ struct MeetingsView: View {
                 .padding()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Loading local meetings and processing states")
+                .accessibilityLabel(scope.loadingAccessibilityLabel)
             case .failed(let message):
                 ContentUnavailableView(
-                    "Meetings unavailable",
+                    "\(scope.title) unavailable",
                     systemImage: "exclamationmark.triangle",
                     description: Text(message)
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .loaded where controller.viewModel.isEmpty:
+            case .loaded where viewModel.isEmpty(in: scope):
                 ContentUnavailableView(
-                    "No meetings yet",
-                    systemImage: "person.2.wave.2",
-                    description: Text("Completed and active meetings stored on this Mac appear here.")
+                    scope.emptyTitle,
+                    systemImage: scope.symbolName,
+                    description: Text(scope.emptyDescription)
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .loaded where controller.viewModel.hasNoSearchResults:
-                ContentUnavailableView.search(text: controller.query)
+            case .loaded where viewModel.hasNoSearchResults(in: scope):
+                ContentUnavailableView.search(text: query)
             case .loaded:
                 meetingList
             }
         }
-        .navigationTitle("Meetings")
-        .searchable(text: $controller.query, prompt: "Search local meetings")
+        .navigationTitle(scope.title)
+        .searchable(text: $query, prompt: "Search local \(scope.title.lowercased())")
         .task { controller.load() }
     }
 
+    private var viewModel: MeetingsViewModel {
+        MeetingsViewModel(state: controller.state, rows: controller.rows, query: query)
+    }
+
     private var meetingList: some View {
-        List(controller.viewModel.visibleRows, id: \.stableID) { row in
+        List(viewModel.visibleRows(in: scope), id: \.stableID) { row in
             if let id = row.id, row.isAvailable {
                 Button { openMeeting(id) } label: { meetingRow(row) }
                     .buttonStyle(.plain)

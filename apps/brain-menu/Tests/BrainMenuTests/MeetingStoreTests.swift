@@ -188,6 +188,8 @@ struct MeetingStoreTests {
             JSONSerialization.jsonObject(with: Data(contentsOf: meetingURL)) as? [String: Any]
         )
         object.removeValue(forKey: "isUnread")
+        object.removeValue(forKey: "recordingKind")
+        object.removeValue(forKey: "recordingKindNeedsReview")
         object.removeValue(forKey: "titleSource")
         object.removeValue(forKey: "transcriptionState")
         object.removeValue(forKey: "transcriptionAttemptCount")
@@ -198,10 +200,99 @@ struct MeetingStoreTests {
 
         #expect(!migrated.isUnread)
         #expect(migrated.title == "Legacy project review")
+        #expect(migrated.recordingKind == .meeting)
+        #expect(!migrated.recordingKindNeedsReview)
+        #expect(!migrated.isVoiceNote)
         #expect(migrated.titleSource == .manual)
         #expect(migrated.transcriptionState == .completed)
         #expect(migrated.transcriptionAttemptCount == 0)
         #expect(migrated.transcriptionErrorMessage == nil)
+    }
+
+    @Test
+    func legacyApplicationlessRenamedRecordingRequiresSectionReview() throws {
+        let temp = try StoreTestDirectory()
+        let store = MeetingStore(rootURL: temp.url)
+        let record = MeetingRecord(
+            title: "Renamed older recording",
+            recordingKind: .voiceNote,
+            titleSource: .manual,
+            detectedApplication: nil,
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: Date(timeIntervalSince1970: 160),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+        try store.save(record, utterances: [])
+        let meetingURL = store.directoryURL(for: record.id)
+            .appendingPathComponent(MeetingStore.meetingFilename)
+        var object = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: meetingURL)) as? [String: Any]
+        )
+        object.removeValue(forKey: "recordingKind")
+        object.removeValue(forKey: "recordingKindNeedsReview")
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: meetingURL)
+
+        let migrated = try store.load(record.id).meeting
+
+        #expect(migrated.recordingKind == .meeting)
+        #expect(migrated.recordingKindNeedsReview)
+        #expect(!migrated.isVoiceNote)
+    }
+
+    @Test
+    func legacyCanonicalVoiceNoteMigratesToPersistedRecordingKind() throws {
+        let temp = try StoreTestDirectory()
+        let store = MeetingStore(rootURL: temp.url)
+        let record = MeetingRecord(
+            title: "Voice note",
+            recordingKind: .voiceNote,
+            titleSource: .manual,
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: Date(timeIntervalSince1970: 160),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+        try store.save(record, utterances: [])
+        let meetingURL = store.directoryURL(for: record.id)
+            .appendingPathComponent(MeetingStore.meetingFilename)
+        var object = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: meetingURL)) as? [String: Any]
+        )
+        object.removeValue(forKey: "recordingKind")
+        object.removeValue(forKey: "recordingKindNeedsReview")
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: meetingURL)
+
+        let migrated = try store.load(record.id).meeting
+
+        #expect(migrated.recordingKind == .voiceNote)
+        #expect(!migrated.recordingKindNeedsReview)
+        #expect(migrated.isVoiceNote)
+    }
+
+    @Test
+    func manuallyTitledApplicationlessMeetingKeepsMeetingKind() throws {
+        let temp = try StoreTestDirectory()
+        let store = MeetingStore(rootURL: temp.url)
+        let record = MeetingRecord(
+            title: "Private planning",
+            recordingKind: .meeting,
+            titleSource: .manual,
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: Date(timeIntervalSince1970: 160),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+
+        try store.save(record, utterances: [])
+        let loaded = try store.load(record.id).meeting
+
+        #expect(loaded.recordingKind == .meeting)
+        #expect(!loaded.recordingKindNeedsReview)
+        #expect(!loaded.isVoiceNote)
     }
 
     @Test
