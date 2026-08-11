@@ -5,18 +5,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 scripts/public-audit
+scripts/test-local-scope
 
 while IFS= read -r -d '' script; do
   bash -n "$script"
-done < <(find scripts apps remote -type f \( -name '*.sh' -o -name 'brain' \) -print0)
-
-python3 -m unittest discover -s apps/brain-agent/tests
-python3 -m unittest discover -s apps/gmail-connector/tests
-python3 -m unittest discover -s apps/telegram-bot/tests
-
-(cd apps/brain-clipper && npm test)
-(cd gateway && npm ci && npm audit --audit-level=high && npm run check && npm test)
-(cd site && npm ci && npm audit --audit-level=high && npm run check && BRAIN_SITE_CONTENT_ROOT="$ROOT" npm run build)
+done < <(find scripts apps -type f \( -name '*.sh' -o -name 'brain' \) -print0)
 
 swift test --package-path apps/brain-menu
 

@@ -1,7 +1,0 @@
-# Merge these ingress rules into the named tunnel configuration on the remote
-# remote runner. cloudflared opens outbound-only connections to Cloudflare; do not
-# add a router port-forward or expose the loopback origin on a LAN interface.
-ingress:
-  - hostname: @TUNNEL_HOSTNAME@
-    service: http://127.0.0.1:@API_PORT@
-  - service: http_status:404
