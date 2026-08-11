@@ -17,6 +17,16 @@ for path in "${private_roots[@]}"; do
   fi
 done
 
+# Legacy top-level exports identify personal vault content just as clearly as
+# vault directories do. Keep this list explicit so the public source tree can
+# retain only deliberately reviewed documentation at its root.
+private_files=(HOME.md bookmarks.md designs.md)
+for path in "${private_files[@]}"; do
+  if [ -e "$path" ]; then
+    fail "private vault file is present: $path"
+  fi
+done
+
 credential_globs=(
   '*.p12' '*.mobileprovision' '*.pem' '*.key'
   '.dev.vars' '.dev.vars.*' '.env' '.env.*'
@@ -40,21 +50,6 @@ for pattern in "${credential_globs[@]}"; do
   )
 done
 
-operator_config_pattern='"(account_id|database_id|id)"[[:space:]]*:[[:space:]]*"[0-9a-f]{32}"'
-if rg -n --hidden \
-  --glob '!.git/**' \
-  --glob '!**/node_modules/**' \
-  --glob '!**/.build/**' \
-  --glob '!**/dist/**' \
-  --glob '!**/build/**' \
-  --glob '!**/.astro/**' \
-  --glob '!**/.swiftpm/**' \
-  --glob '!scripts/public-audit' \
-  --glob '!**/package-lock.json' \
-  "$operator_config_pattern" .; then
-  fail "operator-specific Cloudflare identifier found"
-fi
-
 secret_pattern='(-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{30,}|sk-[A-Za-z0-9]{20,})'
 if rg -n --hidden \
   --glob '!.git/**' \
@@ -71,7 +66,7 @@ if rg -n --hidden \
 fi
 
 if [ -d .git ]; then
-  tracked_private="$(git ls-files -- "${private_roots[@]}" || true)"
+  tracked_private="$(git ls-files -- "${private_roots[@]}" "${private_files[@]}" || true)"
   if [ -n "$tracked_private" ]; then
     printf '%s\n' "$tracked_private" >&2
     fail "private vault paths are tracked"

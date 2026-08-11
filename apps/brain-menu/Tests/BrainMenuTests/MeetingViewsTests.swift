@@ -473,7 +473,7 @@ struct MeetingViewsTests {
         #expect(controller.viewModel.talkTime.count == 2)
         #expect(controller.viewModel.talkTime.allSatisfy { !$0.accessibilityLabel.isEmpty })
         #expect(controller.viewModel.audioControls == [.reveal, .export, .delete])
-        #expect(controller.viewModel.badges.first { $0.kind == .upload }?.title == "Upload failed")
+        #expect(controller.viewModel.badges.first { $0.kind == .upload }?.title == "Local ingest failed")
         #expect(controller.viewModel.uploadCanRetry)
 
         await controller.perform(.renameSpeaker(id: "you", name: "the owner"))
