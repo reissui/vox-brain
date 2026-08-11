@@ -104,6 +104,13 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         recordingKind == .voiceNote
     }
 
+    var acceptsAutomaticAnalysisTitle: Bool {
+        guard titleSource == .manual else { return true }
+        guard isVoiceNote else { return false }
+        return title.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare("Voice note") == .orderedSame
+    }
+
     init(
         id: UUID = UUID(),
         title: String,

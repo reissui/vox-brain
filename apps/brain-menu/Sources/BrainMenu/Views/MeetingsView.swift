@@ -214,7 +214,8 @@ final class MeetingsController {
         let current = try store.load(result.meeting.id)
         var merged = current.meeting
         merged.analysisState = result.meeting.analysisState
-        if merged.titleSource != .manual, result.meeting.titleSource == .analysis {
+        if merged.acceptsAutomaticAnalysisTitle,
+           result.meeting.titleSource == .analysis {
             merged.title = result.meeting.title
             merged.titleSource = .analysis
         }

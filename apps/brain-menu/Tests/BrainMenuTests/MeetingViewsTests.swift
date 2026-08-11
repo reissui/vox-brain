@@ -123,6 +123,55 @@ struct MeetingViewsTests {
     }
 
     @Test
+    func automaticAnalysisRenamesOnlyAnUneditedVoiceNote() throws {
+        let id = UUID()
+        var voiceNote = MeetingRecord(
+            id: id,
+            title: "Voice note",
+            recordingKind: .voiceNote,
+            titleSource: .manual,
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            endedAt: Date(timeIntervalSince1970: 1_060),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "model"
+        )
+        voiceNote.analysisState = .running
+        let store = MemoryMeetingViewStore(values: [
+            id: StoredMeeting(meeting: voiceNote, utterances: []),
+        ])
+        let controller = MeetingsController(
+            store: store,
+            analysisStore: MemoryMeetingViewAnalysisStore()
+        )
+        var analyzed = voiceNote
+        analyzed.title = "Launch narrative"
+        analyzed.titleSource = .analysis
+        analyzed.analysisState = .completed
+        let result = MeetingAnalysisRunResult(
+            meeting: analyzed,
+            utterances: [],
+            speakerState: SpeakerEditingState(),
+            analysis: nil,
+            failure: nil
+        )
+
+        let merged = try controller.mergeAnalysisResult(result)
+
+        #expect(merged.title == "Launch narrative")
+        #expect(merged.titleSource == .analysis)
+
+        var manuallyEdited = voiceNote
+        manuallyEdited.title = "My product thought"
+        try store.save(manuallyEdited, utterances: [])
+
+        let preserved = try controller.mergeAnalysisResult(result)
+
+        #expect(preserved.title == "My product thought")
+        #expect(preserved.titleSource == .manual)
+    }
+
+    @Test
     func listRepresentsLoadingEmptyCorruptAndStoreFailure() {
         let empty = MeetingsController(
             store: MemoryMeetingViewStore(),
