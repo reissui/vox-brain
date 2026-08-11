@@ -562,7 +562,8 @@ final class MeetingAudioCapture: @unchecked Sendable {
             return .sourceFailed
         }
         return switch native {
-        case .permissionDenied: MeetingAudioFailureReason.permissionDenied
+        case .permissionDenied, .microphonePermissionDenied:
+            MeetingAudioFailureReason.permissionDenied
         case .unavailable: MeetingAudioFailureReason.sourceUnavailable
         case .configurationFailed, .startFailed: MeetingAudioFailureReason.sourceFailed
         }
@@ -622,6 +623,7 @@ final class MeetingMicrophoneReadiness: @unchecked Sendable {
 
 enum NativeMeetingAudioSourceError: Error, Equatable, LocalizedError, Sendable {
     case permissionDenied
+    case microphonePermissionDenied
     case unavailable
     case configurationFailed
     case startFailed
@@ -630,6 +632,8 @@ enum NativeMeetingAudioSourceError: Error, Equatable, LocalizedError, Sendable {
         switch self {
         case .permissionDenied:
             "macOS has not granted the required audio-recording permission."
+        case .microphonePermissionDenied:
+            "Microphone access is off. Allow Brain in System Settings → Privacy & Security → Microphone, then try again."
         case .unavailable:
             "The requested audio source is unavailable."
         case .configurationFailed:
@@ -1079,6 +1083,8 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
     private let inventory: any MeetingMicrophoneInventoryProviding
     private let engine: any MeetingMicrophoneAudioEngine
     private let authorizationStatus: @Sendable () -> AVAuthorizationStatus
+    private let requestAuthorization: @Sendable () async -> Bool
+    private let openMicrophoneSettings: @Sendable () async -> Void
     private let currentHostTimestamp: @Sendable () -> TimeInterval
     private let lock = NSLock()
     private let engineLifecycleLock = NSLock()
@@ -1107,6 +1113,14 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
         self.inventory = inventory
         self.engine = NativeMeetingMicrophoneAudioEngine()
         self.authorizationStatus = authorizationStatus
+        requestAuthorization = { await AVCaptureDevice.requestAccess(for: .audio) }
+        openMicrophoneSettings = {
+            await MainActor.run {
+                _ = NSWorkspace.shared.open(
+                    OnboardingPermission.microphone.systemSettingsURL
+                )
+            }
+        }
         currentHostTimestamp = { ProcessInfo.processInfo.systemUptime }
     }
 
@@ -1115,6 +1129,8 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
         inventory: any MeetingMicrophoneInventoryProviding,
         engine: any MeetingMicrophoneAudioEngine,
         authorizationStatus: @escaping @Sendable () -> AVAuthorizationStatus,
+        requestAuthorization: @escaping @Sendable () async -> Bool = { false },
+        openMicrophoneSettings: @escaping @Sendable () async -> Void = {},
         currentHostTimestamp: @escaping @Sendable () -> TimeInterval = {
             ProcessInfo.processInfo.systemUptime
         }
@@ -1123,14 +1139,28 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
         self.inventory = inventory
         self.engine = engine
         self.authorizationStatus = authorizationStatus
+        self.requestAuthorization = requestAuthorization
+        self.openMicrophoneSettings = openMicrophoneSettings
         self.currentHostTimestamp = currentHostTimestamp
     }
 
     func start(
         eventHandler: @escaping @Sendable (MeetingAudioSourceEvent) -> Void
     ) async throws {
-        guard authorizationStatus() == .authorized else {
-            throw NativeMeetingAudioSourceError.permissionDenied
+        let microphoneIsAuthorized: Bool
+        switch authorizationStatus() {
+        case .authorized:
+            microphoneIsAuthorized = true
+        case .notDetermined:
+            microphoneIsAuthorized = await requestAuthorization()
+        case .denied:
+            await openMicrophoneSettings()
+            microphoneIsAuthorized = false
+        default:
+            microphoneIsAuthorized = false
+        }
+        guard microphoneIsAuthorized else {
+            throw NativeMeetingAudioSourceError.microphonePermissionDenied
         }
         let (generation, previousRecoveryTask) = lock.withLock {
             lifecycleGeneration &+= 1

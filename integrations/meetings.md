@@ -38,7 +38,10 @@ Audio never enters either capture request.
 2. Complete Brain onboarding for **Microphone** and **Accessibility**. Meetings
    also need **Screen & System Audio Recording**; Voice Notes do not.
    Accessibility supports selected-text context and paste-related features;
-   Brain does not monitor global keys.
+   Brain does not monitor global keys. If macOS returns Microphone to an
+   undecided state after an app update, the next recording attempt requests it
+   again. If access is off, Brain opens **System Settings → Privacy & Security →
+   Microphone** and explains how to restore it after refusing to start.
 3. Download and activate the recommended model in Brain's Speech Setup. Brain
    defaults English transcription to Whisper Small (English); Whisper Large v3
    Turbo is the multilingual fallback. Additional catalog models remain

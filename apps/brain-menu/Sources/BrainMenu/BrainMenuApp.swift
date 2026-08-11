@@ -1319,7 +1319,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
 
     private func shouldRequestAnotherMicrophone(after error: Error) -> Bool {
         if let native = error as? NativeMeetingAudioSourceError {
-            return native != .permissionDenied
+            return native != .permissionDenied && native != .microphonePermissionDenied
         }
         if case .sourceStartFailed(.microphone, let reason) = error as? MeetingAudioCaptureError {
             return reason != .permissionDenied && reason != .permissionRevoked
