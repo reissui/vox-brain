@@ -227,6 +227,18 @@ private struct MeetingsWorkspaceView: View {
                 }
                 .padding()
 
+                if let check = graph.recordingSetupCheck(for: .meeting),
+                   !graph.meeting.isCapturingAudio,
+                   graph.meeting.state != .finalizing {
+                    RecordingSetupCallout(
+                        kind: .meeting,
+                        check: check,
+                        graph: graph
+                    )
+                    .padding(.horizontal)
+                    .padding(.bottom, 12)
+                }
+
                 if let notice = graph.meetingSavedNotice, !notice.isVoiceNote {
                     HStack(spacing: 10) {
                         Image(systemName: "checkmark.circle.fill")
@@ -299,6 +311,10 @@ private struct MeetingsWorkspaceView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(graph.meeting.isCapturingAudio ? .red : nil)
+            .disabled(
+                !graph.meeting.isCapturingAudio
+                    && graph.recordingSetupCheck(for: .meeting) != nil
+            )
             .accessibilityHint(
                 graph.meeting.isCapturingAudio
                     ? "Stops recording immediately, then saves the final transcript"
@@ -395,6 +411,18 @@ private struct VoiceNotesWorkspaceView: View {
                 }
                 .padding()
 
+                if let check = graph.recordingSetupCheck(for: .voiceNote),
+                   !graph.meeting.isCapturingAudio,
+                   graph.meeting.state != .finalizing {
+                    RecordingSetupCallout(
+                        kind: .voiceNote,
+                        check: check,
+                        graph: graph
+                    )
+                    .padding(.horizontal)
+                    .padding(.bottom, 12)
+                }
+
                 if let notice = graph.meetingSavedNotice, notice.isVoiceNote {
                     HStack(spacing: 10) {
                         Image(systemName: "checkmark.circle.fill")
@@ -473,6 +501,7 @@ private struct VoiceNotesWorkspaceView: View {
                 Task { await graph.startVoiceNote() }
             }
             .buttonStyle(.borderedProminent)
+            .disabled(graph.recordingSetupCheck(for: .voiceNote) != nil)
             .accessibilityHint("Starts a long-form voice note")
         }
     }
@@ -525,6 +554,57 @@ private struct VoiceNotesWorkspaceView: View {
         case .quiet: "Connected — waiting for sound…"
         case .active: "Live"
         }
+    }
+}
+
+private struct RecordingSetupCallout: View {
+    let kind: MeetingRecordingKind
+    let check: OnboardingCheck
+    let graph: BrainAppControllerGraph
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "lock.trianglebadge.exclamationmark")
+                .foregroundStyle(.orange)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(itemName) setup required")
+                    .font(.callout.weight(.semibold))
+                Text("\(check.id.title): \(check.detail)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 12)
+
+            HStack(spacing: 8) {
+                if let action = check.action {
+                    Button(action.label) {
+                        Task { await graph.performRecordingSetupAction(action) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!graph.onboarding.canPerform(action))
+                }
+                Button("Check Again") {
+                    Task { await graph.refreshRecordingSetup() }
+                }
+                .buttonStyle(.bordered)
+                .disabled(graph.onboarding.isWorking)
+            }
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .contain)
+        .brainAccessibleStatus(
+            .failed,
+            detail: "\(itemName) setup requires \(check.id.title). \(check.detail)"
+        )
+    }
+
+    private var itemName: String {
+        kind == .meeting ? "Meeting" : "Voice Note"
     }
 }
 
