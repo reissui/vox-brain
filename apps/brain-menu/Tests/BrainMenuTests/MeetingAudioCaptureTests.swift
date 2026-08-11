@@ -8,6 +8,145 @@ import Testing
 @Suite(.serialized)
 struct MeetingAudioCaptureTests {
     @Test
+    func callbackHealthDetectsPeriodicSparseDeliveryButAcceptsContinuousQuietBuffers() throws {
+        var sparse = MeetingAudioCallbackHealthModel()
+        sparse.start(at: 0)
+        var detected: MeetingAudioCallbackHealthModel.UnhealthyReason?
+
+        // The observed device delivered ten ordinary 20 ms callbacks (0.2 s),
+        // then delivered nothing for 0.8 s, repeatedly. Normal callbacks inside
+        // each burst must not erase the rolling dropout evidence.
+        for second in 0..<4 {
+            for callback in 0..<10 {
+                detected = sparse.receive(
+                    callbackStart: Double(second) + Double(callback) * 0.02,
+                    duration: 0.02
+                ) ?? detected
+            }
+        }
+        guard case .sparse(let count, let latestGap) = try #require(detected) else {
+            Issue.record("Expected repeated sparse callback delivery")
+            return
+        }
+        #expect(count == 3)
+        #expect(abs(latestGap - 0.8) < 0.000_001)
+
+        var quiet = MeetingAudioCallbackHealthModel()
+        quiet.start(at: 0)
+        for callback in 0..<500 {
+            #expect(quiet.receive(
+                callbackStart: Double(callback) * 0.02,
+                duration: 0.02
+            ) == nil)
+        }
+        #expect(quiet.evaluate(at: 10) == nil)
+    }
+
+    @Test
+    func callbackWatchdogForceRebuildsRunningEngineOnceThenFailsBoundedly() async throws {
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 48_000,
+            channels: 1
+        ))
+        let clock = LockedHostClock(now: 0)
+        let engine = RecordingMicrophoneAudioEngine(format: format)
+        let events = MeetingAudioSourceEventRecorder()
+        let source = AVAudioEngineMeetingAudioSource(
+            selection: .systemDefault,
+            inventory: FixedMicrophoneInventory(devices: [
+                MeetingMicrophoneDevice(
+                    id: "wireless-microphone",
+                    name: "Wireless Microphone",
+                    coreAudioID: 42,
+                    isSystemDefault: true
+                ),
+            ], defaultDeviceUID: "wireless-microphone"),
+            engine: engine,
+            authorizationStatus: { .authorized },
+            currentHostTimestamp: { clock.now }
+        )
+        try await source.start(eventHandler: events.record)
+
+        func emitSparseEpisode(startingAt start: TimeInterval) {
+            for second in 0..<4 {
+                for callback in 0..<10 {
+                    let timestamp = start + Double(second) + Double(callback) * 0.02
+                    clock.now = timestamp
+                    engine.emitZeroBuffer(at: timestamp)
+                }
+            }
+        }
+
+        emitSparseEpisode(startingAt: 0)
+        for _ in 0..<200 where engine.startCount < 2 { await Task.yield() }
+
+        #expect(engine.startCount == 2)
+        #expect(engine.stopCount == 1)
+        #expect(engine.isRunning)
+        #expect(events.values.filter {
+            guard case .discontinuity(let value) = $0 else { return false }
+            return value.reason == .streamInterrupted
+        }.count == 1)
+
+        // Let the recovery task release its single slot, then reproduce the
+        // same degradation on the rebuilt graph.
+        for _ in 0..<50 { await Task.yield() }
+        emitSparseEpisode(startingAt: 4)
+        for _ in 0..<200 where !events.values.contains(where: {
+            guard case .failure(let value) = $0 else { return false }
+            return value.reason == .interrupted
+        }) { await Task.yield() }
+
+        #expect(engine.startCount == 2)
+        #expect(events.values.filter {
+            guard case .failure(let value) = $0 else { return false }
+            return value.reason == .interrupted
+        }.count == 1)
+        await source.stop()
+    }
+
+    @Test
+    func stalledCallbackWatchdogUsesVirtualTimeAndDoesNotTrustRunningFlag() async throws {
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 48_000,
+            channels: 1
+        ))
+        let clock = LockedHostClock(now: 0)
+        let engine = RecordingMicrophoneAudioEngine(format: format)
+        let events = MeetingAudioSourceEventRecorder()
+        let source = AVAudioEngineMeetingAudioSource(
+            selection: .systemDefault,
+            inventory: FixedMicrophoneInventory(devices: [
+                MeetingMicrophoneDevice(
+                    id: "default-microphone",
+                    name: "Default microphone",
+                    coreAudioID: 42,
+                    isSystemDefault: true
+                ),
+            ], defaultDeviceUID: "default-microphone"),
+            engine: engine,
+            authorizationStatus: { .authorized },
+            currentHostTimestamp: { clock.now }
+        )
+        try await source.start(eventHandler: events.record)
+        #expect(engine.isRunning)
+
+        clock.now = 3
+        source.checkCallbackDelivery(at: 3)
+        for _ in 0..<200 where engine.startCount < 2 { await Task.yield() }
+        #expect(engine.startCount == 2)
+
+        for _ in 0..<50 { await Task.yield() }
+        clock.now = 6
+        source.checkCallbackDelivery(at: 6)
+        #expect(events.values.filter {
+            if case .failure(let value) = $0 { return value.reason == .interrupted }
+            return false
+        }.count == 1)
+        await source.stop()
+    }
+
+    @Test
     func validSystemPresentationTimeUsesTheHostClockInsteadOfCallbackArrival() {
         let presentationTime = CMTime(seconds: 73, preferredTimescale: 48_000)
         let convertedHostTime = CMTime(seconds: 100, preferredTimescale: 1_000_000)
@@ -120,6 +259,34 @@ struct MeetingAudioCaptureTests {
         #expect((microphoneResult.level?.rms ?? 0) > 0.1)
         #expect(try floatSamples(at: microphoneTrack.fileURL).contains { abs($0) > 0.1 })
         #expect(try floatSamples(at: systemTrack.fileURL).contains { abs($0) > 0.1 })
+    }
+
+    @Test
+    func legacyCaptureManifestWithoutDiagnosticsStillDecodes() throws {
+        let temp = try MeetingAudioTestDirectory()
+        let writer = try MeetingAudioWriter(
+            meetingDirectory: temp.url.appendingPathComponent("legacy-manifest")
+        )
+        _ = try writer.append(buffer(
+            source: .microphone,
+            hostTimestamp: 10,
+            samples: [0.2, -0.2]
+        ))
+        let summary = try writer.finalize()
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        var object = try #require(
+            JSONSerialization.jsonObject(with: encoder.encode(summary)) as? [String: Any]
+        )
+        object.removeValue(forKey: "diagnostics")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+
+        let decoded = try decoder.decode(MeetingAudioCaptureSummary.self, from: legacyData)
+        #expect(decoded.diagnostics == nil)
+        #expect(decoded.chunks == summary.chunks)
+        #expect(decoded.tracks == summary.tracks)
     }
 
     @Test
@@ -283,6 +450,10 @@ struct MeetingAudioCaptureTests {
             guard case .failure(let failure) = event else { return nil }
             return failure
         }.map(\.reason) == [.interrupted, .permissionRevoked])
+        #expect(events.values.contains(.warning(MeetingAudioWarning(
+            source: .system,
+            message: "display stream stopped"
+        ))))
         #expect(system.stopCount == 1)
         #expect(microphone.stopCount == 1)
     }
@@ -872,6 +1043,8 @@ private final class RecordingMicrophoneAudioEngine: MeetingMicrophoneAudioEngine
     }
     private(set) var didSelectBeforeInstallingTap = false
     private var transientStartFailureCount: Int
+    private let tapLock = NSLock()
+    private var tapHandler: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
 
     init(format: AVAudioFormat, transientStartFailureCount: Int = 0) {
         formats = [format]
@@ -901,9 +1074,13 @@ private final class RecordingMicrophoneAudioEngine: MeetingMicrophoneAudioEngine
     ) {
         didSelectBeforeInstallingTap = !selectedDeviceIDs.isEmpty
         installedFormats.append(format)
+        tapLock.withLock { tapHandler = handler }
     }
 
-    func removeTap() { removeTapCount += 1 }
+    func removeTap() {
+        removeTapCount += 1
+        tapLock.withLock { tapHandler = nil }
+    }
     func prepare() {}
     func start() throws {
         startCount += 1
@@ -940,6 +1117,30 @@ private final class RecordingMicrophoneAudioEngine: MeetingMicrophoneAudioEngine
             name: .AVAudioEngineConfigurationChange,
             object: notificationObject
         )
+    }
+
+    func emitZeroBuffer(at timestamp: TimeInterval, frameCount: AVAudioFrameCount = 960) {
+        guard let format = formats.last,
+              let buffer = AVAudioPCMBuffer(
+                  pcmFormat: format,
+                  frameCapacity: frameCount
+              ) else { return }
+        buffer.frameLength = frameCount
+        let nanos = UInt64(max(0, timestamp) * 1_000_000_000)
+        let time = AVAudioTime(hostTime: AudioConvertNanosToHostTime(nanos))
+        tapLock.withLock { tapHandler }?(buffer, time)
+    }
+}
+
+private final class LockedHostClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: TimeInterval
+
+    init(now: TimeInterval) { value = now }
+
+    var now: TimeInterval {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
     }
 }
 

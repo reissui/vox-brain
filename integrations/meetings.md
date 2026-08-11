@@ -65,6 +65,12 @@ starts or stops recording automatically.
    failures still end startup with an error. Once connected, Brain warns when
    no usable microphone signal arrives and keeps recording so a muted or
    temporarily quiet input does not discard the session.
+   While recording, Brain also watches callback delivery independently of the
+   audio level and AVAudioEngine's running flag. A quiet stream whose callbacks
+   contain zeroes is healthy. A stalled stream or repeated large callback gaps
+   produces an interruption warning and one forced microphone-graph rebuild.
+   If delivery does not recover, or degrades again, Brain stops safely and
+   preserves the partial recording and transcript for retry.
 3. Pause/resume explicitly. Dictation cannot take the microphone during either
    kind of recording.
 4. Choose **End & Process**. Dismissing the prompt keeps recording.
@@ -99,6 +105,14 @@ after repeated errors, and interrupted capture or processing is surfaced as a
 retryable saved recording at the next launch; Brain does not restart
 transcription automatically.
 
+The private `audio-capture.json` manifest records per-source callback count,
+observed and delivered duration, coverage, largest inter-buffer gap, dropout
+count, and native input format when available. Final transcription rejects
+severely sparse microphone coverage instead of asking speech recognition to
+interpret mostly missing audio. Successful partial transcript text and raw
+audio remain saved with a clear retryable error. Continuous human silence is
+not rejected because its callbacks still provide complete coverage.
+
 ## Delivery behavior
 
 Local mode writes the transcript atomically to the local inbox.
@@ -129,6 +143,11 @@ Retain the previous app artifact until this passes.
 - **No microphone:** use the **Choose microphone** recovery prompt described
   above. If no available input works, run the five-second Speech test and
   recheck macOS Microphone permission.
+- **Recording stopped after a microphone callback interruption:** reconnect or
+  power-cycle the selected USB/wireless microphone, run the five-second Speech
+  test, and start a new recording. The interrupted item's partial transcript
+  and local source audio remain available; retry transcription only after
+  confirming a healthy new test recording.
 - **No system track:** recheck Screen & System Audio Recording permission.
 - **VoxType missing:** choose **Enable Speech** in Speech Setup. If the bundled
   helper is unavailable, Brain links to the official installation guide.

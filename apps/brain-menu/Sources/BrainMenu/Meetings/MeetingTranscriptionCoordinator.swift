@@ -200,6 +200,22 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         key: MeetingTranscriptionJobKey,
         token: UUID
     ) async -> MeetingRecord {
+        if let qualityIssue = MeetingAudioCaptureQuality.issue(in: capture) {
+            let partialUtterances = transcript.utterances
+            await transcript.cancel()
+            let outcome = await Task.detached(priority: .utility) { [store] in
+                MeetingTranscriptionPersistenceOutcome(
+                    meeting: Self.persistFailureIfCurrent(
+                        meeting: meeting,
+                        attemptUtterances: partialUtterances,
+                        message: qualityIssue.message,
+                        store: store
+                    ),
+                    shouldScheduleUpload: false
+                )
+            }.value
+            return currentRecord(for: meeting.id, fallback: outcome.meeting)
+        }
         await transcript.stop(capture: capture)
         guard !Task.isCancelled,
               Self.registry.isCurrent(
@@ -1280,6 +1296,86 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
 
     private nonisolated static func bounded(_ error: Error) -> String {
         String(error.localizedDescription.prefix(720))
+    }
+}
+
+enum MeetingAudioCaptureQuality {
+    struct Issue: Equatable, Sendable {
+        let message: String
+    }
+
+    private static let minimumObservedDurationMilliseconds: Int64 = 8_000
+    private static let maximumSparseCoverageRatio = 0.60
+    private static let minimumRepeatedDropouts = 5
+    private static let largeGapMilliseconds = Int64(
+        (MeetingAudioDeliveryPolicy.largeGapThreshold * 1_000).rounded()
+    )
+
+    static func issue(in capture: MeetingAudioCaptureSummary) -> Issue? {
+        if capture.failures.contains(where: {
+            $0.source == .microphone && $0.reason == .interrupted
+        }) {
+            return Issue(message: interruptedMessage)
+        }
+
+        guard let microphone = diagnostics(for: .microphone, in: capture),
+              microphone.observedDurationMilliseconds
+                >= minimumObservedDurationMilliseconds,
+              microphone.detectedDropoutCount >= minimumRepeatedDropouts,
+              microphone.maximumInterBufferGapMilliseconds >= largeGapMilliseconds,
+              microphone.coverageRatio < maximumSparseCoverageRatio else {
+            return nil
+        }
+        let percent = Int((microphone.coverageRatio * 100).rounded())
+        return Issue(message:
+            "Microphone callback delivery was severely incomplete (about \(percent)% coverage with \(microphone.detectedDropoutCount) large gaps). Brain preserved the partial transcript and local audio instead of running final transcription over missing audio. Reconnect or power-cycle the microphone, then retry with a healthy recording."
+        )
+    }
+
+    private static var interruptedMessage: String {
+        "Microphone callback delivery was interrupted after its bounded recovery attempt. Brain preserved the partial transcript and local audio; reconnect or power-cycle the microphone before retrying."
+    }
+
+    private static func diagnostics(
+        for source: MeetingAudioSource,
+        in capture: MeetingAudioCaptureSummary
+    ) -> MeetingAudioSourceDiagnostics? {
+        if let persisted = capture.diagnostics?.sources.first(where: { $0.source == source }) {
+            return persisted
+        }
+
+        let chunks = capture.chunks
+            .filter { $0.source == source }
+            .sorted { $0.timestampMilliseconds < $1.timestampMilliseconds }
+        guard !chunks.isEmpty else { return nil }
+        let delivered = chunks.reduce(Int64(0)) {
+            $0 + Int64((Double($1.frameCount) * 1_000
+                / Double(MeetingAudioWriter.sampleRate)).rounded())
+        }
+        let firstStart = chunks[0].timestampMilliseconds
+        var priorEnd = firstStart
+        var maximumGap: Int64 = 0
+        var dropoutCount = 0
+        for chunk in chunks {
+            let gap = max(0, chunk.timestampMilliseconds - priorEnd)
+            maximumGap = max(maximumGap, gap)
+            if gap >= largeGapMilliseconds { dropoutCount += 1 }
+            let duration = Int64((Double(chunk.frameCount) * 1_000
+                / Double(MeetingAudioWriter.sampleRate)).rounded())
+            priorEnd = max(priorEnd, chunk.timestampMilliseconds + duration)
+        }
+        let observed = max(delivered, priorEnd - firstStart)
+        return MeetingAudioSourceDiagnostics(
+            source: source,
+            callbackCount: chunks.count,
+            deliveredDurationMilliseconds: delivered,
+            observedDurationMilliseconds: observed,
+            coverageRatio: observed > 0 ? Double(delivered) / Double(observed) : 1,
+            maximumInterBufferGapMilliseconds: maximumGap,
+            detectedDropoutCount: dropoutCount,
+            nativeSampleRate: nil,
+            nativeChannelCount: nil
+        )
     }
 }
 

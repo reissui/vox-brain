@@ -480,6 +480,13 @@ final class MeetingAudioCapture: @unchecked Sendable {
             }
 
         case .discontinuity(let signal):
+            if signal.reason == .streamInterrupted {
+                eventHandler(.warning(MeetingAudioWarning(
+                    source: source,
+                    message: signal.detail
+                        ?? "Audio callbacks were interrupted. Brain is rebuilding the stream."
+                )))
+            }
             do {
                 let discontinuity = try writer.recordDiscontinuity(
                     source: source,
@@ -976,6 +983,86 @@ private final class NativeMeetingMicrophoneAudioEngine: MeetingMicrophoneAudioEn
     func stop() { engine.stop() }
 }
 
+/// Tracks callback delivery rather than signal amplitude. A buffer full of
+/// zeroes is healthy; missing time between buffers is not. Keeping this model
+/// independent of AVAudioEngine makes long-running dropout patterns testable
+/// with virtual timestamps.
+struct MeetingAudioCallbackHealthModel: Equatable, Sendable {
+    struct Configuration: Equatable, Sendable {
+        /// Normal Core Audio callbacks are tens of milliseconds apart. This
+        /// threshold deliberately tolerates scheduler stalls and coalescing.
+        var largeGapThreshold = MeetingAudioDeliveryPolicy.largeGapThreshold
+        var repeatedLargeGapCount = MeetingAudioDeliveryPolicy.watchdogRepeatedGapCount
+        var repeatedGapWindow = MeetingAudioDeliveryPolicy.repeatedGapWindow
+        var stalledStreamTimeout = MeetingAudioDeliveryPolicy.stalledStreamTimeout
+    }
+
+    enum UnhealthyReason: Equatable, Sendable {
+        case stalled(missingDuration: TimeInterval)
+        case sparse(repeatedGapCount: Int, latestGap: TimeInterval)
+
+        var detail: String {
+            switch self {
+            case .stalled(let missingDuration):
+                "No microphone callback arrived for \(Self.seconds(missingDuration)) seconds."
+            case .sparse(let count, let latestGap):
+                "Microphone callbacks repeatedly dropped about \(Self.seconds(latestGap)) seconds of audio (\(count) large gaps in the rolling window)."
+            }
+        }
+
+        private static func seconds(_ value: TimeInterval) -> String {
+            String(format: "%.2f", max(0, value))
+        }
+    }
+
+    private(set) var configuration: Configuration
+    private(set) var startedAt: TimeInterval?
+    private(set) var lastCallbackEnd: TimeInterval?
+    private(set) var recentLargeGapTimestamps: [TimeInterval] = []
+
+    init(configuration: Configuration = Configuration()) {
+        self.configuration = configuration
+    }
+
+    mutating func start(at timestamp: TimeInterval) {
+        startedAt = timestamp
+        lastCallbackEnd = nil
+        recentLargeGapTimestamps.removeAll(keepingCapacity: true)
+    }
+
+    mutating func receive(
+        callbackStart: TimeInterval,
+        duration: TimeInterval
+    ) -> UnhealthyReason? {
+        guard callbackStart.isFinite, duration.isFinite, duration > 0 else { return nil }
+        let callbackEnd = callbackStart + duration
+        defer { lastCallbackEnd = max(lastCallbackEnd ?? callbackEnd, callbackEnd) }
+        guard let priorEnd = lastCallbackEnd else {
+            return nil
+        }
+        let gap = max(0, callbackStart - priorEnd)
+        recentLargeGapTimestamps.removeAll {
+            callbackStart - $0 > configuration.repeatedGapWindow
+        }
+        guard gap >= configuration.largeGapThreshold else { return nil }
+        recentLargeGapTimestamps.append(callbackStart)
+        guard recentLargeGapTimestamps.count >= configuration.repeatedLargeGapCount else {
+            return nil
+        }
+        return .sparse(
+            repeatedGapCount: recentLargeGapTimestamps.count,
+            latestGap: gap
+        )
+    }
+
+    func evaluate(at timestamp: TimeInterval) -> UnhealthyReason? {
+        guard timestamp.isFinite, let reference = lastCallbackEnd ?? startedAt else { return nil }
+        let missingDuration = timestamp - reference
+        guard missingDuration >= configuration.stalledStreamTimeout else { return nil }
+        return .stalled(missingDuration: missingDuration)
+    }
+}
+
 final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unchecked Sendable {
     let source: MeetingAudioSource = .microphone
 
@@ -992,6 +1079,7 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
     private let inventory: any MeetingMicrophoneInventoryProviding
     private let engine: any MeetingMicrophoneAudioEngine
     private let authorizationStatus: @Sendable () -> AVAuthorizationStatus
+    private let currentHostTimestamp: @Sendable () -> TimeInterval
     private let lock = NSLock()
     private let engineLifecycleLock = NSLock()
     private var eventHandler: (@Sendable (MeetingAudioSourceEvent) -> Void)?
@@ -1003,7 +1091,10 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
     private var tapIsInstalled = false
     private var engineStartCompleted = false
     private var lifecycleGeneration: UInt64 = 0
+    private var tapGeneration: UInt64 = 0
     private var configurationRecoveryTask: Task<Void, Never>?
+    private var callbackHealth = MeetingAudioCallbackHealthModel()
+    private var callbackRecoveryAttempted = false
 
     init(
         selection: MeetingMicrophoneSelection = .systemDefault,
@@ -1016,18 +1107,23 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
         self.inventory = inventory
         self.engine = NativeMeetingMicrophoneAudioEngine()
         self.authorizationStatus = authorizationStatus
+        currentHostTimestamp = { ProcessInfo.processInfo.systemUptime }
     }
 
     init(
         selection: MeetingMicrophoneSelection,
         inventory: any MeetingMicrophoneInventoryProviding,
         engine: any MeetingMicrophoneAudioEngine,
-        authorizationStatus: @escaping @Sendable () -> AVAuthorizationStatus
+        authorizationStatus: @escaping @Sendable () -> AVAuthorizationStatus,
+        currentHostTimestamp: @escaping @Sendable () -> TimeInterval = {
+            ProcessInfo.processInfo.systemUptime
+        }
     ) {
         self.selection = selection
         self.inventory = inventory
         self.engine = engine
         self.authorizationStatus = authorizationStatus
+        self.currentHostTimestamp = currentHostTimestamp
     }
 
     func start(
@@ -1044,6 +1140,8 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
             lastSampleRate = nil
             terminalFailureReported = false
             engineStartCompleted = false
+            callbackRecoveryAttempted = false
+            callbackHealth.start(at: currentHostTimestamp())
             return (lifecycleGeneration, previousRecoveryTask)
         }
         previousRecoveryTask?.cancel()
@@ -1108,6 +1206,7 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
             eventHandler = nil
             lastSampleRate = nil
             engineStartCompleted = false
+            callbackHealth = MeetingAudioCallbackHealthModel()
             return values
         }
         values.2?.cancel()
@@ -1122,7 +1221,16 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
         }
     }
 
-    private func receive(buffer: AVAudioPCMBuffer, time: AVAudioTime) {
+    private func receive(
+        buffer: AVAudioPCMBuffer,
+        time: AVAudioTime,
+        tapGeneration: UInt64
+    ) {
+        guard lock.withLock({
+            self.tapGeneration == tapGeneration
+                && eventHandler != nil
+                && !terminalFailureReported
+        }) else { return }
         guard authorizationStatus() == .authorized else {
             reportTerminalFailure(reason: .permissionRevoked, message: "Microphone access was revoked.")
             return
@@ -1137,7 +1245,14 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
             }
             let hostTimestamp = time.isHostTimeValid
                 ? AVAudioTime.seconds(forHostTime: time.hostTime)
-                : ProcessInfo.processInfo.systemUptime
+                : currentHostTimestamp()
+            let duration = Double(buffer.frameLength) / buffer.format.sampleRate
+            let unhealthy = lock.withLock {
+                callbackHealth.receive(
+                    callbackStart: hostTimestamp,
+                    duration: duration
+                )
+            }
             emit(.samples(MeetingAudioSampleBuffer(
                 source: .microphone,
                 sourceTimestamp: sourceTimestamp,
@@ -1146,10 +1261,13 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
                 channelCount: Int(buffer.format.channelCount),
                 interleavedSamples: samples
             )))
+            if let unhealthy {
+                handleUnhealthyCallbackDelivery(unhealthy, detectedAt: hostTimestamp + duration)
+            }
         } catch {
             emit(.failure(MeetingAudioSourceFailure(
                 reason: .sourceFailed,
-                hostTimestamp: ProcessInfo.processInfo.systemUptime,
+                hostTimestamp: currentHostTimestamp(),
                 message: error.localizedDescription
             )))
         }
@@ -1163,7 +1281,7 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
             defer { lastSampleRate = rate }
             return lastSampleRate
         }
-        let hostTimestamp = ProcessInfo.processInfo.systemUptime
+        let hostTimestamp = currentHostTimestamp()
         emit(.discontinuity(MeetingAudioSourceDiscontinuity(
             reason: .deviceChanged,
             hostTimestamp: hostTimestamp,
@@ -1245,6 +1363,10 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
             if !engineLifecycleLock.withLock({ engine.isRunning }) {
                 throw NativeMeetingAudioSourceError.startFailed
             }
+            lock.withLock {
+                guard lifecycleGeneration == generation else { return }
+                callbackHealth.start(at: currentHostTimestamp())
+            }
         } catch is CancellationError {
             return
         } catch {
@@ -1289,10 +1411,18 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
                 // devices can finish switching sample rates asynchronously,
                 // which makes a just-read explicit format stale. Follow the
                 // native bus format and rebuild the tap for every retry.
+                let installedTapGeneration = lock.withLock { () -> UInt64 in
+                    tapGeneration &+= 1
+                    return tapGeneration
+                }
                 try engineLifecycleLock.withLock {
                     try ensureSessionIsActive(generation)
                     engine.installTap(format: nil) { [weak self] buffer, time in
-                        self?.receive(buffer: buffer, time: time)
+                        self?.receive(
+                            buffer: buffer,
+                            time: time,
+                            tapGeneration: installedTapGeneration
+                        )
                     }
                     tapIsInstalled = true
                     engine.prepare()
@@ -1309,6 +1439,9 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
     }
 
     private func resetEngineGraph() {
+        // Invalidate an in-flight callback before touching the graph. The next
+        // installed tap receives a new generation of its own.
+        lock.withLock { tapGeneration &+= 1 }
         engineLifecycleLock.withLock {
             if tapIsInstalled { engine.removeTap() }
             if tapIsInstalled || engine.isRunning { engine.stop() }
@@ -1348,9 +1481,90 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
                 // live engine state while it claims the single recovery slot.
                 // Avoid making a terminal decision from two stale timer reads.
                 scheduleConfigurationRecoveryIfNeeded()
+                checkCallbackDelivery(at: currentHostTimestamp())
             }
         }
         return timer
+    }
+
+    /// Internal for deterministic watchdog tests; production calls this from
+    /// the one-second health timer.
+    func checkCallbackDelivery(at timestamp: TimeInterval) {
+        let unhealthy: MeetingAudioCallbackHealthModel.UnhealthyReason? = lock.withLock {
+            guard engineStartCompleted, !terminalFailureReported else { return nil }
+            return callbackHealth.evaluate(at: timestamp)
+        }
+        guard let unhealthy else { return }
+        handleUnhealthyCallbackDelivery(unhealthy, detectedAt: timestamp)
+    }
+
+    private func handleUnhealthyCallbackDelivery(
+        _ reason: MeetingAudioCallbackHealthModel.UnhealthyReason,
+        detectedAt: TimeInterval
+    ) {
+        enum Action { case recover(UInt64), fail, ignore }
+        let action = lock.withLock { () -> Action in
+            guard engineStartCompleted, !terminalFailureReported else { return .ignore }
+            guard configurationRecoveryTask == nil else { return .ignore }
+            if callbackRecoveryAttempted { return .fail }
+            callbackRecoveryAttempted = true
+            let generation = lifecycleGeneration
+            configurationRecoveryTask = Task { [weak self] in
+                await self?.recoverCallbackDelivery(generation: generation)
+            }
+            return .recover(generation)
+        }
+
+        switch action {
+        case .recover:
+            emit(.discontinuity(MeetingAudioSourceDiscontinuity(
+                reason: .streamInterrupted,
+                hostTimestamp: detectedAt,
+                detail: "\(reason.detail) Brain is rebuilding the microphone stream once."
+            )))
+        case .fail:
+            reportTerminalFailure(
+                reason: .interrupted,
+                message: "Microphone callback delivery remained interrupted after Brain rebuilt the audio stream. The recording was stopped safely and its partial audio and transcript were preserved."
+            )
+        case .ignore:
+            break
+        }
+    }
+
+    private func recoverCallbackDelivery(generation: UInt64) async {
+        defer {
+            lock.withLock {
+                if lifecycleGeneration == generation {
+                    configurationRecoveryTask = nil
+                }
+            }
+        }
+        do {
+            try ensureSessionIsActive(generation)
+            // A delivery-stalled AVAudioEngine commonly still reports true.
+            // Rebuild unconditionally instead of trusting that flag.
+            resetEngineGraph()
+            try await startEngineWithRetries(generation: generation)
+            try ensureSessionIsActive(generation)
+            guard engineLifecycleLock.withLock({ engine.isRunning }) else {
+                throw NativeMeetingAudioSourceError.startFailed
+            }
+            lock.withLock {
+                guard lifecycleGeneration == generation else { return }
+                callbackHealth.start(at: currentHostTimestamp())
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard lock.withLock({
+                lifecycleGeneration == generation && engineStartCompleted
+            }) else { return }
+            reportTerminalFailure(
+                reason: .interrupted,
+                message: "The microphone stream stopped delivering audio and could not be rebuilt. The recording was stopped safely and its partial audio and transcript were preserved."
+            )
+        }
     }
 
     private func reportTerminalFailure(reason: MeetingAudioFailureReason, message: String) {
@@ -1363,7 +1577,7 @@ final class AVAudioEngineMeetingAudioSource: MeetingAudioSourceCapturing, @unche
         guard shouldReport else { return }
         emit(.failure(MeetingAudioSourceFailure(
             reason: reason,
-            hostTimestamp: ProcessInfo.processInfo.systemUptime,
+            hostTimestamp: currentHostTimestamp(),
             message: message
         )))
     }

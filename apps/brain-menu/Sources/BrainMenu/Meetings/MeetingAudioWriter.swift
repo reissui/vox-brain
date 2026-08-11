@@ -2,6 +2,13 @@ import Foundation
 
 typealias MeetingAudioSource = MeetingUtteranceSource
 
+enum MeetingAudioDeliveryPolicy {
+    static let largeGapThreshold: TimeInterval = 0.65
+    static let repeatedGapWindow: TimeInterval = 6
+    static let watchdogRepeatedGapCount = 3
+    static let stalledStreamTimeout: TimeInterval = 2.5
+}
+
 struct MeetingAudioSampleBuffer: Equatable, Sendable {
     let source: MeetingAudioSource
     let sourceTimestamp: TimeInterval
@@ -86,6 +93,22 @@ struct MeetingAudioTrack: Codable, Equatable, Sendable {
     let frameCount: Int64
 }
 
+struct MeetingAudioSourceDiagnostics: Codable, Equatable, Sendable {
+    let source: MeetingAudioSource
+    let callbackCount: Int
+    let deliveredDurationMilliseconds: Int64
+    let observedDurationMilliseconds: Int64
+    let coverageRatio: Double
+    let maximumInterBufferGapMilliseconds: Int64
+    let detectedDropoutCount: Int
+    let nativeSampleRate: Double?
+    let nativeChannelCount: Int?
+}
+
+struct MeetingAudioCaptureDiagnostics: Codable, Equatable, Sendable {
+    let sources: [MeetingAudioSourceDiagnostics]
+}
+
 struct MeetingAudioCaptureSummary: Codable, Equatable, Sendable {
     let origin: Date
     let originHostTimestamp: TimeInterval
@@ -93,6 +116,26 @@ struct MeetingAudioCaptureSummary: Codable, Equatable, Sendable {
     let chunks: [MeetingAudioChunk]
     let discontinuities: [MeetingAudioDiscontinuity]
     let failures: [MeetingAudioFailure]
+    /// Optional so manifests written by older Brain versions remain decodable.
+    let diagnostics: MeetingAudioCaptureDiagnostics?
+
+    init(
+        origin: Date,
+        originHostTimestamp: TimeInterval,
+        tracks: [MeetingAudioTrack],
+        chunks: [MeetingAudioChunk],
+        discontinuities: [MeetingAudioDiscontinuity],
+        failures: [MeetingAudioFailure],
+        diagnostics: MeetingAudioCaptureDiagnostics? = nil
+    ) {
+        self.origin = origin
+        self.originHostTimestamp = originHostTimestamp
+        self.tracks = tracks
+        self.chunks = chunks
+        self.discontinuities = discontinuities
+        self.failures = failures
+        self.diagnostics = diagnostics
+    }
 
     var totalFrameCount: Int64 {
         tracks.reduce(0) { $0 + $1.frameCount }
@@ -218,6 +261,11 @@ final class MeetingAudioWriter: @unchecked Sendable {
             let frameOffset = track.frameCount
             track.frameCount += Int64(normalized.count)
             state.tracks[buffer.source] = track
+            state.callbackCounts[buffer.source, default: 0] += 1
+            state.nativeFormats[buffer.source] = NativeAudioFormat(
+                sampleRate: buffer.sampleRate,
+                channelCount: buffer.channelCount
+            )
             state.hasNonzeroAudio = state.hasNonzeroAudio || normalized.contains { $0 != 0 }
             let chunk = StoredChunk(
                 source: buffer.source,
@@ -364,7 +412,8 @@ final class MeetingAudioWriter: @unchecked Sendable {
                     .map { $0.publicValue(origin: originHostTimestamp) },
                 failures: state.failures
                     .sorted(by: Self.failuresAreOrdered)
-                    .map { $0.publicValue(origin: originHostTimestamp) }
+                    .map { $0.publicValue(origin: originHostTimestamp) },
+                diagnostics: Self.captureDiagnostics(state: state)
             )
             try writeManifest(summary)
             state.finalized = true
@@ -560,6 +609,51 @@ final class MeetingAudioWriter: @unchecked Sendable {
         if lhs.hostTimestamp != rhs.hostTimestamp { return lhs.hostTimestamp < rhs.hostTimestamp }
         return (lhs.source?.rawValue ?? "") < (rhs.source?.rawValue ?? "")
     }
+
+    private static func captureDiagnostics(state: State) -> MeetingAudioCaptureDiagnostics {
+        let sources = MeetingAudioSource.allCases.compactMap { source
+            -> MeetingAudioSourceDiagnostics? in
+            let chunks = state.chunks
+                .filter { $0.source == source }
+                .sorted { $0.hostTimestamp < $1.hostTimestamp }
+            guard !chunks.isEmpty else { return nil }
+            let deliveredFrames = chunks.reduce(Int64(0)) {
+                $0 + Int64($1.frameCount)
+            }
+            let deliveredDuration = Double(deliveredFrames) / Double(sampleRate)
+            let firstStart = chunks[0].hostTimestamp
+            var priorEnd = firstStart
+            var maximumGap: TimeInterval = 0
+            var dropoutCount = 0
+            for chunk in chunks {
+                let gap = max(0, chunk.hostTimestamp - priorEnd)
+                maximumGap = max(maximumGap, gap)
+                if gap >= MeetingAudioDeliveryPolicy.largeGapThreshold {
+                    dropoutCount += 1
+                }
+                priorEnd = max(
+                    priorEnd,
+                    chunk.hostTimestamp + Double(chunk.frameCount) / Double(sampleRate)
+                )
+            }
+            let observedDuration = max(deliveredDuration, priorEnd - firstStart)
+            let format = state.nativeFormats[source]
+            return MeetingAudioSourceDiagnostics(
+                source: source,
+                callbackCount: state.callbackCounts[source, default: 0],
+                deliveredDurationMilliseconds: Int64((deliveredDuration * 1_000).rounded()),
+                observedDurationMilliseconds: Int64((observedDuration * 1_000).rounded()),
+                coverageRatio: observedDuration > 0
+                    ? min(max(deliveredDuration / observedDuration, 0), 1)
+                    : 1,
+                maximumInterBufferGapMilliseconds: Int64((maximumGap * 1_000).rounded()),
+                detectedDropoutCount: dropoutCount,
+                nativeSampleRate: format?.sampleRate,
+                nativeChannelCount: format?.channelCount
+            )
+        }
+        return MeetingAudioCaptureDiagnostics(sources: sources)
+    }
 }
 
 private struct State {
@@ -572,8 +666,15 @@ private struct State {
     var forceNewChunkSources = Set<MeetingAudioSource>()
     var discontinuities: [StoredDiscontinuity] = []
     var failures: [StoredFailure] = []
+    var callbackCounts: [MeetingAudioSource: Int] = [:]
+    var nativeFormats: [MeetingAudioSource: NativeAudioFormat] = [:]
     var hasNonzeroAudio = false
     var finalized = false
+}
+
+private struct NativeAudioFormat {
+    let sampleRate: Double
+    let channelCount: Int
 }
 
 private struct TrackState {
