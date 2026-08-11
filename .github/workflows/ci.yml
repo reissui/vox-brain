@@ -47,4 +47,4 @@ jobs:
           apps/brain-menu/fetch-voxtype.sh "$RUNNER_TEMP/voxtype"
           test "$("$RUNNER_TEMP/voxtype" --version)" = "voxtype 0.7.5"
       - name: Swift tests
-        run: swift test --package-path apps/brain-menu
+        run: swift test --package-path apps/brain-menu --no-parallel

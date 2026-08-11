@@ -11,6 +11,6 @@ while IFS= read -r -d '' script; do
   bash -n "$script"
 done < <(find scripts apps -type f \( -name '*.sh' -o -name 'brain' \) -print0)
 
-swift test --package-path apps/brain-menu
+swift test --package-path apps/brain-menu --no-parallel
 
 echo "All checks passed."
