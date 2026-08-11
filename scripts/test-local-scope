@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+removed_paths=(
+  apps/brain-agent
+  apps/brain-clipper
+  apps/gmail-connector
+  apps/telegram-bot
+  gateway
+  remote
+  site
+  integrations/bookmarklet.js
+  integrations/capture-everywhere.md
+)
+
+failed=0
+for path in "${removed_paths[@]}"; do
+  if [[ -e "$path" || -L "$path" ]]; then
+    printf 'Removed non-local product path still exists: %s\n' "$path" >&2
+    failed=1
+  fi
+done
+
+if ((failed)); then
+  exit 1
+fi
+
+echo "Local scope check passed."
