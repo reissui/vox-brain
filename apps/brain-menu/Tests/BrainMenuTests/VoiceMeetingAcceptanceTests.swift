@@ -421,10 +421,6 @@ struct VoiceMeetingAcceptanceTests {
                 selectedText: "https://example.com/from-selection",
                 windowTitle: "Selected article"
             ),
-            designCapture: DesignWindowCapture(
-                picker: AcceptanceDesignPicker(),
-                screenshotter: AcceptanceDesignScreenshotter()
-            ),
             resultPresenter: AcceptanceAdaptiveResultPresenter()
         )
         let hotkey = CaptureHotkeyController(
@@ -448,10 +444,6 @@ struct VoiceMeetingAcceptanceTests {
             mode: .note,
             captureController: noteCapture,
             clipboard: AcceptanceClipboard(text: "clipboard must stay unread"),
-            designCapture: DesignWindowCapture(
-                picker: AcceptanceDesignPicker(),
-                screenshotter: AcceptanceDesignScreenshotter()
-            ),
             permissionGate: AcceptanceQuickPermissionGate()
         )
         note.prepareToOpen(sourceApplication: nil)
@@ -467,10 +459,6 @@ struct VoiceMeetingAcceptanceTests {
             mode: .link,
             captureController: linkCapture,
             clipboard: clipboard,
-            designCapture: DesignWindowCapture(
-                picker: AcceptanceDesignPicker(),
-                screenshotter: AcceptanceDesignScreenshotter()
-            ),
             permissionGate: AcceptanceQuickPermissionGate()
         )
         link.prepareToOpen(sourceApplication: nil)
@@ -481,31 +469,9 @@ struct VoiceMeetingAcceptanceTests {
         await linkCapture.waitForMonitoring()
         #expect(linkCapture.submissionState.isDelivered)
 
-        let picker = AcceptanceDesignPicker()
-        let designCapture = CaptureController(api: api, sleep: { _ in })
-        let design = QuickCaptureController(
-            mode: .design,
-            captureController: designCapture,
-            clipboard: AcceptanceClipboard(text: nil),
-            designCapture: DesignWindowCapture(
-                picker: picker,
-                screenshotter: AcceptanceDesignScreenshotter()
-            ),
-            permissionGate: AcceptanceQuickPermissionGate()
-        )
-        design.prepareToOpen(sourceApplication: nil)
-        design.panelDidOpen()
-        design.designContext = "Explicitly selected product window"
-        #expect(await picker.calls == 0)
-        await design.chooseDesignWindow()
-        #expect(await picker.calls == 1)
-        await design.submit()
-        await designCapture.waitForMonitoring()
-        #expect(designCapture.submissionState.isDelivered)
-
         let requests = await api.requests
-        #expect(requests.count == 4)
-        #expect(requests.map(\.type) == [nil, .note, nil, .design])
+        #expect(requests.count == 3)
+        #expect(requests.map(\.type) == [nil, .note, nil])
         #expect(requests.allSatisfy { $0.source == CaptureController.source })
     }
 
@@ -877,20 +843,6 @@ private final class AcceptanceClipboard: CaptureClipboardReading {
     init(text: String?) { self.text = text }
     func readText() -> String? { textReads += 1; return text }
     func readImage() -> CaptureImagePayload? { nil }
-}
-
-private actor AcceptanceDesignPicker: DesignWindowPicking {
-    private(set) var calls = 0
-    func pickSingleWindow() -> DesignWindowSelection {
-        calls += 1
-        return DesignWindowSelection(kind: .window, pixelWidth: 640, pixelHeight: 480)
-    }
-}
-
-private actor AcceptanceDesignScreenshotter: DesignWindowScreenshotting {
-    func capturePNG(for selection: DesignWindowSelection) -> Data {
-        Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01])
-    }
 }
 
 @MainActor

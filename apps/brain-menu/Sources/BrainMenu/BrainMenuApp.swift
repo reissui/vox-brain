@@ -126,7 +126,6 @@ final class BrainAppControllerGraph {
     let quickCapturePresenter: QuickCapturePanelPresenter
     let adaptiveCapture: AdaptiveCaptureController
     let captureHotkey: CaptureHotkeyController
-    let regionCapture: RegionCaptureController
     let dictationHistory: DictationHistoryStore
     let dictation: DictationController
     let meeting: MeetingController
@@ -218,8 +217,6 @@ final class BrainAppControllerGraph {
         meetings: MeetingsController = MeetingsController(),
         launchAtLogin: LaunchAtLoginController = LaunchAtLoginController(),
         captureHotkeyRegistrar: any CaptureHotkeyRegistering = SystemCaptureHotkeyRegistrar(),
-        regionHotkeyRegistrar: any CaptureHotkeyRegistering = SystemCaptureHotkeyRegistrar(identifier: 3),
-        designRegionCapture: (any DesignRegionCapturing)? = nil,
         frontmostApplications: any FrontmostApplicationProviding = WorkspaceFrontmostApplicationProvider(),
         speechSettings: SpeechSettingsController? = nil,
         aiSettings: AISettingsController = AISettingsController(settings: AISettingsStore()),
@@ -296,11 +293,6 @@ final class BrainAppControllerGraph {
             registrar: captureHotkeyRegistrar,
             applications: frontmostApplications,
             adaptiveCapture: adaptiveCapture
-        )
-        regionCapture = RegionCaptureController(
-            captureController: capture,
-            regionCapture: designRegionCapture ?? DesignRegionCapture(),
-            registrar: regionHotkeyRegistrar
         )
 
         let island = recordingIsland ?? RecordingIslandController(actionHandler: { action in
