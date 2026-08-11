@@ -61,6 +61,59 @@ struct MeetingUploadControllerTests {
     }
 
     @Test
+    func nonblankNotesRenderVerbatimBeforeTranscriptAndBlankNotesChangeNoBytes() throws {
+        let meeting = completedMeeting(title: "Notes rendering")
+        let utterances = try sampleUtterances()
+        let renderer = MeetingMarkdownRenderer()
+        let original = renderer.render(meeting: meeting, utterances: utterances)
+
+        #expect(renderer.render(
+            meeting: meeting,
+            utterances: utterances,
+            notes: " \n\t"
+        ) == original)
+
+        let exact = "Decide: ship Friday\n\n## User heading\n- keep verbatim"
+        let withNotes = renderer.render(
+            meeting: meeting,
+            utterances: utterances,
+            notes: exact
+        )
+        let notesRange = try #require(withNotes.range(of: "## Notes\n\n\(exact)"))
+        let transcriptRange = try #require(withNotes.range(of: "## Transcript"))
+        #expect(notesRange.lowerBound < transcriptRange.lowerBound)
+        #expect(withNotes[notesRange].hasSuffix(exact))
+    }
+
+    @Test
+    func finalCaptureReloadsCurrentNotesFromDisk() async throws {
+        let fixture = try UploadFixture()
+        let meeting = completedMeeting(title: "Fresh notes")
+        try fixture.meetingStore.save(meeting, utterances: sampleUtterances())
+        try fixture.notesStore.save("stale", meetingID: meeting.id)
+        let api = MeetingUploadAPISpy(
+            captureResults: [.value(BrainCaptureReceipt(id: "fresh-notes", state: "queued"))],
+            statusResults: [.value(BrainCaptureStatus(
+                id: "fresh-notes",
+                state: .delivered,
+                retryable: false,
+                error: nil,
+                createdAt: Date(timeIntervalSince1970: 1),
+                updatedAt: Date(timeIntervalSince1970: 2),
+                deliveredAt: Date(timeIntervalSince1970: 2)
+            ))]
+        )
+        let controller = fixture.controller(api: api)
+        try fixture.notesStore.save("fresh from disk", meetingID: meeting.id)
+
+        await controller.uploadAfterFinalTranscriptPersistence(meetingID: meeting.id)
+
+        let request = try #require(await api.captureCalls.first?.request)
+        #expect(request.transcript?.contains("## Notes\n\nfresh from disk") == true)
+        #expect(request.transcript?.contains("## Notes\n\nstale") == false)
+    }
+
+    @Test
     func escapesOnlyWouldBeHeadingsAndMakesCaptureTitleFilenameSafe() throws {
         var meeting = completedMeeting(title: "../Roadmap\n# forged/title:")
         meeting.analysisState = .completed
@@ -443,6 +496,7 @@ private actor MeetingUploadAPISpy: BrainCaptureAPI {
 private final class UploadFixture {
     let rootURL: URL
     let meetingStore: MeetingStore
+    let notesStore: MeetingNotesStore
     let analysisStore: FileMeetingAnalysisStore
     let uploadStore: FileMeetingUploadStore
 
@@ -450,6 +504,7 @@ private final class UploadFixture {
         rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("MeetingUploadTests-\(UUID().uuidString)", isDirectory: true)
         meetingStore = MeetingStore(rootURL: rootURL)
+        notesStore = MeetingNotesStore(rootURL: rootURL)
         analysisStore = FileMeetingAnalysisStore(rootURL: rootURL)
         uploadStore = FileMeetingUploadStore(rootURL: rootURL)
     }
@@ -464,6 +519,7 @@ private final class UploadFixture {
     ) -> MeetingUploadController {
         MeetingUploadController(
             meetingStore: meetingStore,
+            notesStore: notesStore,
             analysisStore: analysisStore,
             uploadStore: uploadStore,
             api: api,

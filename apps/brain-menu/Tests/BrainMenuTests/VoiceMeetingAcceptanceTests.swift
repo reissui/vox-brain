@@ -7,6 +7,22 @@ import Testing
 @Suite(.serialized)
 struct VoiceMeetingAcceptanceTests {
     @Test
+    func voiceNotesRemainCompactAndDoNotExposeTheMeetingNotesPanel() throws {
+        let island = try acceptanceIsland(suite: "voice-note-notes-exclusion")
+        island.present(.meeting(RecordingIslandMeetingPresentation(
+            phase: .recording,
+            title: "Voice note",
+            recordingKind: .voiceNote,
+            startedAt: Date(timeIntervalSince1970: 1_000)
+        )))
+
+        #expect(island.controls == [.pause, .stop])
+        #expect(!island.controls.contains(.showTranscript))
+        #expect(island.panel.frame.size == RecordingIslandController.meetingPanelSize)
+        island.hideImmediately()
+    }
+
+    @Test
     func externalVoxTypeCompletesOnboardingWithoutRequiringAMeetingModel() async throws {
         let fixture = try AcceptanceDirectory(prefix: "VoiceMeeting-VoxType")
         defer { fixture.remove() }
