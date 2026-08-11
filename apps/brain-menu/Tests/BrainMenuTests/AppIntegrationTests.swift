@@ -237,6 +237,9 @@ struct AppIntegrationTests {
         voxType.yield(appRuntimeStatus(.idle))
         await eventually { graph.activity == .idle }
 
+        // `start()` refreshes onboarding asynchronously. Wait for the injected
+        // ready fixture to finish that refresh before exercising manual start.
+        await eventually { graph.recordingSetupCheck(for: .meeting) == nil }
         await graph.toggleMeeting()
         #expect(meeting.state == .recording)
         #expect(graph.activity == .meeting(
@@ -259,7 +262,7 @@ struct AppIntegrationTests {
             return
         }
         #expect(finalizingIsland.phase == .finalizing)
-        #expect(graph.recordingIsland.controls.isEmpty)
+        #expect(graph.recordingIsland.controls == [.showTranscript])
         recorder.releaseStop()
         await stopping.value
         #expect(meeting.state == .completed)
@@ -526,6 +529,9 @@ struct AppIntegrationTests {
         await eventually { graph.activity == .transcribing("Transcribing dictation") }
         #expect(graph.recordingIsland.presentation == .hidden)
 
+        // The graph's initial onboarding refresh is deliberately asynchronous.
+        // This test owns a ready fixture, so wait until it is observable.
+        await eventually { graph.recordingSetupCheck(for: .meeting) == nil }
         await graph.toggleMeeting()
         await eventually {
             guard case .meeting(let value) = graph.recordingIsland.presentation else {
