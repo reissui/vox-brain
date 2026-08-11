@@ -306,7 +306,7 @@ final class MeetingAnalysisService: Sendable {
             }
             var completed = meeting
             completed.analysisState = .completed
-            if completed.titleSource != .manual,
+            if completed.acceptsAutomaticAnalysisTitle,
                let title = MeetingContextTitle.normalizedAnalysisTitle(analysis.title) {
                 completed.title = title
                 completed.titleSource = .analysis

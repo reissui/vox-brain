@@ -337,6 +337,28 @@ struct MeetingAnalysisServiceTests {
     }
 
     @Test
+    func analysisRenamesAPlaceholderVoiceNoteFromItsSubject() async throws {
+        let utterances = try utteranceFixtures()
+        var voiceNote = meetingRecord()
+        voiceNote.title = "Voice note"
+        voiceNote.recordingKind = .voiceNote
+        voiceNote.titleSource = .manual
+        let provider = FakeMeetingAnalysisProvider(
+            readiness: .ready,
+            output: try JSONEncoder().encode(analysis(title: "Release planning"))
+        )
+
+        let result = await MeetingAnalysisService(
+            provider: provider,
+            store: InMemoryMeetingAnalysisStore()
+        ).analyzeAfterFinalTranscription(meeting: voiceNote, utterances: utterances)
+
+        #expect(result.failure == nil)
+        #expect(result.meeting.title == "Release planning")
+        #expect(result.meeting.titleSource == .analysis)
+    }
+
+    @Test
     func failedReanalysisPreservesPriorAnalysisTranscriptAndManualSpeakerEditsAtomically() async throws {
         let utterances = try utteranceFixtures()
         var editor = SpeakerEditor(utterances: utterances)
