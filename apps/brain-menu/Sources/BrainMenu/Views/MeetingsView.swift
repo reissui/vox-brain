@@ -503,16 +503,17 @@ struct MeetingsView: View {
                     systemImage: "exclamationmark.triangle",
                     description: Text(message)
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             case .loaded where viewModel.isEmpty(in: scope):
                 ContentUnavailableView(
                     scope.emptyTitle,
                     systemImage: scope.symbolName,
                     description: Text(scope.emptyDescription)
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             case .loaded where viewModel.hasNoSearchResults(in: scope):
                 ContentUnavailableView.search(text: query)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             case .loaded:
                 meetingList
             }

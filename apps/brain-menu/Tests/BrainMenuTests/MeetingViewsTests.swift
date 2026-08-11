@@ -1051,6 +1051,24 @@ struct MeetingViewsTests {
     }
 
     @Test
+    func sparseMeetingLibraryStatesStayTopAligned() throws {
+        let views = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/BrainMenu/Views", isDirectory: true)
+        let meetings = try String(
+            contentsOf: views.appendingPathComponent("MeetingsView.swift"),
+            encoding: .utf8
+        )
+        let topAlignedFrame =
+            ".frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)"
+
+        #expect(meetings.components(separatedBy: topAlignedFrame).count - 1 == 4)
+        #expect(meetings.contains("ContentUnavailableView.search(text: query)"))
+    }
+
+    @Test
     func productionMeetingRouteWiresTheSavedCLIAnalysisProvider() throws {
         let views = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
