@@ -6,7 +6,6 @@ import SwiftUI
 enum QuickCaptureMode: String, CaseIterable, Identifiable, Equatable, Sendable {
     case note
     case link
-    case design
 
     var id: Self { self }
 
@@ -14,7 +13,6 @@ enum QuickCaptureMode: String, CaseIterable, Identifiable, Equatable, Sendable {
         switch self {
         case .note: "Note"
         case .link: "Link / Bookmark"
-        case .design: "Design"
         }
     }
 }
@@ -39,8 +37,6 @@ extension QuickCapturePermissionGating {
 enum AdaptiveCaptureFailure: Equatable, Sendable {
     case accessibilityDenied
     case sourceUnavailable
-    case pickerCancelled
-    case captureFailed
     case deliveryBusy
     case deliveryFailed
 
@@ -48,8 +44,6 @@ enum AdaptiveCaptureFailure: Equatable, Sendable {
         switch self {
         case .accessibilityDenied: "Allow Accessibility"
         case .sourceUnavailable: "Source window unavailable"
-        case .pickerCancelled: "Screenshot cancelled"
-        case .captureFailed: "Screenshot not captured"
         case .deliveryBusy: "Capture already in progress"
         case .deliveryFailed: "Capture not sent"
         }
@@ -61,10 +55,6 @@ enum AdaptiveCaptureFailure: Equatable, Sendable {
             "Open Accessibility settings, allow Brain, then press Control–Option–B again."
         case .sourceUnavailable:
             "Return to the window you want to capture, then press Control–Option–B again."
-        case .pickerCancelled:
-            "Nothing was sent. Press Control–Option–B when you are ready to choose a window."
-        case .captureFailed:
-            "Choose the window again, or check Screen Recording in System Settings."
         case .deliveryBusy:
             "Wait for the current capture to finish, then try again."
         case .deliveryFailed:
@@ -106,7 +96,7 @@ protocol AdaptiveCapturePerforming: AnyObject {
 }
 
 /// Implements the one-key contextual flow without activating Brain first:
-/// selected URL wins; otherwise Apple's picker supplies one window image.
+/// selected URL becomes a Link; other nonblank selected text becomes a Note.
 @MainActor
 @Observable
 final class AdaptiveCaptureController: AdaptiveCapturePerforming {
@@ -116,18 +106,15 @@ final class AdaptiveCaptureController: AdaptiveCapturePerforming {
     let captureController: CaptureController
 
     @ObservationIgnored private let selectedTextReader: any SelectedTextReading
-    @ObservationIgnored private let designCapture: DesignWindowCapture
     @ObservationIgnored private let resultPresenter: any AdaptiveCaptureResultPresenting
 
     init(
         captureController: CaptureController,
         selectedTextReader: any SelectedTextReading = SystemSelectedTextReader(),
-        designCapture: DesignWindowCapture = DesignWindowCapture(),
         resultPresenter: any AdaptiveCaptureResultPresenting = SystemAdaptiveCaptureResultPresenter()
     ) {
         self.captureController = captureController
         self.selectedTextReader = selectedTextReader
-        self.designCapture = designCapture
         self.resultPresenter = resultPresenter
     }
 
@@ -163,43 +150,14 @@ final class AdaptiveCaptureController: AdaptiveCapturePerforming {
             return
         }
 
-        guard let context = Self.screenshotContext(
-            applicationName: application?.localizedName,
-            windowTitle: snapshot.windowTitle
-        ) else {
+        guard let selectedText = snapshot.selectedText,
+              !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             show(.sourceUnavailable)
             return
         }
-
-        let image: CaptureImagePayload
-        do {
-            image = try await designCapture.captureSelectedWindow()
-        } catch is CancellationError {
-            show(.pickerCancelled)
-            return
-        } catch DesignWindowCaptureError.pickerCancelled {
-            show(.pickerCancelled)
-            return
-        } catch {
-            show(.captureFailed)
-            return
-        }
-
-        var draft = CaptureDraft.empty(kind: .image)
-        draft.image = image
-        draft.imageContext = context
+        var draft = CaptureDraft.empty(kind: .note)
+        draft.noteText = selectedText
         await submit(draft)
-    }
-
-    static func screenshotContext(
-        applicationName: String?,
-        windowTitle: String
-    ) -> String? {
-        guard let applicationName = sanitize(applicationName, maximumLength: 80),
-              let windowTitle = sanitize(windowTitle, maximumLength: 240) else {
-            return nil
-        }
-        return "Source application: \(applicationName)\nWindow title: \(windowTitle)"
     }
 
     private func submit(_ draft: CaptureDraft) async {
@@ -220,18 +178,6 @@ final class AdaptiveCaptureController: AdaptiveCapturePerforming {
         resultPresenter.present(failure)
     }
 
-    private static func sanitize(_ value: String?, maximumLength: Int) -> String? {
-        guard let value else { return nil }
-        let withoutControls = String(value.unicodeScalars.map { scalar in
-            CharacterSet.controlCharacters.contains(scalar) ? " " : String(scalar)
-        }.joined())
-        let collapsed = withoutControls
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-        guard !collapsed.isEmpty else { return nil }
-        return String(collapsed.prefix(maximumLength))
-    }
 }
 
 @MainActor
@@ -244,12 +190,10 @@ final class OnboardingQuickCapturePermissionGate: QuickCapturePermissionGating {
 
     func unresolvedPermission(for mode: QuickCaptureMode) -> QuickCapturePermissionBlock? {
         // Carbon owns the global shortcut without a privacy permission. Link
-        // context uses Accessibility; the Apple window picker uses Screen &
-        // System Audio Recording. Plain notes need neither capability.
+        // context uses Accessibility; plain notes need no capability.
         let required: [OnboardingCheckID] = switch mode {
         case .note: []
         case .link: [.accessibility]
-        case .design: [.systemAudio]
         }
         guard let check = required
             .map(onboarding.check)
@@ -275,7 +219,6 @@ final class OnboardingQuickCapturePermissionGate: QuickCapturePermissionGating {
 enum QuickCaptureValidationError: Error, Equatable, LocalizedError, Sendable {
     case panelIsNotOpen
     case permissionUnresolved
-    case missingDesignContext
     case captureDeliveryBusy
 
     var errorDescription: String? {
@@ -284,8 +227,6 @@ enum QuickCaptureValidationError: Error, Equatable, LocalizedError, Sendable {
             "Open Quick Capture before capturing."
         case .permissionUnresolved:
             "Finish the required onboarding permission before using this capture action."
-        case .missingDesignContext:
-            "Add searchable context before choosing a design window."
         case .captureDeliveryBusy:
             "Finish or retry the current capture before sending another."
         }
@@ -298,15 +239,12 @@ final class QuickCaptureController {
     private(set) var mode: QuickCaptureMode
     private(set) var sourceApplication: QuickCaptureApplicationIdentity?
     private(set) var isPresented = false
-    private(set) var isChoosingWindow = false
     private(set) var errorMessage: String?
 
     var noteText = ""
     var url = ""
     var comment = ""
     var selectedText = ""
-    var designContext = ""
-    private(set) var designImage: CaptureImagePayload?
 
     let captureController: CaptureController
 
@@ -317,13 +255,11 @@ final class QuickCaptureController {
     var canSubmit: Bool {
         isPresented
             && permissionBlock == nil
-            && !isChoosingWindow
             && !captureController.isSubmitting
             && !captureController.canRetry
     }
 
     @ObservationIgnored private let clipboard: any CaptureClipboardReading
-    @ObservationIgnored private let designCapture: DesignWindowCapture
     @ObservationIgnored private let permissionGate: any QuickCapturePermissionGating
     @ObservationIgnored private var panelHasOpened = false
     @ObservationIgnored private var didReadClipboardThisSession = false
@@ -333,7 +269,6 @@ final class QuickCaptureController {
         mode: QuickCaptureMode = .note,
         captureController: CaptureController = CaptureController(),
         clipboard: any CaptureClipboardReading = SystemCaptureClipboard(),
-        designCapture: DesignWindowCapture = DesignWindowCapture(),
         permissionGate: any QuickCapturePermissionGating = OnboardingQuickCapturePermissionGate(
             onboarding: OnboardingController()
         )
@@ -341,7 +276,6 @@ final class QuickCaptureController {
         self.mode = mode
         self.captureController = captureController
         self.clipboard = clipboard
-        self.designCapture = designCapture
         self.permissionGate = permissionGate
     }
 
@@ -357,8 +291,6 @@ final class QuickCaptureController {
         url = ""
         comment = ""
         selectedText = ""
-        designContext = ""
-        designImage = nil
     }
 
     func panelDidOpen() {
@@ -371,37 +303,6 @@ final class QuickCaptureController {
         self.mode = mode
         errorMessage = nil
         prefillLinkFromClipboardIfNeeded()
-    }
-
-    func chooseDesignWindow() async {
-        guard isPresented else {
-            errorMessage = QuickCaptureValidationError.panelIsNotOpen.localizedDescription
-            return
-        }
-        guard mode == .design else { return }
-        guard permissionBlock == nil else {
-            errorMessage = QuickCaptureValidationError.permissionUnresolved.localizedDescription
-            return
-        }
-        guard !designContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            errorMessage = QuickCaptureValidationError.missingDesignContext.localizedDescription
-            return
-        }
-
-        isChoosingWindow = true
-        errorMessage = nil
-        defer { isChoosingWindow = false }
-        do {
-            designImage = try await designCapture.captureSelectedWindow()
-        } catch is CancellationError {
-            // Cancellation is equivalent to dismissing Apple's picker. Keep
-            // the Quick Capture draft and do not invent an image.
-        } catch DesignWindowCaptureError.pickerCancelled {
-            // Same as above for the picker's explicit Cancel button.
-        } catch {
-            designImage = nil
-            errorMessage = error.localizedDescription
-        }
     }
 
     /// Copies the explicit panel draft into the existing delivery controller;
@@ -434,10 +335,6 @@ final class QuickCaptureController {
             draft.url = url
             draft.comment = comment
             draft.selectedText = selectedText
-        case .design:
-            draft = .empty(kind: .image)
-            draft.image = designImage
-            draft.imageContext = designContext
         }
         captureController.draft = draft
         guard captureController.canSubmit else {
@@ -580,8 +477,6 @@ struct QuickCapturePanel: View {
                     noteFields
                 case .link:
                     linkFields
-                case .design:
-                    designFields
                 }
             }
             .disabled(controller.captureController.isSubmitting)
@@ -619,7 +514,7 @@ struct QuickCapturePanel: View {
                     .accessibilityValue(controller.canSubmit ? "Enabled" : "Disabled")
             }
 
-            Text("Control–Option–B reads the focused selection through Accessibility and otherwise opens Apple's window picker. This manual Link form reads clipboard text at most once, only after the panel opens.")
+            Text("Control–Option–B saves the focused HTTP(S) URL as a Link, or other selected text as a Note. This manual Link form reads clipboard text at most once, only after the panel opens.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -659,41 +554,6 @@ struct QuickCapturePanel: View {
                 .frame(minHeight: 90)
                 .quickCaptureBorder()
                 .accessibilityLabel("Bookmark selected text")
-        }
-    }
-
-    private var designFields: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Searchable context").font(.headline)
-            TextEditor(text: $controller.designContext)
-                .frame(minHeight: 145)
-                .quickCaptureBorder()
-                .accessibilityLabel("Design searchable context")
-                .accessibilityFocused($accessibilityFocus, equals: .primaryField)
-            Text("Required before Apple's picker opens.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            HStack {
-                Button {
-                    Task { await controller.chooseDesignWindow() }
-                } label: {
-                    if controller.isChoosingWindow {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Label("Choose Window…", systemImage: "macwindow.badge.plus")
-                    }
-                }
-                .disabled(controller.isChoosingWindow || controller.permissionBlock != nil)
-                .accessibilityValue(
-                    controller.isChoosingWindow || controller.permissionBlock != nil
-                        ? "Disabled"
-                        : "Enabled"
-                )
-                .accessibilityHint("Opens Apple's window picker without capturing the whole screen.")
-                Text(controller.designImage?.filename ?? "No window captured")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
         }
     }
 

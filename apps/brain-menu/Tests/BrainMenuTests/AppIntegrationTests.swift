@@ -434,10 +434,8 @@ struct AppIntegrationTests {
     @Test
     func scenesBorrowOneControllerGraphAndStartingTwiceDoesNotDuplicateLongRunningOwners() {
         let captureRegistrar = AppCaptureHotkeyRegistrar()
-        let regionRegistrar = AppCaptureHotkeyRegistrar()
         let graph = makeGraph(
-            captureRegistrar: captureRegistrar,
-            regionRegistrar: regionRegistrar
+            captureRegistrar: captureRegistrar
         )
         defer { graph.stop() }
 
@@ -456,8 +454,6 @@ struct AppIntegrationTests {
         #expect(graph.startCount == 1)
         #expect(captureRegistrar.registerCalls == 0)
         #expect(captureRegistrar.registeredHotkeys.isEmpty)
-        #expect(regionRegistrar.registerCalls == 0)
-        #expect(regionRegistrar.registeredHotkeys.isEmpty)
     }
 
     @Test
@@ -830,8 +826,7 @@ struct AppIntegrationTests {
         meetings: MeetingsController? = nil,
         now: @escaping @MainActor () -> Date = Date.init,
         meetingAnalysisFactory: @escaping @MainActor () -> (any MeetingDetailAnalysisControlling)? = { nil },
-        captureRegistrar: AppCaptureHotkeyRegistrar = AppCaptureHotkeyRegistrar(),
-        regionRegistrar: AppCaptureHotkeyRegistrar = AppCaptureHotkeyRegistrar()
+        captureRegistrar: AppCaptureHotkeyRegistrar = AppCaptureHotkeyRegistrar()
     ) -> BrainAppControllerGraph {
         let onboarding = onboarding ?? AppOnboardingFixture.fallbackController()
         return BrainAppControllerGraph(
@@ -851,7 +846,6 @@ struct AppIntegrationTests {
                 analysisStore: AppEmptyAnalysisStore()
             ),
             captureHotkeyRegistrar: captureRegistrar,
-            regionHotkeyRegistrar: regionRegistrar,
             frontmostApplications: AppFrontmostApplications(),
             speechSettings: SpeechSettingsController(
                 voxType: nil,

@@ -34,11 +34,6 @@ struct CaptureHotkey: Codable, Equatable, Hashable, Sendable {
         modifiers: [.control, .option]
     )
 
-    static let controlOptionZ = Self(
-        keyCode: 6, // kVK_ANSI_Z
-        modifiers: [.control, .option]
-    )
-
     static let controlOptionM = Self(
         keyCode: 46, // kVK_ANSI_M
         modifiers: [.control, .option]
