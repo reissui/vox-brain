@@ -282,6 +282,52 @@ struct AppIntegrationTests {
     }
 
     @Test
+    func recordingSetupBlocksEmptyCapturesAndExposesTheExactOnboardingAction() async throws {
+        let onboarding = try AppOnboardingFixture(ready: true)
+        defer { onboarding.remove() }
+        await onboarding.permissions.set(.notDetermined, for: .microphone)
+        await onboarding.permissions.set(.denied, for: .systemAudio)
+        await onboarding.controller.refresh()
+
+        let recorder = AppMeetingRecorder()
+        let meeting = MeetingController(
+            detector: MeetingDetector(),
+            recorder: recorder,
+            speechEngine: "whisper",
+            speechModel: "small.en"
+        )
+        let graph = makeGraph(onboarding: onboarding.controller, meeting: meeting)
+
+        #expect(graph.recordingSetupCheck(for: .voiceNote)?.id == .microphone)
+        #expect(
+            graph.recordingSetupCheck(for: .voiceNote)?.action
+                == .requestPermission(.microphone)
+        )
+
+        await graph.startVoiceNote()
+        #expect(meeting.state == .idle)
+        #expect(recorder.startCount == 0)
+
+        await onboarding.permissions.set(.authorized, for: .microphone)
+        await graph.performRecordingSetupAction(.requestPermission(.microphone))
+        #expect(graph.recordingSetupCheck(for: .voiceNote) == nil)
+        #expect(graph.recordingSetupCheck(for: .meeting)?.id == .systemAudio)
+        #expect(
+            graph.recordingSetupCheck(for: .meeting)?.action
+                == .openSystemSettings(.systemAudio)
+        )
+
+        await graph.startVoiceNote()
+        #expect(meeting.state == .recording)
+        #expect(recorder.startCount == 1)
+
+        await meeting.stop()
+        await graph.toggleMeeting()
+        #expect(meeting.state == .completed)
+        #expect(recorder.startCount == 1)
+    }
+
+    @Test
     func productionGraphTurnsReceivedMeetingFramesIntoVisibleAudioConfirmation() async {
         let audioMonitor = MeetingAudioMonitor()
         let meeting = MeetingController(
@@ -941,9 +987,10 @@ private func appRuntimeStatus(_ state: VoxTypeRuntimeState) -> VoxTypeStatus {
 private final class AppMeetingRecorder: MeetingRecording {
     var suspendStop = false
     var completion: MeetingRecord?
+    private(set) var startCount = 0
     private var stopContinuation: CheckedContinuation<Void, Never>?
 
-    func start(_ request: MeetingRecordingRequest) async throws {}
+    func start(_ request: MeetingRecordingRequest) async throws { startCount += 1 }
     func pause(at date: Date) async throws {}
     func resume(with discontinuity: MeetingRecordingDiscontinuity) async throws {}
 
@@ -1108,9 +1155,9 @@ private final class AppOnboardingFixture {
     static func fallbackController() -> OnboardingController {
         let defaults = UserDefaults(suiteName: "AppIntegration.Fallback.\(UUID().uuidString)")!
         return OnboardingController(
-            voxType: AppOnboardingVoxType(ready: false),
-            models: AppOnboardingModels(ready: false),
-            permissions: AppOnboardingPermissions(authorized: false),
+            voxType: AppOnboardingVoxType(ready: true),
+            models: AppOnboardingModels(ready: true),
+            permissions: AppOnboardingPermissions(authorized: true),
             opener: AppOnboardingOpener(),
             defaults: defaults
         )

@@ -362,6 +362,7 @@ final class BrainAppControllerGraph {
         case .starting, .recording, .paused, .stopSuggested:
             await meeting.stop()
         case .idle, .completed, .failed, .startSuggested:
+            guard await recordingSetupIsReady(for: .meeting) else { return }
             meetingSavedNotice = nil
             if meeting.state == .completed { meeting.resetCompletedMeeting() }
             if meeting.state == .failed { meeting.resetFailedMeeting() }
@@ -373,10 +374,28 @@ final class BrainAppControllerGraph {
 
     func startVoiceNote() async {
         guard [.idle, .completed, .failed, .startSuggested].contains(meeting.state) else { return }
+        guard await recordingSetupIsReady(for: .voiceNote) else { return }
         meetingSavedNotice = nil
         if meeting.state == .completed { meeting.resetCompletedMeeting() }
         if meeting.state == .failed { meeting.resetFailedMeeting() }
         await meeting.startVoiceNote()
+    }
+
+    func recordingSetupCheck(for kind: MeetingRecordingKind) -> OnboardingCheck? {
+        let requiredPermissions: [OnboardingCheckID] = kind == .meeting
+            ? [.microphone, .systemAudio]
+            : [.microphone]
+        return requiredPermissions
+            .map(onboarding.check)
+            .first { $0.state != .ready }
+    }
+
+    func performRecordingSetupAction(_ action: OnboardingAction) async {
+        await onboarding.perform(action)
+    }
+
+    func refreshRecordingSetup() async {
+        await onboarding.refresh()
     }
 
     func dismissMeetingSavedNotice() {
@@ -412,6 +431,11 @@ final class BrainAppControllerGraph {
                 self.observeMeetingAudio()
             }
         }
+    }
+
+    private func recordingSetupIsReady(for kind: MeetingRecordingKind) async -> Bool {
+        await refreshRecordingSetup()
+        return recordingSetupCheck(for: kind) == nil
     }
 
     private func observeDictation() {
