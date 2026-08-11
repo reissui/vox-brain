@@ -8,6 +8,73 @@ import Testing
 @Suite(.serialized)
 struct MeetingAudioCaptureTests {
     @Test
+    func recordingStartRequestsUndeterminedMicrophonePermission() async throws {
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 48_000,
+            channels: 1
+        ))
+        let authorization = LockedMicrophoneAuthorization(status: .notDetermined)
+        let engine = RecordingMicrophoneAudioEngine(format: format)
+        let source = AVAudioEngineMeetingAudioSource(
+            selection: .systemDefault,
+            inventory: FixedMicrophoneInventory(devices: [
+                MeetingMicrophoneDevice(
+                    id: "default-microphone",
+                    name: "Default microphone",
+                    coreAudioID: 42,
+                    isSystemDefault: true
+                ),
+            ], defaultDeviceUID: "default-microphone"),
+            engine: engine,
+            authorizationStatus: { authorization.status },
+            requestAuthorization: { authorization.request() }
+        )
+
+        try await source.start { _ in }
+
+        #expect(authorization.requestCount == 1)
+        #expect(engine.startCount == 1)
+        await source.stop()
+    }
+
+    @Test
+    func recordingStartExplainsHowToRecoverDeniedMicrophonePermission() async throws {
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 48_000,
+            channels: 1
+        ))
+        let authorization = LockedMicrophoneAuthorization(status: .denied)
+        let settings = LockedMicrophoneSettingsRecovery()
+        let engine = RecordingMicrophoneAudioEngine(format: format)
+        let source = AVAudioEngineMeetingAudioSource(
+            selection: .systemDefault,
+            inventory: FixedMicrophoneInventory(devices: [
+                MeetingMicrophoneDevice(
+                    id: "default-microphone",
+                    name: "Default microphone",
+                    coreAudioID: 42,
+                    isSystemDefault: true
+                ),
+            ], defaultDeviceUID: "default-microphone"),
+            engine: engine,
+            authorizationStatus: { authorization.status },
+            requestAuthorization: { authorization.request() },
+            openMicrophoneSettings: { settings.open() }
+        )
+
+        await #expect(throws: NativeMeetingAudioSourceError.microphonePermissionDenied) {
+            try await source.start { _ in }
+        }
+
+        #expect(authorization.requestCount == 0)
+        #expect(settings.openCount == 1)
+        #expect(engine.startCount == 0)
+        #expect(NativeMeetingAudioSourceError.microphonePermissionDenied.localizedDescription.contains(
+            "System Settings → Privacy & Security → Microphone"
+        ))
+    }
+
+    @Test
     func callbackHealthDetectsPeriodicSparseDeliveryButAcceptsContinuousQuietBuffers() throws {
         var sparse = MeetingAudioCallbackHealthModel()
         sparse.start(at: 0)
@@ -1141,6 +1208,38 @@ private final class LockedHostClock: @unchecked Sendable {
     var now: TimeInterval {
         get { lock.withLock { value } }
         set { lock.withLock { value = newValue } }
+    }
+}
+
+private final class LockedMicrophoneAuthorization: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedStatus: AVAuthorizationStatus
+    private var storedRequestCount = 0
+
+    init(status: AVAuthorizationStatus) {
+        storedStatus = status
+    }
+
+    var status: AVAuthorizationStatus { lock.withLock { storedStatus } }
+    var requestCount: Int { lock.withLock { storedRequestCount } }
+
+    func request() -> Bool {
+        lock.withLock {
+            storedRequestCount += 1
+            storedStatus = .authorized
+        }
+        return true
+    }
+}
+
+private final class LockedMicrophoneSettingsRecovery: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedOpenCount = 0
+
+    var openCount: Int { lock.withLock { storedOpenCount } }
+
+    func open() {
+        lock.withLock { storedOpenCount += 1 }
     }
 }
 
