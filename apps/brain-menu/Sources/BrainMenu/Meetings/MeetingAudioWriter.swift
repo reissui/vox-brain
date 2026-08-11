@@ -171,8 +171,8 @@ enum MeetingAudioWriterError: Error, Equatable, LocalizedError, Sendable {
 }
 
 /// Writes normalized source tracks directly to private local files. The writer
-/// deliberately has no capture/upload API dependency: only transcript text may
-/// cross Brain's remote capture boundary.
+/// deliberately has no ingest dependency: only transcript text is sent to the
+/// local Brain vault.
 final class MeetingAudioWriter: @unchecked Sendable {
     static let sampleRate = 16_000
     static let channelCount = 1

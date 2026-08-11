@@ -24,254 +24,6 @@ extension BrainCaptureAPI {
     }
 }
 
-struct PairedCaptureClient: BrainCaptureAPI, @unchecked Sendable {
-    let baseURL: URL
-
-    private let session: URLSession
-    private let credentialStore: any DeviceCredentialStoring
-    private let requestTimeout: TimeInterval
-
-    init(
-        metadata: BrainInstanceMetadata,
-        session: URLSession = .shared,
-        credentialStore: any DeviceCredentialStoring = DeviceCredentialStore(),
-        requestTimeout: TimeInterval = BrainAPIClient.defaultRequestTimeout
-    ) {
-        baseURL = metadata.baseURL
-        self.session = session
-        self.credentialStore = credentialStore
-        self.requestTimeout = requestTimeout
-    }
-
-    func capture(
-        _ capture: BrainCaptureRequest,
-        idempotencyKey: UUID
-    ) async throws -> BrainCaptureReceipt {
-        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
-        components?.path = "/v1/captures"
-        guard let url = components?.url, Self.sameOrigin(url, baseURL) else {
-            throw BrainAPIError.invalidRequest
-        }
-
-        let token: String
-        do {
-            guard let stored = try credentialStore.load(for: baseURL.absoluteString) else {
-                throw BrainAPIError.credentialUnavailable
-            }
-            token = stored
-        } catch let error as BrainAPIError {
-            throw error
-        } catch {
-            throw BrainAPIError.credentialUnavailable
-        }
-
-        let body: Data
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-            body = try encoder.encode(capture)
-        } catch {
-            throw BrainAPIError.invalidRequest
-        }
-
-        var request = URLRequest(url: url, timeoutInterval: requestTimeout)
-        request.httpMethod = "POST"
-        request.httpBody = body
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue(
-            idempotencyKey.uuidString.lowercased(),
-            forHTTPHeaderField: "Idempotency-Key"
-        )
-
-        let data: Data
-        let response: URLResponse
-        do {
-            let delegate = BrainRedirectDelegate(
-                origin: baseURL,
-                authorization: request.value(forHTTPHeaderField: "Authorization")
-            )
-            (data, response) = try await session.data(for: request, delegate: delegate)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as URLError where error.code == .timedOut {
-            throw BrainAPIError.timedOut
-        } catch {
-            if Task.isCancelled { throw CancellationError() }
-            throw BrainAPIError.transport
-        }
-
-        guard let http = response as? HTTPURLResponse,
-              let responseURL = http.url,
-              Self.sameOrigin(responseURL, baseURL) else {
-            throw BrainAPIError.invalidResponse
-        }
-        guard http.statusCode == 202 else {
-            let decoded = try? JSONDecoder().decode(BrainPublicErrorResponse.self, from: data)
-            throw BrainAPIError.http(
-                status: http.statusCode,
-                code: decoded?.code ?? "expected_http_202",
-                message: decoded?.message ?? (
-                    (200...299).contains(http.statusCode)
-                        ? "Brain did not return HTTP 202 Accepted."
-                        : nil
-                ),
-                requestID: http.value(forHTTPHeaderField: "X-Request-ID")
-            )
-        }
-        do {
-            return try JSONDecoder.brainDecoder().decode(BrainCaptureReceipt.self, from: data)
-        } catch {
-            throw BrainAPIError.invalidResponse
-        }
-    }
-
-    func captureStatus(id: String) async throws -> BrainCaptureStatus {
-        guard let identifier = BrainAPIClient.canonicalCaptureIdentifier(id) else {
-            throw BrainAPIError.invalidRequest
-        }
-        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
-        components?.path = "/v1/captures/\(identifier)"
-        components?.query = nil
-        components?.fragment = nil
-        guard let url = components?.url, Self.sameOrigin(url, baseURL) else {
-            throw BrainAPIError.invalidRequest
-        }
-
-        let token: String
-        do {
-            guard let stored = try credentialStore.load(for: baseURL.absoluteString) else {
-                throw BrainAPIError.credentialUnavailable
-            }
-            token = stored
-        } catch let error as BrainAPIError {
-            throw error
-        } catch {
-            throw BrainAPIError.credentialUnavailable
-        }
-
-        var request = URLRequest(url: url, timeoutInterval: requestTimeout)
-        request.httpMethod = "GET"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
-        let data: Data
-        let response: URLResponse
-        do {
-            let delegate = BrainRedirectDelegate(
-                origin: baseURL,
-                authorization: request.value(forHTTPHeaderField: "Authorization")
-            )
-            (data, response) = try await session.data(for: request, delegate: delegate)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as URLError where error.code == .timedOut {
-            throw BrainAPIError.timedOut
-        } catch {
-            if Task.isCancelled { throw CancellationError() }
-            throw BrainAPIError.transport
-        }
-
-        guard let http = response as? HTTPURLResponse,
-              let responseURL = http.url,
-              Self.sameOrigin(responseURL, baseURL) else {
-            throw BrainAPIError.invalidResponse
-        }
-        guard http.statusCode == 200 else {
-            let decoded = try? JSONDecoder().decode(BrainPublicErrorResponse.self, from: data)
-            throw BrainAPIError.http(
-                status: http.statusCode,
-                code: decoded?.code ?? "expected_http_200",
-                message: decoded?.message,
-                requestID: http.value(forHTTPHeaderField: "X-Request-ID")
-            )
-        }
-        do {
-            return try JSONDecoder.brainDecoder().decode(BrainCaptureStatus.self, from: data)
-        } catch {
-            throw BrainAPIError.invalidResponse
-        }
-    }
-
-    func captureList() async throws -> BrainCaptureListResponse {
-        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
-        components?.path = "/v1/captures"
-        components?.query = nil
-        components?.fragment = nil
-        guard let url = components?.url, Self.sameOrigin(url, baseURL) else {
-            throw BrainAPIError.invalidRequest
-        }
-
-        let token: String
-        do {
-            guard let stored = try credentialStore.load(for: baseURL.absoluteString) else {
-                throw BrainAPIError.credentialUnavailable
-            }
-            token = stored
-        } catch let error as BrainAPIError {
-            throw error
-        } catch {
-            throw BrainAPIError.credentialUnavailable
-        }
-
-        var request = URLRequest(url: url, timeoutInterval: requestTimeout)
-        request.httpMethod = "GET"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
-        let data: Data
-        let response: URLResponse
-        do {
-            let delegate = BrainRedirectDelegate(
-                origin: baseURL,
-                authorization: request.value(forHTTPHeaderField: "Authorization")
-            )
-            (data, response) = try await session.data(for: request, delegate: delegate)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as URLError where error.code == .timedOut {
-            throw BrainAPIError.timedOut
-        } catch {
-            if Task.isCancelled { throw CancellationError() }
-            throw BrainAPIError.transport
-        }
-
-        guard let http = response as? HTTPURLResponse,
-              let responseURL = http.url,
-              Self.sameOrigin(responseURL, baseURL) else {
-            throw BrainAPIError.invalidResponse
-        }
-        guard http.statusCode == 200 else {
-            let decoded = try? JSONDecoder().decode(BrainPublicErrorResponse.self, from: data)
-            throw BrainAPIError.http(
-                status: http.statusCode,
-                code: decoded?.code ?? "expected_http_200",
-                message: decoded?.message,
-                requestID: http.value(forHTTPHeaderField: "X-Request-ID")
-            )
-        }
-        do {
-            return try JSONDecoder.brainDecoder().decode(BrainCaptureListResponse.self, from: data)
-        } catch {
-            throw BrainAPIError.invalidResponse
-        }
-    }
-
-    private static func sameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
-        guard let left = URLComponents(url: lhs, resolvingAgainstBaseURL: false),
-              let right = URLComponents(url: rhs, resolvingAgainstBaseURL: false) else {
-            return false
-        }
-        func port(_ components: URLComponents) -> Int? {
-            components.port ?? (components.scheme?.lowercased() == "https" ? 443 : nil)
-        }
-        return left.scheme?.lowercased() == right.scheme?.lowercased()
-            && left.host?.lowercased() == right.host?.lowercased()
-            && port(left) == port(right)
-    }
-}
-
 enum CaptureKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case note
     case link
@@ -340,7 +92,6 @@ enum CaptureSubmissionState: Equatable, Sendable {
     case retrying
     case queued(id: String)
     case delivering(id: String)
-    case waitingForMacMini(id: String, elapsedSeconds: Int, lastState: BrainCaptureState, lastError: String?)
     case delivered(id: String)
     case retryAvailable(id: String)
     case needsAttention(id: String)
@@ -435,7 +186,6 @@ final class CaptureController {
     static let maximumDecodedImageBytes = 4 * 1_024 * 1_024
     static let maximumTranscriptBytes = 6 * 1_024 * 1_024
     static let source = "Brain.app"
-    static let waitingThreshold: TimeInterval = 90
     static let monitorDefaultsKey = "brain.capture.active-monitor.v1"
     static let activityDefaultsKey = "brain.capture.activity.v1"
     static let dismissedActivityDefaultsKey = "brain.capture.activity-dismissed.v1"
@@ -484,7 +234,7 @@ final class CaptureController {
         switch submissionState {
         case .idle, .failed, .needsAttention:
             return true
-        case .sending, .retrying, .queued, .delivering, .waitingForMacMini,
+        case .sending, .retrying, .queued, .delivering,
              .delivered, .retryAvailable:
             return false
         }
@@ -699,11 +449,6 @@ final class CaptureController {
         activityStore.save(activities)
     }
 
-    /// Switches the dashboard to the health and recovery surface.
-    func openMacMini() {
-        NotificationCenter.default.post(name: .brainOpenMacMini, object: nil)
-    }
-
     /// Test synchronization for finite fake status sequences.
     func waitForMonitoring() async {
         await monitorTask?.value
@@ -780,7 +525,7 @@ final class CaptureController {
         let attempts = automaticallyRetry ? 2 : 1
         for attempt in 0..<attempts {
             do {
-                guard let api = apiProvider() else { throw BrainAPIError.notPaired }
+                guard let api = apiProvider() else { throw LocalBrainError.notInitialized }
                 let receipt = try await api.capture(
                     pending.request,
                     idempotencyKey: pending.idempotencyKey
@@ -853,7 +598,7 @@ final class CaptureController {
             guard let self else { return }
             let api = suppliedAPI ?? self.apiProvider()
             guard let api else {
-                self.errorMessage = BrainAPIError.notPaired.localizedDescription
+                self.errorMessage = LocalBrainError.notInitialized.localizedDescription
                 return
             }
             await self.pollStatus(monitor.id, api: api, immediately: immediately)
@@ -879,7 +624,7 @@ final class CaptureController {
                 let response = try await api.captureList()
                 for capture in response.captures {
                     listedCaptureIDs.insert(capture.id)
-                    self.mergeRemoteActivity(capture)
+                    self.mergeActivity(capture)
                 }
                 self.persistActivities()
             } catch is CaptureListUnavailable {
@@ -887,7 +632,7 @@ final class CaptureController {
             } catch is CancellationError {
                 return
             } catch {
-                // Keep local metadata. A later refresh can merge remote activity.
+                // Keep local metadata. A later refresh can merge current activity.
             }
 
             for captureID in fallbackCaptureIDs
@@ -898,7 +643,7 @@ final class CaptureController {
                         self.updateActivity(
                             captureID: captureID,
                             stage: .needsAttention,
-                            error: BrainAPIError.invalidResponse.localizedDescription
+                            error: LocalBrainError.invalidOutput.localizedDescription
                         )
                         continue
                     }
@@ -941,7 +686,7 @@ final class CaptureController {
         }
     }
 
-    private func mergeRemoteActivity(_ status: BrainCaptureStatus) {
+    private func mergeActivity(_ status: BrainCaptureStatus) {
         guard !activityStore.isDismissed(status.id) else { return }
         let stage = Self.activityStage(for: status)
         let error = stage == .needsAttention
@@ -1041,7 +786,6 @@ final class CaptureController {
                         activeMonitor = updated
                         monitorStore.save(updated)
                     }
-                    updateWaitingPresentation(lastError: error.localizedDescription)
                     continue
                 }
                 pendingSubmission = nil
@@ -1058,7 +802,7 @@ final class CaptureController {
             guard status.id == captureID else {
                 pendingSubmission = nil
                 clearMonitor()
-                errorMessage = BrainAPIError.invalidResponse.localizedDescription
+                errorMessage = LocalBrainError.invalidOutput.localizedDescription
                 submissionState = .needsAttention(id: captureID)
                 updateActivity(
                     captureID: captureID,
@@ -1105,21 +849,7 @@ final class CaptureController {
                 lastError: status.error
             )
             if let activeMonitor { monitorStore.save(activeMonitor) }
-            updateWaitingPresentation(lastError: status.error)
         }
-    }
-
-    private func updateWaitingPresentation(lastError: String?) {
-        guard let monitor = activeMonitor else { return }
-        let elapsed = max(0, Int(now().timeIntervalSince(monitor.startedAt)))
-        guard elapsed >= Int(Self.waitingThreshold),
-              monitor.lastState == .queued || monitor.lastState == .processing else { return }
-        submissionState = .waitingForMacMini(
-            id: monitor.id,
-            elapsedSeconds: elapsed,
-            lastState: monitor.lastState,
-            lastError: lastError ?? monitor.lastError
-        )
     }
 
     private func restoreMonitor() {
@@ -1144,7 +874,6 @@ final class CaptureController {
         submissionState = monitor.lastState == .processing
             ? .delivering(id: monitor.id)
             : .queued(id: monitor.id)
-        updateWaitingPresentation(lastError: monitor.lastError)
         startMonitoring()
     }
 
@@ -1219,15 +948,7 @@ final class CaptureController {
     }
 
     private static func isAutomaticallyRetryable(_ error: Error) -> Bool {
-        guard let apiError = error as? BrainAPIError else { return false }
-        return switch apiError {
-        case .transport, .timedOut:
-            true
-        case .http(let status, _, _, _):
-            (500...599).contains(status)
-        default:
-            false
-        }
+        false
     }
 
     private static func validatedURL(_ input: String) throws -> String {
@@ -1380,7 +1101,7 @@ private final class CaptureMonitorStore {
             return nil
         }
         guard let monitor = try? JSONDecoder.brainDecoder().decode(CaptureMonitor.self, from: data),
-              BrainAPIClient.canonicalCaptureIdentifier(monitor.id) != nil,
+              UUID(uuidString: monitor.id) != nil,
               monitor.lastState == .queued || monitor.lastState == .processing else {
             clear()
             return nil
@@ -1400,8 +1121,4 @@ private final class CaptureMonitorStore {
         memory = nil
         defaults?.removeObject(forKey: CaptureController.monitorDefaultsKey)
     }
-}
-
-extension Notification.Name {
-    static let brainOpenMacMini = Notification.Name("BrainOpenMacMini")
 }

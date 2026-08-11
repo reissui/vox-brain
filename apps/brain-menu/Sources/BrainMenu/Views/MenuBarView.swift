@@ -18,8 +18,8 @@ struct MenuBarView: View {
         self.graph = graph
     }
 
-    private var remoteState: BrainStatePresentation {
-        BrainPresentation.state(for: store.snapshot, isPaired: store.isReady)
+    private var localState: BrainStatePresentation {
+        BrainPresentation.state(for: store.snapshot, isReady: store.isReady)
     }
 
     private var activity: BrainAppActivity { graph?.activity ?? .idle }
@@ -29,12 +29,12 @@ struct MenuBarView: View {
     }
 
     private var statusLabel: String {
-        activity == .idle ? remoteState.label : activity.label
+        activity == .idle ? localState.label : activity.label
     }
 
     private var statusColor: Color {
         switch activity {
-        case .idle: remoteState.tone.color
+        case .idle: localState.tone.color
         case .meeting, .dictation: .red
         case .transcribing: .blue
         }

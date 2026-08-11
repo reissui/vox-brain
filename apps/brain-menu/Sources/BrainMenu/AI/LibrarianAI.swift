@@ -79,8 +79,7 @@ protocol LibrarianProcessing: Sendable {
 
 struct LocalLibrarianProcessor: LibrarianProcessing {
     func process(command: String) async throws -> BrainJobCreated {
-        guard BrainRuntime.deploymentMode() == .local,
-              let configuration = BrainRuntime.localConfiguration() else {
+        guard let configuration = BrainRuntime.configuration() else {
             throw LocalBrainError.invalidConfiguration
         }
         let template = try AILocalCLICommandTemplate.parse(command)
@@ -148,7 +147,6 @@ final class LibrarianAIController {
     @ObservationIgnored private let settings: any LibrarianAISettingsPersisting
     @ObservationIgnored private let processor: any LibrarianProcessing
     @ObservationIgnored private let providerFactory: any AIProviderMaking
-    @ObservationIgnored private let deploymentMode: @MainActor () -> BrainDeploymentMode?
     @ObservationIgnored private let sleep: @Sendable (Duration) async throws -> Void
     @ObservationIgnored private var savedConfiguration: LibrarianAIConfiguration
     @ObservationIgnored private var lastTestedCommand: String?
@@ -161,9 +159,6 @@ final class LibrarianAIController {
         settings: any LibrarianAISettingsPersisting = LibrarianAISettingsStore(),
         processor: any LibrarianProcessing = LocalLibrarianProcessor(),
         providerFactory: any AIProviderMaking = LocalAIProviderFactory(),
-        deploymentMode: @escaping @MainActor () -> BrainDeploymentMode? = {
-            BrainRuntime.deploymentMode()
-        },
         sleep: @escaping @Sendable (Duration) async throws -> Void = {
             try await Task.sleep(for: $0)
         }
@@ -171,7 +166,6 @@ final class LibrarianAIController {
         self.settings = settings
         self.processor = processor
         self.providerFactory = providerFactory
-        self.deploymentMode = deploymentMode
         self.sleep = sleep
         let loaded = settings.load()
         savedConfiguration = loaded
@@ -317,7 +311,6 @@ final class LibrarianAIController {
     private func scheduleAutomaticRun(after delay: Duration) {
         guard isStarted,
               automaticProcessingEnabled,
-              deploymentMode() == .local,
               processingTask == nil else {
             return
         }
@@ -337,7 +330,7 @@ final class LibrarianAIController {
     }
 
     private func processSavedConfiguration() async {
-        guard deploymentMode() == .local, processingTask == nil else {
+        guard processingTask == nil else {
             if state == .scheduled { state = .idle }
             return
         }

@@ -137,7 +137,6 @@ final class BrainAppControllerGraph {
     let recordingIsland: RecordingIslandController
     let meetings: MeetingsController
     let launchAtLogin: LaunchAtLoginController
-    let gmail: GmailConnectionController
     let speechSettings: SpeechSettingsController
     let aiSettings: AISettingsController
     let librarianAI: LibrarianAIController
@@ -160,7 +159,7 @@ final class BrainAppControllerGraph {
     @ObservationIgnored private let now: @MainActor () -> Date
 
     var launchDestination: BrainAppLaunchDestination {
-        store.deploymentMode == nil && !store.isReady ? .setup : .dashboard
+        store.isReady ? .dashboard : .setup
     }
 
     var activity: BrainAppActivity {
@@ -218,7 +217,6 @@ final class BrainAppControllerGraph {
         recordingIsland: RecordingIslandController? = nil,
         meetings: MeetingsController = MeetingsController(),
         launchAtLogin: LaunchAtLoginController = LaunchAtLoginController(),
-        gmail: GmailConnectionController = GmailConnectionController(),
         captureHotkeyRegistrar: any CaptureHotkeyRegistering = SystemCaptureHotkeyRegistrar(),
         regionHotkeyRegistrar: any CaptureHotkeyRegistering = SystemCaptureHotkeyRegistrar(identifier: 3),
         designRegionCapture: (any DesignRegionCapturing)? = nil,
@@ -238,7 +236,6 @@ final class BrainAppControllerGraph {
         self.capture = capture
         self.meetings = meetings
         self.launchAtLogin = launchAtLogin
-        self.gmail = gmail
         self.aiSettings = aiSettings
         self.librarianAI = librarianAI
         self.updates = updates
@@ -735,7 +732,7 @@ private struct UnavailableMeetingTranscriptionClient: LiveTranscriptionClient {
 
 /// Joins the already-tested native dual-source recorder to MeetingController.
 /// Final text and a durable local recording are persisted together. This object
-/// has no remote API and can never upload audio.
+/// has no ingest dependency and can never send audio outside the meeting store.
 private enum BrainNativeMeetingRecorderError: LocalizedError {
     case startupFailure(String)
 

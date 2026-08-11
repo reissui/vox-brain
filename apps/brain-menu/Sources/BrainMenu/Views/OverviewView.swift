@@ -24,9 +24,7 @@ struct OverviewView: View {
                     }
                 } else {
                     inProgress
-                    if store.deploymentMode == .local {
-                        localVault
-                    }
+                    localVault
                     recentActivity
                 }
             }
@@ -432,22 +430,5 @@ private struct OverviewActivityItem: Identifiable {
             isActive: true,
             date: nil
         )
-    }
-}
-
-// Kept for paired installations, but never shown by the local-first dashboard.
-struct PrivateSiteAccessView: View {
-    let store: BrainStore
-
-    var body: some View {
-        if let siteURL = store.privateSiteURL {
-            LabeledContent("Private site") {
-                Button("Open private site", systemImage: "arrow.up.right.square") {
-                    store.openPrivateSite()
-                }
-                .accessibilityLabel("Open private site")
-                .accessibilityValue(siteURL.absoluteString)
-            }
-        }
     }
 }

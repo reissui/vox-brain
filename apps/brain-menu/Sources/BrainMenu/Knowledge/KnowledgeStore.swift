@@ -1,37 +1,27 @@
 import Foundation
 import Observation
 
-protocol RemoteKnowledgeAPI: Sendable {
-    var pairedInstance: BrainInstanceMetadata? { get }
-
+protocol KnowledgeAPI: Sendable {
     func listKnowledge(limit: Int?) async throws -> BrainKnowledgeDocumentsResponse
     func searchKnowledge(query: String, limit: Int?) async throws -> BrainKnowledgeSearchResponse
     func knowledgeDocument(path: String) async throws -> BrainKnowledgeDocument
 }
 
-extension BrainAPIClient: RemoteKnowledgeAPI {}
-
-enum RemoteKnowledgeError: Error, Equatable, LocalizedError, Sendable {
-    case readAuthorizationRequired
-    case originUnavailable
+enum KnowledgeError: Error, Equatable, LocalizedError, Sendable {
+    case unavailable
     case staleResult(path: String)
     case notFound(path: String)
-    case revokedDevice
     case invalidResponse
     case requestFailed(String)
 
     var errorDescription: String? {
         switch self {
-        case .readAuthorizationRequired:
-            "Pair this Mac with read access before searching knowledge."
-        case .originUnavailable:
-            "The paired Brain origin is unavailable."
+        case .unavailable:
+            "The local Brain vault is unavailable."
         case .staleResult:
             "This search result is stale. Search again to find the current note."
         case .notFound:
             "That note was not found in the Brain vault."
-        case .revokedDevice:
-            "This device's Brain access was revoked. Pair it again to continue."
         case .invalidResponse:
             "Brain returned an invalid knowledge response."
         case .requestFailed(let message):
@@ -41,16 +31,12 @@ enum RemoteKnowledgeError: Error, Equatable, LocalizedError, Sendable {
 
     var title: String {
         switch self {
-        case .readAuthorizationRequired:
-            "Read access required"
-        case .originUnavailable:
+        case .unavailable:
             "Brain unavailable"
         case .staleResult:
             "Result changed"
         case .notFound:
             "Note not found"
-        case .revokedDevice:
-            "Device revoked"
         case .invalidResponse, .requestFailed:
             "Knowledge unavailable"
         }
@@ -59,7 +45,7 @@ enum RemoteKnowledgeError: Error, Equatable, LocalizedError, Sendable {
 
 @MainActor
 @Observable
-final class RemoteKnowledgeStore {
+final class KnowledgeStore {
     static let defaultDebounce: Duration = .milliseconds(300)
     static let defaultSearchLimit = 30
     static let authorizedAreas: Set<String> = [
@@ -71,12 +57,12 @@ final class RemoteKnowledgeStore {
     private(set) var results: [KnowledgeDocument] = []
     private(set) var selectedPath: String?
     private(set) var selectedDocument: KnowledgeDocument?
-    private(set) var searchError: RemoteKnowledgeError?
-    private(set) var documentError: RemoteKnowledgeError?
+    private(set) var searchError: KnowledgeError?
+    private(set) var documentError: KnowledgeError?
     private(set) var isSearching = false
     private(set) var isLoadingDocument = false
 
-    @ObservationIgnored private var api: (any RemoteKnowledgeAPI)?
+    @ObservationIgnored private var api: (any KnowledgeAPI)?
     @ObservationIgnored private let debounce: Duration
     @ObservationIgnored private let searchLimit: Int
     @ObservationIgnored private let maximumSearchCacheEntries: Int
@@ -93,9 +79,9 @@ final class RemoteKnowledgeStore {
     var cachedDocumentCount: Int { documentCache.count }
 
     init(
-        api: (any RemoteKnowledgeAPI)? = BrainRuntime.knowledgeClient(),
-        debounce: Duration = RemoteKnowledgeStore.defaultDebounce,
-        searchLimit: Int = RemoteKnowledgeStore.defaultSearchLimit,
+        api: (any KnowledgeAPI)? = BrainRuntime.knowledgeClient(),
+        debounce: Duration = KnowledgeStore.defaultDebounce,
+        searchLimit: Int = KnowledgeStore.defaultSearchLimit,
         maximumSearchCacheEntries: Int = 8,
         maximumDocumentCacheEntries: Int = 16,
         sleep: @escaping @Sendable (Duration) async throws -> Void = {
@@ -110,7 +96,7 @@ final class RemoteKnowledgeStore {
         self.sleep = sleep
     }
 
-    /// Schedules a remote-only search. A newer query cancels the previous wait
+    /// Schedules a local search. A newer query cancels the previous wait
     /// and response, so an older response can never replace newer results.
     func search(_ value: String) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -126,8 +112,8 @@ final class RemoteKnowledgeStore {
         }
 
         do {
-            try requireReadAuthorization()
-        } catch let error as RemoteKnowledgeError {
+            try requireClient()
+        } catch let error as KnowledgeError {
             results = []
             isSearching = false
             searchError = error
@@ -168,9 +154,6 @@ final class RemoteKnowledgeStore {
                 self.results = []
                 self.searchError = mapped
                 self.isSearching = false
-                if mapped == .revokedDevice {
-                    self.clearRevokedReadState()
-                }
             }
         }
     }
@@ -181,9 +164,7 @@ final class RemoteKnowledgeStore {
         await searchTask?.value
     }
 
-    /// Loads a bounded live index from the paired Agent. No document bodies or
-    /// local filesystem paths are cached, and a search started while the list
-    /// is in flight always wins.
+    /// Loads a bounded live index from the local vault.
     func refresh() async {
         searchTask?.cancel()
         searchTask = nil
@@ -193,8 +174,8 @@ final class RemoteKnowledgeStore {
         defer { isSearching = false }
 
         do {
-            try requireReadAuthorization()
-            guard let api else { throw RemoteKnowledgeError.readAuthorizationRequired }
+            try requireClient()
+            guard let api else { throw KnowledgeError.unavailable }
             let response = try await api.listKnowledge(limit: searchLimit)
             guard query.isEmpty else { return }
             let documents = Self.listedDocuments(response.documents)
@@ -213,7 +194,6 @@ final class RemoteKnowledgeStore {
             let mapped = map(error)
             results = []
             searchError = mapped
-            if mapped == .revokedDevice { clearRevokedReadState() }
         }
     }
 
@@ -238,9 +218,6 @@ final class RemoteKnowledgeStore {
             let mapped = map(error, path: path, staleIfMissing: wasSearchResult)
             selectedDocument = nil
             documentError = mapped
-            if mapped == .revokedDevice {
-                clearRevokedReadState()
-            }
             return nil
         }
     }
@@ -252,7 +229,7 @@ final class RemoteKnowledgeStore {
     ) async -> KnowledgeDocument? {
         do {
             let target = Self.wikilinkTarget(rawLink)
-            guard !target.isEmpty else { throw RemoteKnowledgeError.notFound(path: rawLink) }
+            guard !target.isEmpty else { throw KnowledgeError.notFound(path: rawLink) }
 
             if let exactPath = Self.directDocumentPath(for: target, from: sourcePath) {
                 return await select(path: exactPath)
@@ -260,7 +237,7 @@ final class RemoteKnowledgeStore {
 
             let matches = try await results(for: target)
             guard let match = Self.bestWikilinkMatch(target: target, in: matches) else {
-                throw RemoteKnowledgeError.notFound(path: target)
+                throw KnowledgeError.notFound(path: target)
             }
             knownResultPaths.insert(match.relativePath)
             return await select(path: match.relativePath)
@@ -269,9 +246,6 @@ final class RemoteKnowledgeStore {
         } catch {
             let mapped = map(error)
             documentError = mapped
-            if mapped == .revokedDevice {
-                clearRevokedReadState()
-            }
             return nil
         }
     }
@@ -331,16 +305,6 @@ final class RemoteKnowledgeStore {
         knownResultPaths.removeAll(keepingCapacity: false)
     }
 
-    /// Called when pairing is disconnected. Cached private text is discarded
-    /// immediately and no future request can reuse the disconnected API.
-    func disconnect() {
-        searchTask?.cancel()
-        searchTask = nil
-        api = nil
-        resetAndClear()
-        searchError = .readAuthorizationRequired
-    }
-
     /// In-memory data vanishes with the process; this explicit hook also clears
     /// it as soon as the scene is torn down or moves to the background.
     func terminate() {
@@ -379,35 +343,21 @@ final class RemoteKnowledgeStore {
         clearCache()
     }
 
-    private func clearRevokedReadState() {
-        searchTask?.cancel()
-        searchTask = nil
-        results = []
-        selectedPath = nil
-        selectedDocument = nil
-        isSearching = false
-        isLoadingDocument = false
-        clearCache()
-    }
-
-    private func requireReadAuthorization() throws {
-        guard let metadata = api?.pairedInstance,
-              metadata.scopes.contains(.read) else {
-            throw RemoteKnowledgeError.readAuthorizationRequired
-        }
+    private func requireClient() throws {
+        guard api != nil else { throw KnowledgeError.unavailable }
     }
 
     private func results(for query: String) async throws -> [KnowledgeDocument] {
-        try requireReadAuthorization()
+        try requireClient()
         let key = Self.normalized(query)
         if let cached = searchCache[key] {
             touchSearchCache(key)
             return cached
         }
-        guard let api else { throw RemoteKnowledgeError.readAuthorizationRequired }
+        guard let api else { throw KnowledgeError.unavailable }
         let response = try await api.searchKnowledge(query: query, limit: searchLimit)
         guard Self.normalized(response.query) == key else {
-            throw RemoteKnowledgeError.invalidResponse
+            throw KnowledgeError.invalidResponse
         }
 
         var seen: Set<String> = []
@@ -429,7 +379,7 @@ final class RemoteKnowledgeStore {
                 limit: KnowledgeDocument.maximumSnippetCharacters
             )
             return KnowledgeDocument(
-                remoteTitle: title,
+                localTitle: title,
                 area: area,
                 relativePath: result.path,
                 snippet: snippet
@@ -452,7 +402,7 @@ final class RemoteKnowledgeStore {
             let fallback = (item.path as NSString).lastPathComponent
                 .replacingOccurrences(of: #"\.md$"#, with: "", options: .regularExpression)
             return KnowledgeDocument(
-                remoteTitle: boundedText(
+                localTitle: boundedText(
                     item.title.trimmingCharacters(in: .whitespacesAndNewlines),
                     fallback: fallback,
                     limit: KnowledgeDocument.maximumTitleCharacters
@@ -465,19 +415,19 @@ final class RemoteKnowledgeStore {
     }
 
     private func document(at path: String, staleIfMissing: Bool) async throws -> KnowledgeDocument {
-        try requireReadAuthorization()
+        try requireClient()
         guard Self.isValidRelativePath(path) else {
-            throw RemoteKnowledgeError.notFound(path: path)
+            throw KnowledgeError.notFound(path: path)
         }
         if let cached = documentCache[path] {
             touchDocumentCache(path)
             return cached
         }
-        guard let api else { throw RemoteKnowledgeError.readAuthorizationRequired }
+        guard let api else { throw KnowledgeError.unavailable }
         do {
             let response = try await api.knowledgeDocument(path: path)
             guard response.path == path, Self.isValidRelativePath(response.path) else {
-                throw RemoteKnowledgeError.staleResult(path: path)
+                throw KnowledgeError.staleResult(path: path)
             }
             let area = String(path.split(separator: "/", maxSplits: 1)[0])
             let fallback = (path as NSString).lastPathComponent
@@ -490,7 +440,7 @@ final class RemoteKnowledgeStore {
                 limit: KnowledgeDocument.maximumTitleCharacters
             )
             let document = KnowledgeDocument(
-                remoteTitle: title,
+                localTitle: title,
                 area: area,
                 relativePath: path,
                 snippet: matchingResult?.snippet ?? "",
@@ -507,33 +457,22 @@ final class RemoteKnowledgeStore {
         _ error: Error,
         path: String? = nil,
         staleIfMissing: Bool = false
-    ) -> RemoteKnowledgeError {
-        if let remote = error as? RemoteKnowledgeError { return remote }
-        guard let apiError = error as? BrainAPIError else {
-            return .requestFailed(error.localizedDescription)
-        }
-        switch apiError {
-        case .transport, .timedOut:
-            return .originUnavailable
-        case .notPaired:
-            return .readAuthorizationRequired
-        case .credentialUnavailable:
-            return .revokedDevice
-        case .http(let status, let code, _, _):
-            if status == 401 || status == 403
-                || ["device_revoked", "revoked_device", "unauthorized_device"].contains(code) {
-                return .revokedDevice
-            }
-            if status == 404 || code == "document_not_found" {
+    ) -> KnowledgeError {
+        if let knowledgeError = error as? KnowledgeError { return knowledgeError }
+        if let localError = error as? LocalBrainError {
+            switch localError {
+            case .documentNotFound:
                 let wanted = path ?? ""
                 return staleIfMissing ? .staleResult(path: wanted) : .notFound(path: wanted)
+            case .invalidOutput, .invalidRequest:
+                return .invalidResponse
+            case .invalidConfiguration, .notInitialized:
+                return .unavailable
+            case .commandFailed, .invalidCapture:
+                return .requestFailed(localError.localizedDescription)
             }
-            return .requestFailed(apiError.localizedDescription)
-        case .invalidResponse:
-            return .invalidResponse
-        case .invalidBaseURL, .invalidRequest:
-            return .invalidResponse
         }
+        return .requestFailed(error.localizedDescription)
     }
 
     private func cacheSearch(_ documents: [KnowledgeDocument], for key: String) {

@@ -3,27 +3,7 @@ import Testing
 @testable import BrainMenu
 
 struct DashboardPresentationTests {
-    @Test
-    func mcpInstructionsUseThePairedGatewayAndKeepSecretsOutOfCommands() throws {
-        let instructions = MCPConnectionInstructions(
-            baseURL: URL(string: "https://brain-gw.example.test/ignored?old=true")
-        )
-
-        #expect(instructions.endpoint == "https://brain-gw.example.test/mcp")
-        #expect(instructions.codexOAuthCommands == [
-            "codex mcp add brain --url \"https://brain-gw.example.test/mcp\"",
-            "codex mcp login brain",
-        ])
-        #expect(instructions.codexBearerCommands == [
-            "export BRAIN_MCP_PASSWORD='<your Brain MCP password>'",
-            "codex mcp add brain --url \"https://brain-gw.example.test/mcp\" --bearer-token-env-var BRAIN_MCP_PASSWORD",
-        ])
-        #expect(!instructions.codexOAuthCommands.joined().contains("test-mcp-password"))
-        #expect(!SettingsSection.allCases.contains { $0.rawValue == "MCP" })
-        #expect(!DashboardSection.allCases.contains { $0.rawValue == "MCP" })
-    }
-
-    @Test
+        @Test
     func workflowStatesHaveUniqueSpokenLabelsAndNonColorSymbols() {
         let states = BrainWorkflowAccessibilityState.allCases
         let presentations = states.map(\.presentation)
@@ -45,11 +25,11 @@ struct DashboardPresentationTests {
         #expect(presentations.allSatisfy { !$0.symbolName.isEmpty })
         #expect(Set(presentations.map(\.accessibilityLabel)).count == states.count)
         #expect(BrainWorkflowAccessibilityState.microphoneMissing.presentation.label == "Microphone missing")
-        #expect(BrainWorkflowAccessibilityState.waiting.presentation.accessibilityLabel.contains("remote runner"))
+        #expect(BrainWorkflowAccessibilityState.waiting.presentation.accessibilityLabel.contains("local processing"))
     }
 
     @Test
-    func mapsPairedHealthyActivityWarningAndFailureStates() {
+    func mapsReadyHealthyActivityWarningAndFailureStates() {
         let expectations: [(BrainOverallState, String, String, BrainPresentationTone)] = [
             (.healthy, "brain.head.profile", "Healthy", .healthy),
             (.activity, "arrow.triangle.2.circlepath", "Activity", .activity),
@@ -60,7 +40,7 @@ struct DashboardPresentationTests {
         for (overall, symbolName, label, tone) in expectations {
             let presentation = BrainPresentation.state(
                 for: snapshot(overall: overall),
-                isPaired: true
+                isReady: true
             )
             #expect(presentation.symbolName == symbolName)
             #expect(presentation.label == label)
@@ -69,74 +49,59 @@ struct DashboardPresentationTests {
     }
 
     @Test
-    func unpairedPresentationIsNeutralAndActionable() {
-        let presentation = BrainPresentation.state(for: nil, isPaired: false)
+    func localSetupPresentationIsNeutralAndActionable() {
+        let presentation = BrainPresentation.state(for: nil, isReady: false)
 
-        #expect(presentation.symbolName == "link.badge.plus")
-        #expect(presentation.label == "Not paired")
-        #expect(presentation.accessibilityLabel.contains("not paired"))
+        #expect(presentation.symbolName == "internaldrive")
+        #expect(presentation.label == "Local setup needed")
+        #expect(presentation.accessibilityLabel.contains("local setup"))
         #expect(presentation.tone == .neutral)
     }
 
     @Test
-    func groupsAllRemoteResponsibilitiesByServerProvidedScope() {
+    func groupsLocalResponsibilitiesByReportedScope() {
         let checks = [
-            check(id: "unexpected-id.1", scope: "gateway"),
-            check(id: "unexpected-id.2", scope: "remote_vault"),
+            check(id: "unexpected-id.1", scope: "system"),
+            check(id: "unexpected-id.2", scope: "vault"),
             check(id: "unexpected-id.3", scope: "capture_delivery"),
-            check(id: "unexpected-id.4", scope: "mac_mini_agent"),
+            check(id: "unexpected-id.4", scope: "agent"),
             check(id: "unexpected-id.5", scope: "librarian"),
-            check(id: "unexpected-id.6", scope: "telegram"),
-            check(id: "unexpected-id.7", scope: "gmail"),
-            check(id: "unexpected-id.8", scope: "publishing"),
             check(id: "unexpected-id.9", scope: "capture"),
         ]
 
         let groups = BrainPresentation.checkGroups(for: checks)
 
         #expect(groups.map(\.scope) == [
-            .remoteVault,
+            .localVault,
             .captureDelivery,
-            .macMiniAgent,
             .librarianAutomation,
-            .telegram,
-            .gmail,
-            .publishing,
-            .gateway,
+            .systemServices,
         ])
         #expect(groups.map { $0.scope.title } == [
-            "Remote vault",
+            "Local vault",
             "Capture delivery",
-            "remote runner agent",
             "Librarian automation",
-            "Telegram",
-            "Gmail",
-            "Publishing",
-            "Gateway",
+            "System services",
         ])
         #expect(groups[0].checks.map(\.id) == ["unexpected-id.2"])
         #expect(groups[1].checks.map(\.id) == ["unexpected-id.3", "unexpected-id.9"])
-        #expect(groups[2].checks.map(\.id) == ["unexpected-id.4"])
-        #expect(groups[3].checks.map(\.id) == ["unexpected-id.5"])
-        #expect(groups[4].checks.map(\.id) == ["unexpected-id.6"])
-        #expect(groups[5].checks.map(\.id) == ["unexpected-id.7"])
-        #expect(groups[6].checks.map(\.id) == ["unexpected-id.8"])
-        #expect(groups[7].checks.map(\.id) == ["unexpected-id.1"])
+        #expect(groups[2].checks.map(\.id) == ["unexpected-id.4", "unexpected-id.5"])
+        #expect(groups[3].checks.map(\.id) == ["unexpected-id.1"])
     }
 
     @Test
-    func captureQueueAndNeedsAttentionDoNotDegradeHealthyMacMiniAgent() throws {
+    func captureQueueAndNeedsAttentionDoNotDegradeHealthyLocalAgent() throws {
         let checks = [
             check(id: "capture.queued", scope: "capture", state: .activity),
             check(id: "capture.needs_attention", scope: "capture", state: .failure),
-            check(id: "agent.heartbeat", scope: "mac-mini-agent", state: .pass),
-            check(id: "agent.scheduler", scope: "mac-mini-agent", state: .pass),
-            check(id: "agent.last-run", scope: "mac-mini-agent", state: .pass),
+            check(id: "agent.heartbeat", scope: "agent", state: .pass),
+            check(id: "agent.scheduler", scope: "agent", state: .pass),
+            check(id: "agent.last-run", scope: "agent", state: .pass),
         ]
         let snapshot = snapshot(overall: .failure, checks: checks)
         let groups = BrainPresentation.checkGroups(for: checks)
         let captures = try #require(groups.first { $0.scope == .captureDelivery })
-        let agent = try #require(groups.first { $0.scope == .macMiniAgent })
+        let agent = try #require(groups.first { $0.scope == .librarianAutomation })
 
         #expect(BrainPresentation.state(for: captures, in: snapshot).tone == .failure)
         #expect(BrainPresentation.state(for: agent, in: snapshot).label == "Healthy")
@@ -147,7 +112,7 @@ struct DashboardPresentationTests {
     func staleSnapshotNeverUsesHealthyPresentation() {
         let snapshot = snapshot(overall: .healthy, isStale: true)
 
-        let overall = BrainPresentation.state(for: snapshot, isPaired: true)
+        let overall = BrainPresentation.state(for: snapshot, isReady: true)
         let passingCheck = BrainPresentation.state(for: .pass, in: snapshot)
         let freshness = BrainPresentation.freshness(for: snapshot)
 
@@ -161,43 +126,14 @@ struct DashboardPresentationTests {
     }
 
     @MainActor
-    @Test
-    func macMiniUsesRemoteDoctorIdentifiersForAgentAndAutomation() throws {
-        let health = BrainHealthReport(
-            schemaVersion: 1,
-            generatedAt: Date(timeIntervalSince1970: 1_784_112_400),
-            overall: .healthy,
-            counts: BrainHealthCounts(pass: 2, activity: 0, warning: 0, failure: 0),
-            checks: [
-                check(id: "sync.agent", scope: "sync"),
-                check(id: "automation.schedule", scope: "automation"),
-            ]
-        )
-
-        let agent = try #require(MacMiniView.check(
-            in: health,
-            ids: MacMiniView.agentHealthCheckIDs
-        ))
-        let automation = try #require(MacMiniView.check(
-            in: health,
-            ids: MacMiniView.automationHealthCheckIDs
-        ))
-
-        #expect(agent.id == "sync.agent")
-        #expect(automation.id == "automation.schedule")
-    }
 
     @Test
-    func localActivityUsesObsidianAndDoesNotRenderRemoteSiteStatus() throws {
+    func localActivityUsesObsidianAndDoesNotRenderPrivateSiteStatus() throws {
         let sourceRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/BrainMenu")
-        let macMini = try String(
-            contentsOf: sourceRoot.appendingPathComponent("Views/MacMiniView.swift"),
-            encoding: .utf8
-        )
         let overview = try String(
             contentsOf: sourceRoot.appendingPathComponent("Views/OverviewView.swift"),
             encoding: .utf8
@@ -209,7 +145,6 @@ struct DashboardPresentationTests {
             .map { try String(contentsOf: $0, encoding: .utf8) }
             .joined(separator: "\n") ?? ""
 
-        #expect(macMini.contains("PrivateSiteAccessView(store: store)"))
         #expect(!overview.contains("PrivateSiteAccessView(store: store)"))
         #expect(overview.contains("Open in Obsidian"))
         #expect(overview.contains("Librarian is organizing"))
@@ -217,8 +152,6 @@ struct DashboardPresentationTests {
         #expect(!overview.contains("Awaiting processing"))
         #expect(!overview.contains("publish.latest"))
         #expect(!overview.contains(".truncationMode(.middle)"))
-        #expect(macMini.contains("accessibilityFocused($accessibilityFocus, equals: .errorSummary)"))
-        #expect(macMini.contains("fixedSize(horizontal: false, vertical: true)"))
         #expect(!allSources.contains("pages.dev"))
         #expect(!allSources.contains("private.example"))
     }

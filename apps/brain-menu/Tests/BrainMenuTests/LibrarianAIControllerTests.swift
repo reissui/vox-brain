@@ -18,8 +18,7 @@ struct LibrarianAIControllerTests {
         let controller = LibrarianAIController(
             settings: settings,
             processor: processor,
-            providerFactory: providerFactory,
-            deploymentMode: { .local }
+            providerFactory: providerFactory
         )
 
         controller.command =
@@ -56,7 +55,6 @@ struct LibrarianAIControllerTests {
         let controller = LibrarianAIController(
             settings: settings,
             processor: processor,
-            deploymentMode: { .local },
             sleep: { duration in
                 if duration == .seconds(15 * 60) {
                     try await Task.sleep(for: .seconds(3_600))
@@ -85,8 +83,7 @@ struct LibrarianAIControllerTests {
         let processor = TestLibrarianProcessor()
         let controller = LibrarianAIController(
             settings: settings,
-            processor: processor,
-            deploymentMode: { .local }
+            processor: processor
         )
 
         controller.command = "codex exec --model 'model; export SECRET'"

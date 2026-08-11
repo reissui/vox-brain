@@ -1,7 +1,7 @@
 import SwiftUI
 
-enum BrainRemoteKnowledgeNavigation {
-    static let notification = Notification.Name("BrainRemoteKnowledgeOpen")
+enum BrainKnowledgeNavigation {
+    static let notification = Notification.Name("BrainKnowledgeOpen")
     static let pathKey = "path"
 
     @MainActor
@@ -162,7 +162,6 @@ struct DashboardView: View {
                                 store: store,
                                 selection: $settingsSelection,
                                 launchAtLogin: graph.launchAtLogin,
-                                gmail: graph.gmail,
                                 meetingHotkey: graph.meetingHotkey,
                                 speech: graph.speechSettings,
                                 updates: graph.updates,
@@ -177,8 +176,6 @@ struct DashboardView: View {
                     }
                 }
                 .navigationSplitViewStyle(.balanced)
-            } else if store.deploymentMode == .remote {
-                PairBrainView(store: store)
             } else {
                 BrainSetupView(store: store)
             }
@@ -631,84 +628,5 @@ private struct MeetingProcessingPlaceholder: View {
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.updatesFrequently)
-    }
-}
-
-private struct PairBrainView: View {
-    let store: BrainStore
-
-    @State private var address = ""
-    @State private var code = ""
-
-    private var canPair: Bool {
-        !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !store.isPairing
-    }
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            Button {
-                store.returnToSetup()
-            } label: {
-                Label("Back to setup choices", systemImage: "chevron.backward")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .keyboardShortcut(.cancelAction)
-            .accessibilityHint("Returns to the This Mac or Remote Brain choice")
-
-            VStack(spacing: 22) {
-                Image(systemName: "link.badge.plus")
-                    .font(.system(size: 44))
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-
-                VStack(spacing: 7) {
-                    Text("Pair Brain")
-                        .font(.largeTitle.bold())
-                    Text("Connect this app to the gateway for your remote Brain runner.")
-                        .foregroundStyle(.secondary)
-                }
-
-                Form {
-                    TextField("Instance address", text: $address, prompt: Text("https://brain.example.com"))
-                        .textContentType(.URL)
-                        .accessibilityLabel("Remote Brain instance address")
-                    SecureField("One-time pairing code", text: $code)
-                        .accessibilityLabel("One-time Brain pairing code")
-                }
-                .formStyle(.grouped)
-                .frame(width: 460)
-
-                if let errorMessage = store.errorMessage {
-                    Label(errorMessage, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Button {
-                    Task { await store.pair(address: address, code: code) }
-                } label: {
-                    if store.isPairing {
-                        ProgressView()
-                            .controlSize(.small)
-                            .accessibilityLabel("Pairing Brain")
-                    } else {
-                        Text("Pair Brain")
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-                .disabled(!canPair)
-
-                Text("Status and health are requested only from the paired HTTPS instance.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

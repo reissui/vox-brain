@@ -178,9 +178,9 @@ enum MeetingUploadError: Error, Equatable, LocalizedError, Sendable {
         case .responseNotQueued:
             "Brain did not confirm that the meeting transcript was queued."
         case .noRetryAvailable:
-            "This meeting upload cannot be retried."
+            "This meeting ingest cannot be retried."
         case .noNewRevision:
-            "There is no changed meeting transcript to re-upload."
+            "There is no changed meeting transcript to save again."
         }
     }
 }
@@ -351,8 +351,8 @@ final class MeetingUploadController {
     }
 
     /// Retries the persisted body, never a fresh rendering. A failed poll
-    /// resumes with GET; a retryable server/POST failure reuses the original
-    /// POST body and idempotency key.
+    /// resumes by capture ID; a retryable ingest failure reuses the original
+    /// body and idempotency key.
     func retry(meetingID: UUID) async {
         do {
             let revision = try requireRevision(meetingID: meetingID)
@@ -366,7 +366,7 @@ final class MeetingUploadController {
             case .poll:
                 guard let captureID = revision.captureID,
                       let api = apiProvider() else {
-                    throw BrainAPIError.notPaired
+                    throw LocalBrainError.notInitialized
                 }
                 await poll(captureID: captureID, revision: revision, api: api)
             case .none:
@@ -377,7 +377,7 @@ final class MeetingUploadController {
         }
     }
 
-    /// Restores visible state after relaunch and resumes remote monitoring. An
+    /// Restores visible state after relaunch and resumes local ingest monitoring. An
     /// accepted capture is polled by ID and is never POSTed again.
     func resume(meetingID: UUID) async {
         do {
@@ -385,7 +385,7 @@ final class MeetingUploadController {
             setCurrent(revision)
             guard [.queued, .delivering].contains(revision.state) else { return }
             if let captureID = revision.captureID {
-                guard let api = apiProvider() else { throw BrainAPIError.notPaired }
+                guard let api = apiProvider() else { throw LocalBrainError.notInitialized }
                 await poll(captureID: captureID, revision: revision, api: api)
             } else {
                 await post(revision)
@@ -461,9 +461,9 @@ final class MeetingUploadController {
         var revision = original
         var acceptedThisAttempt = false
         do {
-            guard let api = apiProvider() else { throw BrainAPIError.notPaired }
-            // A retryable server failure may carry the old failed capture ID.
-            // Clear it before persisting the new POST attempt so a relaunch
+            guard let api = apiProvider() else { throw LocalBrainError.notInitialized }
+            // A retryable ingest failure may carry the old failed capture ID.
+            // Clear it before persisting the new attempt so a relaunch
             // cannot mistake that terminal ID for an accepted retry.
             revision.captureID = nil
             revision.state = .queued
@@ -524,7 +524,7 @@ final class MeetingUploadController {
                 attempt += 1
                 try await sleep(delay)
                 let status = try await api.captureStatus(id: captureID)
-                guard status.id == captureID else { throw BrainAPIError.invalidResponse }
+                guard status.id == captureID else { throw LocalBrainError.invalidOutput }
 
                 switch status.state {
                 case .queued:
@@ -617,12 +617,10 @@ final class MeetingUploadController {
     }
 
     private static func isRetryable(_ error: Error) -> Bool {
-        guard let apiError = error as? BrainAPIError else { return false }
-        return switch apiError {
-        case .transport, .timedOut, .notPaired, .credentialUnavailable:
+        guard let localError = error as? LocalBrainError else { return false }
+        return switch localError {
+        case .notInitialized, .commandFailed:
             true
-        case .http(let status, _, _, _):
-            (500...599).contains(status)
         default:
             false
         }

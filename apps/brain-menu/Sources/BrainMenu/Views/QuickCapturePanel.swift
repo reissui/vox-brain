@@ -68,7 +68,7 @@ enum AdaptiveCaptureFailure: Equatable, Sendable {
         case .deliveryBusy:
             "Wait for the current capture to finish, then try again."
         case .deliveryFailed:
-            "Open Brain to check pairing and delivery status, then try again."
+            "Open Brain to check local setup and delivery status, then try again."
         }
     }
 }
@@ -699,27 +699,7 @@ struct QuickCapturePanel: View {
 
     @ViewBuilder
     private var status: some View {
-        if case .waitingForMacMini(let id, let elapsedSeconds, let lastState, let lastError) =
-            controller.captureController.submissionState {
-            VStack(alignment: .leading, spacing: 7) {
-                Label("Waiting for remote runner (\(id))", systemImage: "macmini.and.arrow.forward")
-                    .foregroundStyle(.orange)
-                    .brainAccessibleStatus(
-                        .waiting,
-                        detail: "Capture \(id), \(elapsedSeconds) seconds elapsed"
-                    )
-                Text("\(elapsedSeconds)s elapsed · \(lastState.rawValue)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if let lastError { Text(lastError).font(.caption).foregroundStyle(.secondary) }
-                HStack {
-                    Button("Check again") { controller.captureController.checkAgain() }
-                        .accessibilityHint("Checks this capture without sending it again")
-                    Button("Open remote runner") { controller.captureController.openMacMini() }
-                        .accessibilityHint("Opens remote runner health and recovery")
-                }
-            }
-        } else if let error = controller.errorMessage ?? controller.captureController.errorMessage {
+        if let error = controller.errorMessage ?? controller.captureController.errorMessage {
             Label(error, systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.red)
                 .fixedSize(horizontal: false, vertical: true)
@@ -738,13 +718,11 @@ struct QuickCapturePanel: View {
                     .brainAccessibleStatus(.queued, detail: "Capture \(id)")
             case .delivering(let id):
                 Label("Delivering to Brain (\(id))", systemImage: "arrow.up.circle")
-            case .waitingForMacMini:
-                EmptyView()
             case .delivered(let id):
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("Delivered to Brain inbox (\(id))", systemImage: "checkmark.circle.fill")
+                    Label("Saved to the local Brain inbox (\(id))", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
-                    Text("Awaiting Librarian processing and site publication.")
+                    Text("Awaiting local Librarian processing.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
