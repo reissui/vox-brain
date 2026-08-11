@@ -1,108 +1,55 @@
 # Brain.app
 
-Brain.app is the native macOS client for Brain. It supports a fully local vault
-and an optional paired remote runner.
+Brain.app is the native macOS client for one local Markdown vault. On first
+launch it automatically configures its bundled runtime and initializes
+`~/Library/Application Support/Brain/Vault`; no server setup is required.
 
-## First launch
+Activity shows local recording, transcription, analysis, and Librarian work.
+Meetings and Voice Notes have separate saved lists. See the [native capture
+guide](../../integrations/meetings.md) for recording and review.
 
-Brain asks where the canonical vault should live:
+## VoxType speech
 
-- **This Mac** initializes
-  `~/Library/Application Support/Brain/Vault`, uses the runtime bundled inside
-  Brain.app, and requires no server or pairing.
-- **Remote Brain** opens the pairing flow for a separately operated Brain
-  runner and HTTPS gateway.
+VoxType owns recording, transcription, shortcuts, limits, models, and output
+behavior. Brain includes a verified VoxType login item for dictation, meetings,
+and Voice Notes, and Speech Setup can enable it and download or select an
+approved model. A compatible standalone VoxType installation takes precedence.
+Brain changes only the speech engine or model the user explicitly selects.
 
-Activity is the local-first home screen. It shows current recording,
-transcription, analysis, and Librarian work using actual local process state,
-plus recent completed work. Remote services stay hidden unless configured.
-Meetings and Voice Notes have separate top-level workspaces and saved lists;
-see the [native capture guide](../../integrations/meetings.md) for the recording
-and review workflow.
+VoxType model downloads and app updates may use the network. They are optional:
+local capture, Markdown storage, search, and reading remain local.
 
-Speech and recording setup no longer blocks first launch. Brain includes
-VoxType as an optional speech engine for dictation, meeting transcription, and
-Voice Note transcription.
+## Meetings: floating Transcript / Notes panel
 
-## Included VoxType speech
+During a meeting, Brain presents a floating **Transcript / Notes** panel. The
+Transcript tab shows the local VoxType transcription; the Notes tab is an
+editable meeting scratchpad.
 
-Brain's Speech Setup downloads and selects the verified Whisper English model,
-then enables
-and starts the included VoxType login item without opening a browser or
-installer. If macOS has disabled background items, Brain opens the exact Login
-Items settings page for approval. A compatible standalone VoxType installation
-remains supported and takes precedence over the included copy.
+- Closing the panel hides it; it does not stop recording or discard the
+  meeting. Reopen the panel to return to the same in-progress session.
+- Notes autosave locally after a short pause and are atomically persisted.
+  Relaunch recovery restores the saved notes for an unfinished meeting.
+- Meeting and Voice Note audio stays on the recording Mac. Only final text is
+  written to the local inbox.
 
-Brain 0.1.3 also repairs the incompatible Parakeet default offered by 0.1.2:
-when VoxType 0.7.5 reports that selection, Brain downloads and activates the
-bundled-compatible Whisper model before dictation is used.
+## Local Librarian and AI
 
-Brain can also download and activate additional catalog-approved models from
-Speech settings. VoxType continues to own recording, transcription, shortcut,
-limits, and output behavior.
-Brain read-only tails VoxType's existing local `stdout.log` for Dictation
-History and records text only after VoxType logs successful output. Brain
-changes only an explicitly selected speech engine/model and leaves the rest of
-VoxType's configuration untouched.
+Brain bundles the generic Librarian charter, prompts, templates, and CLI
+helpers in `Contents/Resources/BrainRuntime`. The Librarian preserves captures
+while enriching sources, filing notes, building links and maps, and updating
+evidence-backed project, person, and owner-profile material.
 
-For meetings, Brain records microphone plus system audio. Voice Notes are
-single-speaker microphone-only recordings, so they do not depend on Screen &
-System Audio permission or a second source. VoxType transcribes both workflows
-locally.
-The app checks **Microphone**, **Screen & System Audio
-Recording**, and **Accessibility** permissions only when their related features
-are used.
-
-## Local mode
-
-Local mode provides:
-
-- owner-only local attachment storage;
-- direct vault access in Finder and Obsidian;
-- accurate local activity and Librarian progress;
-- automatic local Librarian processing after capture and every 15 minutes;
-- separate, single-line CLI command templates for Librarian work and meeting
-  or Voice Note post-processing under **AI Setup**; and
-- local Meetings and Voice Notes, plus optional VoxType speech.
-
-The app package contains `Contents/Resources/BrainRuntime` with the generic
-Librarian charter, prompts, templates, and CLI helpers. It contains no personal
-vault content. Codex is needed for Librarian intelligence, but not for basic
-capture, storage, search, or reading.
-
-The Librarian preserves captured words while enriching sources, filing notes,
-building links and maps, and updating project, person, and owner-profile
-material from evidence in the vault. Automatic processing can be disabled or
-run immediately from **AI Setup**.
-
-Each AI workflow uses one command-template field instead of an application or
-executable picker. For example:
+Automatic processing can be disabled or run immediately from **AI Setup**.
+Each workflow has a command-template field, for example:
 
 ```sh
 codex exec --skip-git-repo-check --model gpt-5.6-sol
 ```
 
-Brain validates the template, selects the requested model, and adds its fixed
-sandbox and structured-output arguments internally. It never invokes a shell
-with the entered text.
-
-MCP, Cloudflare, pairing, remote device credentials, Gmail, runner health, and
-private-site access are hidden in local mode.
-
-## Remote mode
-
-Remote mode preserves the existing paired-client boundary:
-
-- the runner owns the canonical Markdown vault and Brain CLI;
-- Brain.app communicates only with the public HTTPS gateway;
-- the opaque device token is stored under Keychain service
-  `app.voxbrain.device`;
-- jobs use stable identifiers and fixed API routes; and
-- no SSH key, runner path, Cloudflare credential, or arbitrary command reaches
-  the client.
-
-Configured remote integrations appear only when their service is available.
-See [the remote runbook](../../remote/README.md).
+Brain validates the template and supplies its fixed sandbox and structured
+arguments internally; it never invokes a shell with entered text. An optional,
+configured AI provider may receive finalized text for Librarian or meeting
+post-processing and may consume its own billing or credits.
 
 ## Build and install from source
 
@@ -132,50 +79,34 @@ BRAIN_APP_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 apps/brain-menu/package.sh
 ```
 
-Release-channel packaging requires a Developer ID identity. The output ZIP must
-contain:
-
-- `Contents/MacOS/BrainMenu`;
-- `Contents/Helpers/BrainDictationObserver`;
-- `Contents/Helpers/BrainUpdater`;
-- `Contents/Library/LoginItems/VoxType.app`;
-- `Contents/Resources/BrainRuntime`; and
-- application metadata and signatures.
-
-The VoxType binary is fetched from the pinned upstream release, verified by
-SHA-256 and universal architecture, then signed inside Brain's nested code
-before the outer app is signed and notarized. Its upstream MIT license ships
-inside the nested app.
+Release-channel packaging requires a Developer ID identity. The output ZIP
+contains the BrainMenu executable, helpers, VoxType login item, local runtime,
+application metadata, and signatures. The pinned upstream VoxType binary is
+verified by SHA-256 and universal architecture, signed inside Brain’s nested
+code, and distributed with its MIT license.
 
 It must not contain vault Markdown, personal attachments, tokens, Git metadata,
 OAuth files, source-control history, or machine-specific paths.
 
 ## Privacy and permissions
 
-Brain requests permissions only for features the user enables:
+Brain requests permissions only for enabled features:
 
 - Microphone for meeting and Voice Note audio;
 - Screen & System Audio Recording for system audio in meetings;
 - Accessibility for selected-text context and paste-related features; and
 - Notifications for app status.
 
-The included VoxType login item requests its own macOS permissions when the
-speech engine first needs them; Brain cannot grant those permissions on the
-user's behalf.
-
-Meeting and Voice Note audio never leaves the recording Mac; see the
-[native capture guide](../../integrations/meetings.md) for retention, recovery,
-and deletion behavior.
-Only finalized transcript text can enter the configured Brain vault.
+The included VoxType login item requests its own macOS permissions when needed;
+Brain cannot grant them on the user’s behalf. Audio never leaves the recording
+Mac. Only final transcript text can enter the local vault.
 
 ## Development verification
 
 ```sh
-swift test --package-path apps/brain-menu
-scripts/public-audit
+scripts/check
 ```
 
-Local-mode tests create isolated temporary vaults and exercise initialization,
-capture, local attachment retention, knowledge search/read, and fixed CLI jobs.
-Remote tests continue to verify pairing, token handling, API boundaries,
-delivery, stale status, and closed job controls.
+The suite exercises automatic local setup, capture and attachment retention,
+knowledge search/read, fixed CLI jobs, meeting notes persistence, and VoxType
+integration boundaries.

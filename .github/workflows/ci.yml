@@ -13,52 +13,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  portable:
+  local-scope:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: |
-            gateway/package-lock.json
-            site/package-lock.json
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
       - name: Public-data audit
         run: scripts/public-audit
+      - name: Local product scope
+        run: scripts/test-local-scope
       - name: Shell syntax
         run: |
           while IFS= read -r -d '' script; do
             bash -n "$script"
-          done < <(find scripts apps remote -type f \( -name '*.sh' -o -name 'brain' \) -print0)
-      - name: Python tests
-        run: |
-          python3 -m unittest discover -s apps/brain-agent/tests
-          python3 -m unittest discover -s apps/gmail-connector/tests
-          python3 -m unittest discover -s apps/telegram-bot/tests
-      - name: Browser extension tests
-        working-directory: apps/brain-clipper
-        run: npm test
-      - name: Gateway checks
-        working-directory: gateway
-        run: |
-          npm ci
-          npm audit --audit-level=high
-          npm run check
-          npm test
-      - name: Private-site build
-        working-directory: site
-        env:
-          BRAIN_SITE_CONTENT_ROOT: ${{ github.workspace }}
-        run: |
-          npm ci
-          npm audit --audit-level=high
-          npm run check
-          npm run build
+          done < <(find scripts apps -type f \( -name '*.sh' -o -name 'brain' \) -print0)
 
   mac-app:
     runs-on: macos-26
@@ -78,3 +46,5 @@ jobs:
           bash -n apps/brain-menu/fetch-voxtype.sh
           apps/brain-menu/fetch-voxtype.sh "$RUNNER_TEMP/voxtype"
           test "$("$RUNNER_TEMP/voxtype" --version)" = "voxtype 0.7.5"
+      - name: Swift tests
+        run: swift test --package-path apps/brain-menu
