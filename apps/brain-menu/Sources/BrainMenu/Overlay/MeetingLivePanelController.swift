@@ -40,7 +40,8 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     /// activating Brain; Voice Notes deliberately remain island-only.
     func beginSession(
         transcriptController: LiveTranscriptController,
-        recordingKind: MeetingRecordingKind
+        recordingKind: MeetingRecordingKind,
+        meetingID: UUID? = nil
     ) {
         self.recordingKind = recordingKind
         guard recordingKind == .meeting else {
@@ -48,7 +49,14 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
             hide()
             return
         }
-        dashboardController.attachTranscript(transcriptController)
+        if let meetingID {
+            dashboardController.attachSession(
+                transcriptController: transcriptController,
+                meetingID: meetingID
+            )
+        } else {
+            dashboardController.attachTranscript(transcriptController)
+        }
         showTranscript()
     }
 

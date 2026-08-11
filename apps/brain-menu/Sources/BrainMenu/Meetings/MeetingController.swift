@@ -90,6 +90,9 @@ protocol MeetingRecording: AnyObject {
     func setLiveTranscriptControllerHandler(
         _ handler: @escaping @MainActor @Sendable (LiveTranscriptController?) -> Void
     )
+    func setMeetingNotesFlushHandler(
+        _ handler: @escaping @MainActor @Sendable () async -> Void
+    )
 }
 
 extension MeetingRecording {
@@ -105,6 +108,10 @@ extension MeetingRecording {
 
     func setLiveTranscriptControllerHandler(
         _ handler: @escaping @MainActor @Sendable (LiveTranscriptController?) -> Void
+    ) {}
+
+    func setMeetingNotesFlushHandler(
+        _ handler: @escaping @MainActor @Sendable () async -> Void
     ) {}
 }
 
@@ -270,6 +277,12 @@ final class MeetingController {
         _ handler: @escaping @MainActor @Sendable (LiveTranscriptController?) -> Void
     ) {
         recorder.setLiveTranscriptControllerHandler(handler)
+    }
+
+    func setMeetingNotesFlushHandler(
+        _ handler: @escaping @MainActor @Sendable () async -> Void
+    ) {
+        recorder.setMeetingNotesFlushHandler(handler)
     }
 
     func selectMicrophone(_ selection: MeetingMicrophoneSelection) async {

@@ -131,6 +131,7 @@ final class BrainAppControllerGraph {
     let dictation: DictationController
     let meeting: MeetingController
     let meetingHotkey: MeetingHotkeyController
+    let meetingNotes: MeetingNotesController
     let meetingLiveDashboard: MeetingLiveDashboardController
     let meetingLivePanel: MeetingLivePanelController
     let recordingIsland: RecordingIslandController
@@ -211,6 +212,7 @@ final class BrainAppControllerGraph {
         onboarding: OnboardingController = OnboardingController(),
         capture: CaptureController = CaptureController(),
         meeting: MeetingController? = nil,
+        meetingNotesStore: (any MeetingNotesStoring)? = nil,
         dictationHistory: DictationHistoryStore = DictationHistoryStore(),
         dictation: DictationController? = nil,
         recordingIsland: RecordingIslandController? = nil,
@@ -253,8 +255,10 @@ final class BrainAppControllerGraph {
         let microphoneSelections = MeetingMicrophoneSelectionStore()
         let microphoneInventory = CoreAudioMeetingMicrophoneInventory()
         let nativeMeeting: MeetingController
+        let nativeNotesStore: any MeetingNotesStoring
         if let meeting {
             nativeMeeting = meeting
+            nativeNotesStore = meetingNotesStore ?? MeetingNotesStore()
             meetingTranscription = nil
         } else {
             let built = Self.makeMeetingController(
@@ -264,10 +268,16 @@ final class BrainAppControllerGraph {
                 microphoneInventory: microphoneInventory
             )
             nativeMeeting = built.controller
+            nativeNotesStore = meetingNotesStore ?? built.notesStore
             meetingTranscription = built.transcription
         }
         self.meeting = nativeMeeting
-        let liveDashboard = MeetingLiveDashboardController(meetingController: nativeMeeting)
+        let notesController = MeetingNotesController(store: nativeNotesStore)
+        meetingNotes = notesController
+        let liveDashboard = MeetingLiveDashboardController(
+            meetingController: nativeMeeting,
+            notesController: notesController
+        )
         meetingLiveDashboard = liveDashboard
         meetingLivePanel = MeetingLivePanelController(dashboardController: liveDashboard)
         meetingHotkey = MeetingHotkeyController(
@@ -325,8 +335,12 @@ final class BrainAppControllerGraph {
             }
             self.meetingLivePanel.beginSession(
                 transcriptController: transcript,
-                recordingKind: kind
+                recordingKind: kind,
+                meetingID: self.meeting.currentMeeting?.id
             )
+        }
+        nativeMeeting.setMeetingNotesFlushHandler { [weak notesController] in
+            await notesController?.flush()
         }
     }
 
@@ -604,11 +618,16 @@ final class BrainAppControllerGraph {
         microphoneInventory: any MeetingMicrophoneInventoryProviding
     ) -> (
         controller: MeetingController,
-        transcription: MeetingTranscriptionCoordinator
+        transcription: MeetingTranscriptionCoordinator,
+        notesStore: MeetingNotesStore
     ) {
         let store = MeetingStore()
+        let notesStore = MeetingNotesStore(rootURL: store.rootURL)
         let audioMonitor = MeetingAudioMonitor()
-        let uploader = MeetingUploadController(meetingStore: store)
+        let uploader = MeetingUploadController(
+            meetingStore: store,
+            notesStore: notesStore
+        )
         let transcription = MeetingTranscriptionCoordinator(
             store: store,
             retention: audioRetention,
@@ -631,7 +650,7 @@ final class BrainAppControllerGraph {
             speechModel: OnboardingController.defaultMeetingModelID,
             audioMonitor: audioMonitor
         )
-        return (controller, transcription)
+        return (controller, transcription, notesStore)
     }
 
     private static func makeSpeechSettings(
@@ -795,6 +814,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
     private var postProcessingHandler: (@MainActor @Sendable (MeetingRecord) -> Void)?
     private var liveTranscriptControllerHandler:
         (@MainActor @Sendable (LiveTranscriptController?) -> Void)?
+    private var meetingNotesFlushHandler: (@MainActor @Sendable () async -> Void)?
     private var microphonePresentationHandler: (@MainActor @Sendable () -> Void)?
     private var currentMicrophoneSelection: MeetingMicrophoneSelection?
     private var microphoneRefreshTask: Task<Void, Never>?
@@ -845,6 +865,12 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
     ) {
         liveTranscriptControllerHandler = handler
         handler(transcript)
+    }
+
+    func setMeetingNotesFlushHandler(
+        _ handler: @escaping @MainActor @Sendable () async -> Void
+    ) {
+        meetingNotesFlushHandler = handler
     }
 
     func setMicrophonePresentationHandler(
@@ -1009,6 +1035,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             try persistActiveRecord(lifecycleState: .recording)
             startMicrophoneInventoryRefresh()
         } catch {
+            await meetingNotesFlushHandler?()
             gate.stopAccepting()
             let activeSwitch = beginSessionShutdown()
             await activeSwitch?.value
@@ -1229,6 +1256,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
 
     func stop(at date: Date) async throws -> MeetingRecord? {
         guard let writePipeline, let request, let transcript else { return nil }
+        await meetingNotesFlushHandler?()
         defer {
             clearSession()
             ownership.set(false)
@@ -1309,6 +1337,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
     }
 
     func preserveForRecovery(at date: Date, reason: MeetingRecoveryReason) async {
+        await meetingNotesFlushHandler?()
         eventGate?.stopAccepting()
         let activeSwitch = beginSessionShutdown()
         await activeSwitch?.value
@@ -1565,6 +1594,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
 
     private func stopForRuntimeFailure(_ message: String) async {
         guard writer != nil, let request else { return }
+        await meetingNotesFlushHandler?()
         eventGate?.stopAccepting()
         let activeSwitch = beginSessionShutdown()
         await activeSwitch?.value

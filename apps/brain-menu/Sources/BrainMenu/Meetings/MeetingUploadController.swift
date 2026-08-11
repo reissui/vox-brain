@@ -209,6 +209,7 @@ final class MeetingUploadController {
     var canReupload: Bool { hasPendingRevision }
 
     private let meetingStore: MeetingStore
+    private let notesStore: any MeetingNotesStoring
     private let analysisStore: any MeetingAnalysisStoring
     private let uploadStore: any MeetingUploadStoring
     private let renderer: MeetingMarkdownRenderer
@@ -218,6 +219,7 @@ final class MeetingUploadController {
 
     init(
         meetingStore: MeetingStore = MeetingStore(),
+        notesStore: (any MeetingNotesStoring)? = nil,
         analysisStore: any MeetingAnalysisStoring = FileMeetingAnalysisStore(),
         uploadStore: any MeetingUploadStoring = FileMeetingUploadStore(),
         renderer: MeetingMarkdownRenderer = MeetingMarkdownRenderer(),
@@ -227,6 +229,7 @@ final class MeetingUploadController {
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.meetingStore = meetingStore
+        self.notesStore = notesStore ?? MeetingNotesStore(rootURL: meetingStore.rootURL)
         self.analysisStore = analysisStore
         self.uploadStore = uploadStore
         self.renderer = renderer
@@ -237,6 +240,7 @@ final class MeetingUploadController {
 
     init(
         meetingStore: MeetingStore,
+        notesStore: (any MeetingNotesStoring)? = nil,
         analysisStore: any MeetingAnalysisStoring,
         uploadStore: any MeetingUploadStoring,
         api: any BrainCaptureAPI,
@@ -247,6 +251,7 @@ final class MeetingUploadController {
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.meetingStore = meetingStore
+        self.notesStore = notesStore ?? MeetingNotesStore(rootURL: meetingStore.rootURL)
         self.analysisStore = analysisStore
         self.uploadStore = uploadStore
         self.renderer = renderer
@@ -257,6 +262,7 @@ final class MeetingUploadController {
 
     init(
         meetingStore: MeetingStore,
+        notesStore: (any MeetingNotesStoring)? = nil,
         analysisStore: any MeetingAnalysisStoring,
         uploadStore: any MeetingUploadStoring,
         apiProvider: @escaping @MainActor () -> (any BrainCaptureAPI)?,
@@ -267,6 +273,7 @@ final class MeetingUploadController {
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.meetingStore = meetingStore
+        self.notesStore = notesStore ?? MeetingNotesStore(rootURL: meetingStore.rootURL)
         self.analysisStore = analysisStore
         self.uploadStore = uploadStore
         self.apiProvider = apiProvider
@@ -401,10 +408,15 @@ final class MeetingUploadController {
         // Missing, failed, or corrupt analysis can never prevent preservation
         // of the final raw transcript.
         let analysis = try? analysisStore.load(meetingID: meetingID)
+        // Notes are owner-authored durable input. Always reload them here so
+        // final capture never trusts a stale live-controller snapshot. A bad
+        // notes file cannot make the valid transcript unreadable.
+        let notes = try? notesStore.load(meetingID: meetingID)
         let markdown = renderer.render(
             meeting: stored.meeting,
             utterances: stored.utterances,
-            storedAnalysis: analysis
+            storedAnalysis: analysis,
+            notes: notes
         )
         guard markdown.lengthOfBytes(using: .utf8) <= Self.maximumRenderedBytes else {
             throw MeetingUploadError.oversizedTranscript

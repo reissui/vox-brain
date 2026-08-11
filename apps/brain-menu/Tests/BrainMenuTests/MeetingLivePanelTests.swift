@@ -7,6 +7,47 @@ import Testing
 @Suite(.serialized)
 struct MeetingLivePanelTests {
     @Test
+    func panelHasExactlyTranscriptAndNotesTabsAndSessionDefaultsToTranscript() throws {
+        let fixture = try makeFixture()
+        #expect(MeetingLiveTab.allCases == [.transcript, .notes])
+        fixture.dashboard.selectTab(.notes)
+
+        fixture.panel.beginSession(
+            transcriptController: fixture.firstTranscript,
+            recordingKind: .meeting,
+            meetingID: UUID()
+        )
+
+        #expect(fixture.dashboard.selectedTab == .transcript)
+        let source = try String(
+            contentsOf: panelSourceURL
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Views/MeetingLiveView.swift"),
+            encoding: .utf8
+        )
+        #expect(source.contains("Text(\"Transcript\").tag(MeetingLiveTab.transcript)"))
+        #expect(source.contains("Text(\"Notes\").tag(MeetingLiveTab.notes)"))
+        #expect(source.contains("notesEditorFocused = tab == .notes"))
+        fixture.panel.hide()
+    }
+
+    @Test
+    func hidingPanelDoesNotClearUserNotes() throws {
+        let fixture = try makeFixture()
+        fixture.panel.beginSession(
+            transcriptController: fixture.firstTranscript,
+            recordingKind: .meeting,
+            meetingID: UUID()
+        )
+        fixture.dashboard.notesController.text = "Keep this exact note"
+
+        fixture.panel.hide()
+
+        #expect(fixture.dashboard.notesController.text == "Keep this exact note")
+    }
+
+    @Test
     func normalMeetingAutoShowsWithoutApplicationActivation() throws {
         var presentationCount = 0
         let fixture = try makeFixture { _ in presentationCount += 1 }
