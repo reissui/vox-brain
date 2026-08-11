@@ -131,6 +131,8 @@ final class BrainAppControllerGraph {
     let dictation: DictationController
     let meeting: MeetingController
     let meetingHotkey: MeetingHotkeyController
+    let meetingLiveDashboard: MeetingLiveDashboardController
+    let meetingLivePanel: MeetingLivePanelController
     let recordingIsland: RecordingIslandController
     let meetings: MeetingsController
     let launchAtLogin: LaunchAtLoginController
@@ -265,6 +267,9 @@ final class BrainAppControllerGraph {
             meetingTranscription = built.transcription
         }
         self.meeting = nativeMeeting
+        let liveDashboard = MeetingLiveDashboardController(meetingController: nativeMeeting)
+        meetingLiveDashboard = liveDashboard
+        meetingLivePanel = MeetingLivePanelController(dashboardController: liveDashboard)
         meetingHotkey = MeetingHotkeyController(
             registrar: SystemCaptureHotkeyRegistrar(identifier: 4)
         ) {
@@ -311,6 +316,18 @@ final class BrainAppControllerGraph {
         nativeMeeting.setTransitionHandler { [weak self] in
             self?.meetingDidTransition()
         }
+        nativeMeeting.setLiveTranscriptControllerHandler { [weak self] transcript in
+            guard let self else { return }
+            guard let transcript,
+                  let kind = self.meeting.currentMeeting?.recordingKind else {
+                self.meetingLivePanel.endSession()
+                return
+            }
+            self.meetingLivePanel.beginSession(
+                transcriptController: transcript,
+                recordingKind: kind
+            )
+        }
     }
 
     func start() {
@@ -348,6 +365,7 @@ final class BrainAppControllerGraph {
         activityClockTask = nil
         automaticMeetingAnalysisTask?.cancel()
         automaticMeetingAnalysisTask = nil
+        meetingLivePanel.hide()
         recordingIsland.hideImmediately()
     }
 
@@ -414,6 +432,10 @@ final class BrainAppControllerGraph {
             await meeting.stop()
         case .keepRecording:
             meeting.keepRecording()
+        case .showTranscript:
+            guard meeting.currentMeeting?.recordingKind == .meeting,
+                  meeting.isCapturingAudio else { return }
+            meetingLivePanel.showTranscript()
         }
     }
 
@@ -771,6 +793,8 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
     private var eventGate: BrainMeetingEventGate?
     private var runtimeFailureHandler: (@MainActor @Sendable (String) -> Void)?
     private var postProcessingHandler: (@MainActor @Sendable (MeetingRecord) -> Void)?
+    private var liveTranscriptControllerHandler:
+        (@MainActor @Sendable (LiveTranscriptController?) -> Void)?
     private var microphonePresentationHandler: (@MainActor @Sendable () -> Void)?
     private var currentMicrophoneSelection: MeetingMicrophoneSelection?
     private var microphoneRefreshTask: Task<Void, Never>?
@@ -781,6 +805,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
     private var isSwitchingMicrophone = false
     private var sessionIsReady = false
     private(set) var microphonePresentation: RecordingIslandMicrophonePresentation?
+    var liveTranscriptController: LiveTranscriptController? { transcript }
 
     init(
         store: MeetingStore,
@@ -813,6 +838,13 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         _ handler: @escaping @MainActor @Sendable (MeetingRecord) -> Void
     ) {
         postProcessingHandler = handler
+    }
+
+    func setLiveTranscriptControllerHandler(
+        _ handler: @escaping @MainActor @Sendable (LiveTranscriptController?) -> Void
+    ) {
+        liveTranscriptControllerHandler = handler
+        handler(transcript)
     }
 
     func setMicrophonePresentationHandler(
@@ -889,6 +921,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         self.writer = writer
         writePipeline = BrainMeetingAudioWritePipeline(writer: writer)
         self.transcript = transcript
+        liveTranscriptControllerHandler?(transcript)
         transcript.setUtteranceCheckpointHandler { [weak self] utterances in
             self?.scheduleTranscriptCheckpoint(utterances)
         }
@@ -1711,6 +1744,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         writer = nil
         writePipeline = nil
         transcript = nil
+        liveTranscriptControllerHandler?(nil)
         systemAudio = nil
         microphone = nil
         eventGate = nil

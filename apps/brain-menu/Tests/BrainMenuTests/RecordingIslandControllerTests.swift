@@ -80,11 +80,19 @@ struct RecordingIslandControllerTests {
         #expect(controller.controls.isEmpty)
 
         controller.present(.meeting(meeting(.recording, startedAt: start)))
-        #expect(controller.controls == [.pause, .stop])
+        #expect(controller.controls == [.showTranscript, .pause, .stop])
         controller.present(.meeting(meeting(.paused, startedAt: start)))
-        #expect(controller.controls == [.resume, .stop])
+        #expect(controller.controls == [.showTranscript, .resume, .stop])
         controller.present(.meeting(meeting(.finalizing, startedAt: start)))
-        #expect(controller.controls.isEmpty)
+        #expect(controller.controls == [.showTranscript])
+
+        controller.present(.meeting(meeting(
+            .recording,
+            startedAt: start,
+            recordingKind: .voiceNote
+        )))
+        #expect(controller.controls == [.pause, .stop])
+        #expect(!controller.controls.contains(.showTranscript))
 
         controller.updateMeeting(.completed, meeting: nil)
         #expect(controller.presentation == .hidden)
@@ -347,7 +355,7 @@ struct RecordingIslandControllerTests {
         ))
 
         controller.present(suggestion)
-        #expect(controller.controls == [.stop, .keepRecording])
+        #expect(controller.controls == [.showTranscript, .stop, .keepRecording])
         #expect(actions.isEmpty)
 
         // Time passing and repeated detector updates have no implicit action.
@@ -357,7 +365,7 @@ struct RecordingIslandControllerTests {
         controller.dismissStopSuggestion()
         #expect(actions == [.keepRecording])
         #expect(!actions.contains(.stop))
-        #expect(controller.controls == [.pause, .stop])
+        #expect(controller.controls == [.showTranscript, .pause, .stop])
 
         controller.present(suggestion)
         controller.perform(.stop)
@@ -701,11 +709,13 @@ struct RecordingIslandControllerTests {
         startedAt: Date,
         microphoneLevel: Float? = nil,
         systemLevel: Float? = nil,
-        transcript: String? = nil
+        transcript: String? = nil,
+        recordingKind: MeetingRecordingKind = .meeting
     ) -> RecordingIslandMeetingPresentation {
         RecordingIslandMeetingPresentation(
             phase: phase,
             title: "Weekly planning",
+            recordingKind: recordingKind,
             applicationName: "Zoom",
             startedAt: startedAt,
             microphoneLevel: microphoneLevel,

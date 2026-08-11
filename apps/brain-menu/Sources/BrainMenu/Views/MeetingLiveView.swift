@@ -277,13 +277,22 @@ final class MeetingLiveDashboardController {
     private(set) var signalStates: [MeetingAudioSource: MeetingAudioSignalState] = [:]
 
     @ObservationIgnored let meetingController: MeetingController
-    @ObservationIgnored let transcriptController: LiveTranscriptController
+    private(set) var transcriptController: LiveTranscriptController?
+
+    init(meetingController: MeetingController) {
+        self.meetingController = meetingController
+        transcriptController = nil
+    }
 
     init(
         meetingController: MeetingController,
         transcriptController: LiveTranscriptController
     ) {
         self.meetingController = meetingController
+        self.transcriptController = transcriptController
+    }
+
+    func attachTranscript(_ transcriptController: LiveTranscriptController?) {
         self.transcriptController = transcriptController
     }
 
@@ -304,9 +313,9 @@ final class MeetingLiveDashboardController {
         return MeetingLiveViewModel(snapshot: MeetingLiveSnapshot(
             meeting: meetingController.currentMeeting,
             lifecycleState: meetingController.state,
-            utterances: transcriptController.utterances,
-            previewLag: transcriptController.previewLag,
-            transcriptFailures: transcriptController.errors,
+            utterances: transcriptController?.utterances ?? [],
+            previewLag: transcriptController?.previewLag ?? .current,
+            transcriptFailures: transcriptController?.errors ?? [],
             controllerFailure: meetingController.failure,
             levels: currentLevels,
             signalStates: currentSignalStates,

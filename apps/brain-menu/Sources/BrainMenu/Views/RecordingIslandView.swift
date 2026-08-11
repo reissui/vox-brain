@@ -301,6 +301,13 @@ struct RecordingIslandView: View {
                 .buttonStyle(.bordered)
                 .accessibilityLabel("Cancel active dictation")
                 .accessibilityHint("Discards the active dictation")
+        } else if action == .showTranscript {
+            Button(buttonTitle(for: action), systemImage: "text.bubble") {
+                controller.perform(action)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Show live meeting transcript")
+            .accessibilityHint("Reopens the live transcript without stopping the meeting")
         } else {
             Button(buttonTitle(for: action)) { controller.perform(action) }
                 .buttonStyle(.borderedProminent)
@@ -340,6 +347,7 @@ struct RecordingIslandView: View {
     private func buttonTitle(for action: RecordingIslandAction) -> String {
         switch action {
         case .cancel: "Cancel"
+        case .showTranscript: "Show transcript"
         case .pause: "Pause"
         case .resume: "Resume"
         case .stop: "Stop"
