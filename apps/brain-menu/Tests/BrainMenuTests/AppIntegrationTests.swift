@@ -29,6 +29,20 @@ struct AppIntegrationTests {
     }
 
     @Test
+    func settingsAreasAreDirectlyClickableFromAVisibleSidebar() throws {
+        let settings = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "Sources/BrainMenu/Views/SettingsView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        #expect(settings.contains("List(visibleSections, selection: selectedSection)"))
+        #expect(settings.contains(".accessibilityLabel(\"Settings areas\")"))
+        #expect(!settings.contains("Picker(\"Settings page\""))
+    }
+
+    @Test
     func aiSetupOwnsBothCommandTemplatesAndTheLibrarianModelReachesOnlyTheSandboxedCLI() throws {
         let dashboard = try String(
             contentsOf: packageRoot.appendingPathComponent(
