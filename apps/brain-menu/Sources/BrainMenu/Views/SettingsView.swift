@@ -60,54 +60,28 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
+            HStack {
                 Text("Settings")
                     .font(.title2.weight(.semibold))
                 Spacer()
-                Picker("Settings page", selection: selectedSection) {
-                    ForEach(visibleSections) { section in
-                        Label(section.rawValue, systemImage: section.symbolName)
-                            .tag(Optional(section))
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 220)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
             Divider()
 
-            switch selectedSection.wrappedValue ?? .general {
-            case .storage:
-                if let store {
-                    DeploymentSettingsView(store: store)
-                } else {
-                    unavailable("Vault", "Open Settings from Brain.app to inspect the local vault.")
+            HStack(spacing: 0) {
+                List(visibleSections, selection: selectedSection) { section in
+                    Label(section.rawValue, systemImage: section.symbolName)
+                        .tag(section)
                 }
-            case .general:
-                GeneralSettingsView(controller: launchAtLogin)
-            case .shortcuts:
-                if let meetingHotkey {
-                    MeetingShortcutSettingsView(controller: meetingHotkey)
-                } else {
-                    unavailable("Shortcuts", "Open Settings from Brain.app to configure the meeting shortcut.")
-                }
-            case .speech:
-                if let speech {
-                    SpeechSettingsView(controller: speech)
-                } else {
-                    unavailable("Speech", "Open Settings from the Brain app dashboard to inspect VoxType and model readiness.")
-                }
-            case .audioPrivacy:
-                AudioPrivacySettingsView(onboarding: onboarding)
-            case .updates:
-                if let updates {
-                    UpdateSettingsView(controller: updates)
-                } else {
-                    unavailable("Updates", "Update checks are available in the installed Brain app.")
-                }
-            case .gmail:
-                GmailSettingsView(controller: gmail)
+                .listStyle(.sidebar)
+                .frame(minWidth: 150, idealWidth: 180, maxWidth: 210)
+                .accessibilityLabel("Settings areas")
+
+                Divider()
+
+                settingsContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .navigationTitle("Settings")
@@ -116,6 +90,42 @@ struct SettingsView: View {
                !sections.contains(selected) {
                 selectedSection.wrappedValue = .general
             }
+        }
+    }
+
+    @ViewBuilder
+    private var settingsContent: some View {
+        switch selectedSection.wrappedValue ?? .general {
+        case .storage:
+            if let store {
+                DeploymentSettingsView(store: store)
+            } else {
+                unavailable("Vault", "Open Settings from Brain.app to inspect the local vault.")
+            }
+        case .general:
+            GeneralSettingsView(controller: launchAtLogin)
+        case .shortcuts:
+            if let meetingHotkey {
+                MeetingShortcutSettingsView(controller: meetingHotkey)
+            } else {
+                unavailable("Shortcuts", "Open Settings from Brain.app to configure the meeting shortcut.")
+            }
+        case .speech:
+            if let speech {
+                SpeechSettingsView(controller: speech)
+            } else {
+                unavailable("Speech", "Open Settings from the Brain app dashboard to inspect VoxType and model readiness.")
+            }
+        case .audioPrivacy:
+            AudioPrivacySettingsView(onboarding: onboarding)
+        case .updates:
+            if let updates {
+                UpdateSettingsView(controller: updates)
+            } else {
+                unavailable("Updates", "Update checks are available in the installed Brain app.")
+            }
+        case .gmail:
+            GmailSettingsView(controller: gmail)
         }
     }
 
