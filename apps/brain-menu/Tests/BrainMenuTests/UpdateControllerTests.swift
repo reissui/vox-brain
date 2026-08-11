@@ -24,6 +24,7 @@ struct UpdateControllerTests {
             archiveURL: try #require(URL(string: "https://github.com/reissui/vox-brain/releases/download/brain-v1.3.0/Brain-1.3.0.zip")),
             archiveSize: 42
         )
+        let alertPresenter = RecordingUpdateAlertPresenter()
         let controller = UpdateController(
             service: FakeUpdateService(release: release),
             defaults: defaults,
@@ -34,7 +35,8 @@ struct UpdateControllerTests {
                 "BrainSourceSHA": String(repeating: "a", count: 40),
                 "BrainChannel": "release",
                 "BrainBuildDate": "2026-07-24T12:00:00Z",
-            ])
+            ]),
+            alertPresenter: alertPresenter
         )
 
         await controller.checkNow()
@@ -45,6 +47,36 @@ struct UpdateControllerTests {
             detail: "Brain 1.3.0"
         ))
         #expect(defaults.object(forKey: UpdateController.lastCheckDefaultsKey) as? Date == checkedAt)
+        #expect(alertPresenter.presentedReleases == [release])
+    }
+
+    @MainActor
+    @Test
+    func repeatedChecksAlertOnlyOnceForTheSameRelease() async throws {
+        let release = BrainRelease(
+            version: "1.3.0",
+            pageURL: try #require(URL(string: "https://example.test/brain-v1.3.0")),
+            archiveURL: try #require(URL(string: "https://example.test/Brain-1.3.0.zip")),
+            archiveSize: 42
+        )
+        let alertPresenter = RecordingUpdateAlertPresenter()
+        let controller = UpdateController(
+            service: FakeUpdateService(release: release),
+            buildInfo: BrainBuildInfo(infoDictionary: [
+                "CFBundleShortVersionString": "1.2.3",
+                "CFBundleVersion": "123",
+                "BrainSourceSHA": String(repeating: "a", count: 40),
+                "BrainChannel": "release",
+                "BrainBuildDate": "2026-07-24T12:00:00Z",
+            ]),
+            alertPresenter: alertPresenter
+        )
+
+        await controller.checkNow()
+        await controller.checkNow()
+
+        #expect(alertPresenter.presentedReleases == [release])
+        #expect(alertPresenter.installAction != nil)
     }
 
     @MainActor
@@ -162,5 +194,19 @@ private actor RecurringUpdateSleeper {
         durations.append(duration)
         if durations.count == 1 { return }
         try await Task.sleep(for: .seconds(3_600))
+    }
+}
+
+@MainActor
+private final class RecordingUpdateAlertPresenter: BrainUpdateAlertPresenting {
+    private(set) var presentedReleases: [BrainRelease] = []
+    private(set) var installAction: (() -> Void)?
+
+    func presentUpdateAvailable(
+        _ release: BrainRelease,
+        install: @escaping @MainActor () -> Void
+    ) {
+        presentedReleases.append(release)
+        installAction = install
     }
 }
