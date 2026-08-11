@@ -205,7 +205,7 @@ struct VoiceMeetingAcceptanceTests {
             systemLevel: 0.4,
             latestTranscriptLine: rollingLine
         )))
-        #expect(island.controls == [.pause, .stop])
+        #expect(island.controls == [.showTranscript, .pause, .stop])
         #expect(island.presentation != .hidden)
         await live.stop(capture: detectedAudio)
         #expect(live.isFinalized)

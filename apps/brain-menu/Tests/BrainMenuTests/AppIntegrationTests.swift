@@ -142,6 +142,26 @@ struct AppIntegrationTests {
     }
 
     @Test
+    func controllerGraphOwnsOneApplicationLifetimeMeetingDashboardAndPanel() throws {
+        let graph = makeGraph()
+
+        #expect(graph.meetingLiveDashboard.meetingController === graph.meeting)
+        #expect(graph.meetingLivePanel.dashboardController === graph.meetingLiveDashboard)
+        #expect(graph.meetingLivePanel.panel.delegate === graph.meetingLivePanel)
+
+        let source = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "Sources/BrainMenu/BrainMenuApp.swift"
+            ),
+            encoding: .utf8
+        )
+        #expect(source.components(separatedBy: "LiveTranscriptController(service:").count - 1 == 1)
+        #expect(source.contains("self.transcript = transcript"))
+        #expect(source.contains("liveTranscriptControllerHandler?(transcript)"))
+        graph.meetingLivePanel.hide()
+    }
+
+    @Test
     func menuBarUsesBrainAtRestAndElapsedRecordingFeedbackForActiveAudio() {
         let startedAt = Date(timeIntervalSince1970: 1_000)
 

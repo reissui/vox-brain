@@ -5,6 +5,7 @@ import SwiftUI
 
 enum RecordingIslandAction: String, CaseIterable, Equatable, Sendable {
     case cancel
+    case showTranscript
     case pause
     case resume
     case stop
@@ -281,16 +282,24 @@ enum RecordingIslandPresentation: Equatable, Sendable {
             }
         case .meeting(let presentation):
             switch presentation.phase {
-            case .starting, .chooseMicrophone, .finalizing, .saved:
+            case .chooseMicrophone, .saved:
                 []
+            case .starting, .finalizing:
+                presentation.isVoiceNote ? [] : [.showTranscript]
             case .recording:
-                [.pause, .stop]
+                presentation.isVoiceNote
+                    ? [.pause, .stop]
+                    : [.showTranscript, .pause, .stop]
             case .paused:
-                [.resume, .stop]
+                presentation.isVoiceNote
+                    ? [.resume, .stop]
+                    : [.showTranscript, .resume, .stop]
             case .stopSuggested:
                 // A suggestion has no implicit default. Stop can happen only
                 // when its explicit button dispatches `.stop`.
-                [.stop, .keepRecording]
+                presentation.isVoiceNote
+                    ? [.stop, .keepRecording]
+                    : [.showTranscript, .stop, .keepRecording]
             }
         }
     }
