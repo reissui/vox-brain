@@ -24,6 +24,34 @@ struct BrainUpdateSidebarAlert: Equatable, Sendable {
     let detail: String
 }
 
+@MainActor
+protocol BrainUpdateAlertPresenting: AnyObject {
+    func presentUpdateAvailable(
+        _ release: BrainRelease,
+        install: @escaping @MainActor () -> Void
+    )
+}
+
+@MainActor
+final class BrainUpdateAlertPresenter: BrainUpdateAlertPresenting {
+    func presentUpdateAvailable(
+        _ release: BrainRelease,
+        install: @escaping @MainActor () -> Void
+    ) {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Brain \(release.version) is available"
+        alert.informativeText = "Install the update now, or choose Later and install it from the Updates item in Brain's sidebar."
+        alert.addButton(withTitle: "Install Update")
+        alert.addButton(withTitle: "Later")
+
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            install()
+        }
+    }
+}
+
 enum BrainUpdateError: LocalizedError {
     case invalidResponse
     case noReleasePublished
@@ -299,7 +327,9 @@ final class UpdateController {
     @ObservationIgnored private let now: @Sendable () -> Date
     @ObservationIgnored private let sleep: @Sendable (Duration) async throws -> Void
     @ObservationIgnored private let buildInfo: BrainBuildInfo?
+    @ObservationIgnored private let alertPresenter: any BrainUpdateAlertPresenting
     @ObservationIgnored private var automaticTask: Task<Void, Never>?
+    @ObservationIgnored private var presentedReleaseVersion: String?
 
     init(
         service: any BrainUpdateServing = GitHubBrainUpdateService(),
@@ -308,13 +338,15 @@ final class UpdateController {
         sleep: @escaping @Sendable (Duration) async throws -> Void = {
             try await Task.sleep(for: $0)
         },
-        buildInfo: BrainBuildInfo? = BrainBuildInfo.current
+        buildInfo: BrainBuildInfo? = BrainBuildInfo.current,
+        alertPresenter: any BrainUpdateAlertPresenting = BrainUpdateAlertPresenter()
     ) {
         self.service = service
         self.defaults = defaults
         self.now = now
         self.sleep = sleep
         self.buildInfo = buildInfo
+        self.alertPresenter = alertPresenter
         automaticChecksEnabled = defaults.object(
             forKey: Self.automaticChecksDefaultsKey
         ) as? Bool ?? true
@@ -392,7 +424,12 @@ final class UpdateController {
             }
             let checkedAt = now()
             defaults.set(checkedAt, forKey: Self.lastCheckDefaultsKey)
-            state = latest > current ? .available(release) : .upToDate(checkedAt)
+            if latest > current {
+                state = .available(release)
+                presentAlertIfNeeded(for: release)
+            } else {
+                state = .upToDate(checkedAt)
+            }
         } catch is CancellationError {
             state = .idle
         } catch BrainUpdateError.noReleasePublished {
@@ -426,5 +463,13 @@ final class UpdateController {
     func openReleasePage() {
         guard let release = availableRelease else { return }
         NSWorkspace.shared.open(release.pageURL)
+    }
+
+    private func presentAlertIfNeeded(for release: BrainRelease) {
+        guard presentedReleaseVersion != release.version else { return }
+        presentedReleaseVersion = release.version
+        alertPresenter.presentUpdateAvailable(release) { [weak self] in
+            Task { await self?.installAvailableUpdate() }
+        }
     }
 }
