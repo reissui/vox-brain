@@ -23,7 +23,7 @@ struct BrainFreshnessPresentation: Equatable, Sendable {
 }
 
 /// One stable spoken and visual vocabulary for transient states shared by the
-/// app's capture, speech, meeting, and remote-service surfaces.
+/// app's capture, speech, meeting, and local-service surfaces.
 enum BrainWorkflowAccessibilityState: String, CaseIterable, Equatable, Sendable {
     case listening
     case transcribing
@@ -85,7 +85,7 @@ enum BrainWorkflowAccessibilityState: String, CaseIterable, Equatable, Sendable 
             BrainStatePresentation(
                 symbolName: "hourglass",
                 label: "Waiting",
-                accessibilityLabel: "Capture status: Waiting for remote runner",
+                accessibilityLabel: "Capture status: Waiting for local processing",
                 tone: .warning
             )
         case .delivered:
@@ -143,40 +143,28 @@ extension View {
 }
 
 enum DashboardScope: Int, CaseIterable, Identifiable, Sendable {
-    case remoteVault
+    case localVault
     case captureDelivery
-    case macMiniAgent
     case librarianAutomation
-    case telegram
-    case gmail
-    case publishing
-    case gateway
+    case systemServices
 
     var id: Self { self }
 
     var title: String {
         switch self {
-        case .remoteVault: "Remote vault"
+        case .localVault: "Local vault"
         case .captureDelivery: "Capture delivery"
-        case .macMiniAgent: "remote runner agent"
         case .librarianAutomation: "Librarian automation"
-        case .telegram: "Telegram"
-        case .gmail: "Gmail"
-        case .publishing: "Publishing"
-        case .gateway: "Gateway"
+        case .systemServices: "System services"
         }
     }
 
     var symbolName: String {
         switch self {
-        case .remoteVault: "books.vertical"
+        case .localVault: "books.vertical"
         case .captureDelivery: "tray.and.arrow.down"
-        case .macMiniAgent: "macmini"
         case .librarianAutomation: "clock.arrow.2.circlepath"
-        case .telegram: "paperplane"
-        case .gmail: "envelope"
-        case .publishing: "globe"
-        case .gateway: "cloud"
+        case .systemServices: "gearshape.2"
         }
     }
 
@@ -186,26 +174,14 @@ enum DashboardScope: Int, CaseIterable, Identifiable, Sendable {
             .replacingOccurrences(of: "_", with: "-")
 
         switch scope {
-        case "vault", "remote-vault", "knowledge":
-            return .remoteVault
+        case "vault", "knowledge":
+            return .localVault
         case "capture", "capture-delivery", "delivery", "inbox", "sync":
             return .captureDelivery
-        case "agent", "heartbeat", "mac-mini", "mac-mini-agent", "remote":
-            return .macMiniAgent
-        case "automation", "librarian", "scheduler":
+        case "automation", "librarian", "scheduler", "agent":
             return .librarianAutomation
-        case "telegram":
-            return .telegram
-        case "gmail":
-            return .gmail
-        case "publishing", "site", "github":
-            return .publishing
-        case "cloud", "cloudflare", "gateway":
-            return .gateway
         default:
-            // The API contract supplies one of the documented scopes. Keep an
-            // unexpected remote check visible rather than silently dropping it.
-            return .gateway
+            return .systemServices
         }
     }
 }
@@ -284,9 +260,9 @@ enum BrainPresentation {
 
     static func state(
         for snapshot: BrainSnapshot?,
-        isPaired: Bool
+        isReady: Bool
     ) -> BrainStatePresentation {
-        guard isPaired else { return unpairedState }
+        guard isReady else { return unconfiguredState }
         return state(for: snapshot)
     }
 
@@ -355,10 +331,10 @@ enum BrainPresentation {
         tone: .warning
     )
 
-    private static let unpairedState = BrainStatePresentation(
-        symbolName: "link.badge.plus",
-        label: "Not paired",
-        accessibilityLabel: "Brain is not paired with a remote instance",
+    private static let unconfiguredState = BrainStatePresentation(
+        symbolName: "internaldrive",
+        label: "Local setup needed",
+        accessibilityLabel: "Brain local setup is needed",
         tone: .neutral
     )
 

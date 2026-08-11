@@ -1,12 +1,12 @@
 import AppKit
 import SwiftUI
 
-private let brainRemoteKnowledgeOpen = Notification.Name("BrainRemoteKnowledgeOpen")
+private let brainKnowledgeOpen = Notification.Name("BrainKnowledgeOpen")
 
 struct KnowledgeView: View {
     @Environment(\.scenePhase) private var scenePhase
 
-    @State private var store: RemoteKnowledgeStore
+    @State private var store: KnowledgeStore
     @State private var query = ""
     @AccessibilityFocusState private var accessibilityFocus: AccessibilityTarget?
 
@@ -19,7 +19,7 @@ struct KnowledgeView: View {
 
     init(
         initialPath: String? = nil,
-        store: RemoteKnowledgeStore = RemoteKnowledgeStore()
+        store: KnowledgeStore = KnowledgeStore()
     ) {
         self.initialPath = initialPath
         _store = State(initialValue: store)
@@ -51,7 +51,7 @@ struct KnowledgeView: View {
             }
             accessibilityFocus = .heading
         }
-        .onReceive(NotificationCenter.default.publisher(for: brainRemoteKnowledgeOpen)) { notification in
+        .onReceive(NotificationCenter.default.publisher(for: brainKnowledgeOpen)) { notification in
             guard let path = notification.userInfo?["path"] as? String else { return }
             Task { _ = await store.followWikilink(path) }
         }
@@ -77,7 +77,7 @@ struct KnowledgeView: View {
     @ViewBuilder
     private var documentList: some View {
         if store.isSearching && store.results.isEmpty {
-            ProgressView("Searching paired Brain…")
+            ProgressView("Searching local Brain…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let error = store.searchError {
             unavailable(error)
@@ -86,7 +86,7 @@ struct KnowledgeView: View {
                 ContentUnavailableView(
                     "No knowledge yet",
                     systemImage: "books.vertical",
-                    description: Text("Documents are fetched live from the paired Brain instance.")
+                    description: Text("Documents are read from your local Brain vault.")
                 )
             } else {
                 ContentUnavailableView.search(text: query)
@@ -171,7 +171,7 @@ struct KnowledgeView: View {
                     return .handled
                 default:
                     // In particular, never hand file:, Finder, or Obsidian URLs
-                    // to the host operating system from remote Markdown.
+                    // to the host operating system from rendered Markdown.
                     return .discarded
                 }
             })
@@ -179,7 +179,7 @@ struct KnowledgeView: View {
             ContentUnavailableView(
                 "Select a note",
                 systemImage: "doc.text.magnifyingglass",
-                description: Text("Markdown is fetched on demand from the paired Brain instance.")
+                description: Text("Markdown is read on demand from your local Brain vault.")
             )
             .accessibilityFocused($accessibilityFocus, equals: .heading)
         }
@@ -195,10 +195,10 @@ struct KnowledgeView: View {
         )
     }
 
-    private func unavailable(_ error: RemoteKnowledgeError) -> some View {
+    private func unavailable(_ error: KnowledgeError) -> some View {
         ContentUnavailableView(
             error.title,
-            systemImage: error == .revokedDevice ? "person.crop.circle.badge.xmark" : "exclamationmark.triangle",
+            systemImage: "exclamationmark.triangle",
             description: Text(error.localizedDescription)
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)

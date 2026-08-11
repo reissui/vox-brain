@@ -9,13 +9,15 @@ struct MeetingMarkdownRenderer: Sendable {
     func render(
         meeting: MeetingRecord,
         utterances: [MeetingUtterance],
-        storedAnalysis: StoredMeetingAnalysis?
+        storedAnalysis: StoredMeetingAnalysis?,
+        notes: String? = nil
     ) -> String {
         render(
             meeting: meeting,
             utterances: utterances,
             analysis: meeting.analysisState == .completed ? storedAnalysis?.analysis : nil,
-            speakerState: storedAnalysis?.speakerState ?? SpeakerEditingState()
+            speakerState: storedAnalysis?.speakerState ?? SpeakerEditingState(),
+            notes: notes
         )
     }
 
@@ -23,7 +25,8 @@ struct MeetingMarkdownRenderer: Sendable {
         meeting: MeetingRecord,
         utterances: [MeetingUtterance],
         analysis: MeetingAnalysis? = nil,
-        speakerState: SpeakerEditingState = SpeakerEditingState()
+        speakerState: SpeakerEditingState = SpeakerEditingState(),
+        notes: String? = nil
     ) -> String {
         let editedUtterances = SpeakerEditor(
             utterances: utterances,
@@ -52,6 +55,11 @@ struct MeetingMarkdownRenderer: Sendable {
             sections.append(Self.actionItemsSection(analysis.actionItems))
             sections.append(Self.listSection(title: "Risks", values: analysis.risks))
             sections.append(Self.followUpSection(analysis.followUp))
+        }
+
+        if let notes,
+           !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            sections.append("## Notes\n\n\(notes)")
         }
 
         let transcript = editedUtterances.map { utterance in

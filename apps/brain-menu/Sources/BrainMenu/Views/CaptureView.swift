@@ -139,40 +139,18 @@ struct CaptureView: View {
             Label("Delivering to Brain (\(id))", systemImage: "arrow.up.circle")
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
-        case .waitingForMacMini(let id, let elapsedSeconds, let lastState, let lastError):
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Waiting for remote runner", systemImage: "macmini.and.arrow.forward")
-                    .font(.headline)
-                    .foregroundStyle(.orange)
-                    .brainAccessibleStatus(
-                        .waiting,
-                        detail: "Capture \(id), \(Self.elapsed(elapsedSeconds)) elapsed"
-                    )
-                Text("\(Self.elapsed(elapsedSeconds)) elapsed · last state: \(lastState.rawValue)")
-                    .foregroundStyle(.secondary)
-                Text(lastError ?? "The capture is safe and status monitoring continues.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(id).font(.caption.monospaced()).textSelection(.enabled)
-                HStack {
-                    Button("Check again") { controller.checkAgain() }
-                        .accessibilityHint("Checks this capture without sending it again")
-                    Button("Open remote runner") { controller.openMacMini() }
-                        .accessibilityHint("Opens remote runner health and recovery")
-                }
-            }
         case .delivered(let id):
             VStack(alignment: .leading, spacing: 4) {
-                Label("Delivered to Brain inbox (\(id))", systemImage: "checkmark.circle.fill")
+                Label("Saved to the local Brain inbox (\(id))", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
-                Text("Awaiting Librarian processing. The private site updates after processing.")
+                Text("Awaiting local Librarian processing.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             .textSelection(.enabled)
             .brainAccessibleStatus(
                 .delivered,
-                detail: "Capture \(id). Delivered to the Brain inbox and awaiting Librarian processing"
+                detail: "Capture \(id). Saved to the local Brain inbox and awaiting Librarian processing"
             )
         case .retryAvailable(let id):
             Label(

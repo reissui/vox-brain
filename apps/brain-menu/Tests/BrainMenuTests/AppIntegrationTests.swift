@@ -24,7 +24,6 @@ struct AppIntegrationTests {
             .speech,
             .audioPrivacy,
             .updates,
-            .gmail,
         ])
     }
 
@@ -79,46 +78,15 @@ struct AppIntegrationTests {
     }
 
     @Test
-    func firstLaunchChoosesStorageModeAndSpeechReadinessNeverBlocksBrain() async throws {
-        let incomplete = try AppOnboardingFixture(ready: false)
-        defer { incomplete.remove() }
-        let suite = "AppIntegration.StorageMode.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let setupStore = BrainStore(client: nil, defaults: defaults)
-        let incompleteGraph = makeGraph(
-            store: setupStore,
-            onboarding: incomplete.controller
-        )
-        #expect(incompleteGraph.launchDestination == .setup)
-
-        await incomplete.makeReady()
-        await incomplete.controller.refresh()
-        #expect(incompleteGraph.launchDestination == .setup)
-
-        setupStore.selectRemote(defaults: defaults)
-        #expect(incompleteGraph.launchDestination == .dashboard)
-        #expect(setupStore.runtimeIdentity == "remote:none")
-
-        let completed = try AppOnboardingFixture(ready: true, persistedCompletion: true)
-        defer { completed.remove() }
-        let remote = AppRemoteStatusAPI()
-        let remoteStore = BrainStore(client: remote)
-        let completedGraph = makeGraph(store: remoteStore, onboarding: completed.controller)
-
-        #expect(completedGraph.launchDestination == .dashboard)
-        #expect(completedGraph.store.isPaired)
-
-        await completed.permissions.set(.denied, for: .microphone)
-        await completed.controller.refresh()
-
-        #expect(!completed.controller.isComplete)
-        #expect(completedGraph.launchDestination == .dashboard)
-        #expect(completedGraph.store === remoteStore)
+    func configuredLocalClientRoutesDirectlyToDashboard() {
+        let store = BrainStore(client: AppLocalStatusAPI())
+        let graph = makeGraph(store: store)
+        #expect(graph.launchDestination == .dashboard)
+        #expect(store.isReady)
     }
 
     @Test
-    func appLaunchAndReopenPresentDashboardAndRemoteSetupCanGoBack() throws {
+    func appLaunchAndReopenPresentDashboardWithoutRemoteSetup() throws {
         let appSource = try String(
             contentsOf: packageRoot.appendingPathComponent(
                 "Sources/BrainMenu/BrainMenuApp.swift"
@@ -136,9 +104,28 @@ struct AppIntegrationTests {
             ),
             encoding: .utf8
         )
-        #expect(dashboardSource.contains("Back to setup choices"))
-        #expect(dashboardSource.contains("store.returnToSetup()"))
-        #expect(dashboardSource.contains(".keyboardShortcut(.cancelAction)"))
+        #expect(!dashboardSource.contains("PairBrainView"))
+        #expect(dashboardSource.contains("BrainSetupView(store: store)"))
+    }
+
+    @Test
+    func controllerGraphOwnsOneApplicationLifetimeMeetingDashboardAndPanel() throws {
+        let graph = makeGraph()
+
+        #expect(graph.meetingLiveDashboard.meetingController === graph.meeting)
+        #expect(graph.meetingLivePanel.dashboardController === graph.meetingLiveDashboard)
+        #expect(graph.meetingLivePanel.panel.delegate === graph.meetingLivePanel)
+
+        let source = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "Sources/BrainMenu/BrainMenuApp.swift"
+            ),
+            encoding: .utf8
+        )
+        #expect(source.components(separatedBy: "LiveTranscriptController(service:").count - 1 == 1)
+        #expect(source.contains("self.transcript = transcript"))
+        #expect(source.contains("liveTranscriptControllerHandler?(transcript)"))
+        graph.meetingLivePanel.hide()
     }
 
     @Test
@@ -250,6 +237,9 @@ struct AppIntegrationTests {
         voxType.yield(appRuntimeStatus(.idle))
         await eventually { graph.activity == .idle }
 
+        // `start()` refreshes onboarding asynchronously. Wait for the injected
+        // ready fixture to finish that refresh before exercising manual start.
+        await eventually { graph.recordingSetupCheck(for: .meeting) == nil }
         await graph.toggleMeeting()
         #expect(meeting.state == .recording)
         #expect(graph.activity == .meeting(
@@ -272,7 +262,7 @@ struct AppIntegrationTests {
             return
         }
         #expect(finalizingIsland.phase == .finalizing)
-        #expect(graph.recordingIsland.controls.isEmpty)
+        #expect(graph.recordingIsland.controls == [.showTranscript])
         recorder.releaseStop()
         await stopping.value
         #expect(meeting.state == .completed)
@@ -447,10 +437,8 @@ struct AppIntegrationTests {
     @Test
     func scenesBorrowOneControllerGraphAndStartingTwiceDoesNotDuplicateLongRunningOwners() {
         let captureRegistrar = AppCaptureHotkeyRegistrar()
-        let regionRegistrar = AppCaptureHotkeyRegistrar()
         let graph = makeGraph(
-            captureRegistrar: captureRegistrar,
-            regionRegistrar: regionRegistrar
+            captureRegistrar: captureRegistrar
         )
         defer { graph.stop() }
 
@@ -469,8 +457,6 @@ struct AppIntegrationTests {
         #expect(graph.startCount == 1)
         #expect(captureRegistrar.registerCalls == 0)
         #expect(captureRegistrar.registeredHotkeys.isEmpty)
-        #expect(regionRegistrar.registerCalls == 0)
-        #expect(regionRegistrar.registeredHotkeys.isEmpty)
     }
 
     @Test
@@ -543,6 +529,9 @@ struct AppIntegrationTests {
         await eventually { graph.activity == .transcribing("Transcribing dictation") }
         #expect(graph.recordingIsland.presentation == .hidden)
 
+        // The graph's initial onboarding refresh is deliberately asynchronous.
+        // This test owns a ready fixture, so wait until it is observable.
+        await eventually { graph.recordingSetupCheck(for: .meeting) == nil }
         await graph.toggleMeeting()
         await eventually {
             guard case .meeting(let value) = graph.recordingIsland.presentation else {
@@ -584,8 +573,8 @@ struct AppIntegrationTests {
 
     @Test
     func settingsKeepsLocalUtilitiesAndHidesRemovedRemoteRoots() {
-        let remote = AppRemoteStatusAPI()
-        let store = BrainStore(client: remote)
+        let local = AppLocalStatusAPI()
+        let store = BrainStore(client: local)
         let graph = makeGraph(store: store)
         let roots: [AnyView] = [
             AnyView(MenuBarView(graph: graph)),
@@ -593,7 +582,6 @@ struct AppIntegrationTests {
             AnyView(SettingsView(
                 store: store,
                 launchAtLogin: graph.launchAtLogin,
-                gmail: graph.gmail,
                 meetingHotkey: graph.meetingHotkey,
                 speech: graph.speechSettings,
                 updates: graph.updates,
@@ -601,14 +589,14 @@ struct AppIntegrationTests {
             )),
         ]
 
-        #expect(store.isPaired)
+        #expect(store.isReady)
         #expect(roots.count == 3)
         #expect(graph.store === store)
         #expect(!SettingsSection.allCases.contains { $0.rawValue == "Knowledge" })
         #expect(!SettingsSection.allCases.contains { $0.rawValue == "Ask Brain" })
         #expect(!SettingsSection.allCases.contains { $0.rawValue == "Actions" })
         #expect(!SettingsSection.allCases.contains { $0.rawValue == "Remote Runner" })
-        #expect(SettingsSection.gmail.rawValue == "Gmail")
+        #expect(!SettingsSection.allCases.contains { $0.rawValue == "Gmail" })
     }
 
     @Test
@@ -781,7 +769,6 @@ struct AppIntegrationTests {
             "MeetingLiveView.swift",
             "AISettingsView.swift",
             "CaptureView.swift",
-            "MacMiniView.swift",
             "KnowledgeView.swift",
             "ChatView.swift",
         ]
@@ -805,7 +792,6 @@ struct AppIntegrationTests {
             "MeetingLiveView.swift",
             "AISettingsView.swift",
             "CaptureView.swift",
-            "MacMiniView.swift",
             "KnowledgeView.swift",
             "ChatView.swift",
         ] {
@@ -846,8 +832,7 @@ struct AppIntegrationTests {
         meetings: MeetingsController? = nil,
         now: @escaping @MainActor () -> Date = Date.init,
         meetingAnalysisFactory: @escaping @MainActor () -> (any MeetingDetailAnalysisControlling)? = { nil },
-        captureRegistrar: AppCaptureHotkeyRegistrar = AppCaptureHotkeyRegistrar(),
-        regionRegistrar: AppCaptureHotkeyRegistrar = AppCaptureHotkeyRegistrar()
+        captureRegistrar: AppCaptureHotkeyRegistrar = AppCaptureHotkeyRegistrar()
     ) -> BrainAppControllerGraph {
         let onboarding = onboarding ?? AppOnboardingFixture.fallbackController()
         return BrainAppControllerGraph(
@@ -867,7 +852,6 @@ struct AppIntegrationTests {
                 analysisStore: AppEmptyAnalysisStore()
             ),
             captureHotkeyRegistrar: captureRegistrar,
-            regionHotkeyRegistrar: regionRegistrar,
             frontmostApplications: AppFrontmostApplications(),
             speechSettings: SpeechSettingsController(
                 voxType: nil,
@@ -1093,21 +1077,13 @@ private final class AppMeetingAnalyzer: MeetingDetailAnalysisControlling, @unche
     ) throws -> Bool { false }
 }
 
-private actor AppRemoteStatusAPI: BrainStatusAPI {
-    nonisolated let pairedInstance: BrainInstanceMetadata? = BrainInstanceMetadata(
-        baseURL: URL(string: "https://brain.example.test")!,
-        instanceID: "app-integration",
-        deviceID: "test-mac",
-        deviceName: "Test Mac",
-        scopes: [.capture, .read, .control]
-    )
-
+private actor AppLocalStatusAPI: BrainStatusAPI {
     func status() async throws -> BrainStatusReport {
         let date = Date(timeIntervalSince1970: 1_784_193_000)
         return BrainStatusReport(
             schemaVersion: 1,
             generatedAt: date,
-            vault: BrainVaultStatus(path: "remote", state: .clean, dirtyPaths: 0),
+            vault: BrainVaultStatus(path: "local", state: .clean, dirtyPaths: 0),
             counts: BrainContentCounts(inbox: 0, sources: 0, notes: 0, people: 0, projects: 0),
             lastRun: BrainLastRun(at: date, commit: "test", summary: "healthy"),
             services: [],

@@ -229,7 +229,7 @@ final class LocalCLIProcessRunner: CLIProcessRunning {
         let errorBox = FileHandleBox(errorPipe.fileHandleForReading)
         let input = invocation.standardInput
 
-        let inputTask = Task.detached { () -> Bool in
+        let inputTask = Self.blockingTask { () -> Bool in
             do {
                 try inputBox.handle.write(contentsOf: input)
                 try inputBox.handle.close()
@@ -250,7 +250,7 @@ final class LocalCLIProcessRunner: CLIProcessRunning {
             arbiter: arbiter
         )
 
-        let waitTask = Task.detached {
+        let waitTask = Self.blockingTask {
             var status: Int32 = 0
             var result: pid_t
             repeat {
@@ -320,7 +320,7 @@ final class LocalCLIProcessRunner: CLIProcessRunning {
         limit: Int,
         arbiter: TerminalCauseArbiter
     ) -> Task<ReadResult, Never> {
-        Task.detached {
+        blockingTask {
             var data = Data()
             do {
                 while true {
@@ -338,6 +338,23 @@ final class LocalCLIProcessRunner: CLIProcessRunning {
             } catch {
                 arbiter.latch(.launchFailed)
                 return .failed
+            }
+        }
+    }
+
+    /// Foundation file handles and `waitpid` are blocking APIs. Running them
+    /// directly in unstructured Swift tasks can exhaust the cooperative
+    /// executor on low-core machines before the timeout task gets a chance to
+    /// terminate the child process. Dispatch owns a separate blocking-worker
+    /// pool, so the async timeout and cancellation path always remains runnable.
+    private static func blockingTask<Value: Sendable>(
+        _ operation: @escaping @Sendable () -> Value
+    ) -> Task<Value, Never> {
+        Task {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    continuation.resume(returning: operation())
+                }
             }
         }
     }

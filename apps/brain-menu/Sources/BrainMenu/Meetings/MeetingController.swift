@@ -84,6 +84,15 @@ protocol MeetingRecording: AnyObject {
     func setPostProcessingHandler(
         _ handler: @escaping @MainActor @Sendable (MeetingRecord) -> Void
     )
+    /// Publishes the exact live controller used by the active recorder. UI
+    /// consumers observe it; they never construct a parallel speech runtime.
+    var liveTranscriptController: LiveTranscriptController? { get }
+    func setLiveTranscriptControllerHandler(
+        _ handler: @escaping @MainActor @Sendable (LiveTranscriptController?) -> Void
+    )
+    func setMeetingNotesFlushHandler(
+        _ handler: @escaping @MainActor @Sendable () async -> Void
+    )
 }
 
 extension MeetingRecording {
@@ -93,6 +102,16 @@ extension MeetingRecording {
 
     func setPostProcessingHandler(
         _ handler: @escaping @MainActor @Sendable (MeetingRecord) -> Void
+    ) {}
+
+    var liveTranscriptController: LiveTranscriptController? { nil }
+
+    func setLiveTranscriptControllerHandler(
+        _ handler: @escaping @MainActor @Sendable (LiveTranscriptController?) -> Void
+    ) {}
+
+    func setMeetingNotesFlushHandler(
+        _ handler: @escaping @MainActor @Sendable () async -> Void
     ) {}
 }
 
@@ -244,11 +263,26 @@ final class MeetingController {
     var microphonePresentation: RecordingIslandMicrophonePresentation? {
         (recorder as? any MeetingMicrophoneSwitching)?.microphonePresentation
     }
+    var liveTranscriptController: LiveTranscriptController? {
+        recorder.liveTranscriptController
+    }
 
     func setTransitionHandler(_ handler: @escaping @MainActor @Sendable () -> Void) {
         transitionHandler = handler
         (recorder as? any MeetingMicrophoneSwitching)?
             .setMicrophonePresentationHandler(handler)
+    }
+
+    func setLiveTranscriptControllerHandler(
+        _ handler: @escaping @MainActor @Sendable (LiveTranscriptController?) -> Void
+    ) {
+        recorder.setLiveTranscriptControllerHandler(handler)
+    }
+
+    func setMeetingNotesFlushHandler(
+        _ handler: @escaping @MainActor @Sendable () async -> Void
+    ) {
+        recorder.setMeetingNotesFlushHandler(handler)
     }
 
     func selectMicrophone(_ selection: MeetingMicrophoneSelection) async {

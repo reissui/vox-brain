@@ -67,8 +67,8 @@ enum MeetingStoreError: Error, Equatable, LocalizedError, Sendable {
     }
 }
 
-/// Local operational state for meetings. The Markdown vault and remote server
-/// are intentionally outside this type's API and filesystem scope.
+/// Local operational state for meetings. The Markdown vault is intentionally
+/// outside this type's API and filesystem scope.
 final class MeetingStore: @unchecked Sendable {
     static let maximumRecords = 1_000
     static let meetingFilename = MeetingStoreFile.meeting.rawValue

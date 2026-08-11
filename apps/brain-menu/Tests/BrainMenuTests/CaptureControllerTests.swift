@@ -289,9 +289,9 @@ struct CaptureControllerTests {
     }
 
     @Test
-    func automaticallyRetriesWithOneStableIdempotencyKey() async {
+    func localFailureDoesNotSilentlySwitchTransportOrDuplicateCapture() async {
         let api = CaptureAPISpy(results: [
-            .failure(.transport),
+            .failure(.commandFailed("transport")),
             .success(BrainCaptureReceipt(id: "capture-after-retry", state: "queued")),
         ])
         let key = uuid("11111111-2222-4333-8444-555555555555")
@@ -301,11 +301,9 @@ struct CaptureControllerTests {
         await controller.submit()
 
         let calls = await api.calls
-        #expect(calls.count == 2)
+        #expect(calls.count == 1)
         #expect(calls[0].idempotencyKey == key)
-        #expect(calls[1].idempotencyKey == key)
-        #expect(calls[0].request == calls[1].request)
-        #expect(controller.submissionState == .queued(id: "capture-after-retry"))
+        #expect(controller.submissionState == .failed)
     }
 
     @Test
@@ -324,74 +322,12 @@ struct CaptureControllerTests {
         #expect(controller.draft.noteText == "do not show a false success")
     }
 
-    @Test
-    func pairedTransportRejectsQueuedJSONUnlessTheHTTPStatusIsExactly202() async throws {
-        let statuses = CaptureLockedBox([200, 202])
-        let requests = CaptureLockedBox<[URLRequest]>([])
-        CaptureURLProtocol.install { request in
-            requests.withLock { $0.append(request) }
-            let status = statuses.withLock { $0.removeFirst() }
-            let response = HTTPURLResponse(
-                url: request.url!,
-                statusCode: status,
-                httpVersion: "HTTP/1.1",
-                headerFields: ["Content-Type": "application/json"]
-            )!
-            return (response, Data(#"{"id":"capture-202","state":"queued"}"#.utf8))
-        }
-        defer { CaptureURLProtocol.reset() }
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [CaptureURLProtocol.self]
-        let metadata = BrainInstanceMetadata(
-            baseURL: URL(string: "https://brain.example.test")!,
-            instanceID: "brain-owner",
-            deviceID: "device-1",
-            deviceName: "the owner Mac",
-            scopes: [.capture]
-        )
-        let api = PairedCaptureClient(
-            metadata: metadata,
-            session: URLSession(configuration: configuration),
-            credentialStore: CaptureMemoryCredentials(token: "paired-token")
-        )
-        let request = BrainCaptureRequest(type: .note, text: "durable only", source: "Brain.app")
-
-        do {
-            _ = try await api.capture(
-                request,
-                idempotencyKey: uuid("12345678-1234-4234-8234-123456789abc")
-            )
-            Issue.record("HTTP 200 must not be displayed as queued")
-        } catch let error as BrainAPIError {
-            #expect(error == .http(
-                status: 200,
-                code: "expected_http_202",
-                message: "Brain did not return HTTP 202 Accepted.",
-                requestID: nil
-            ))
-        }
-
-        let receipt = try await api.capture(
-            request,
-            idempotencyKey: uuid("12345678-1234-4234-8234-123456789abd")
-        )
-
-        #expect(receipt == BrainCaptureReceipt(id: "capture-202", state: "queued"))
-        #expect(requests.value.map { $0.value(forHTTPHeaderField: "Idempotency-Key") } == [
-            "12345678-1234-4234-8234-123456789abc",
-            "12345678-1234-4234-8234-123456789abd",
-        ])
-        #expect(requests.value.allSatisfy {
-            $0.value(forHTTPHeaderField: "Authorization") == "Bearer paired-token"
-        })
-    }
 
     @Test
     func failureRetainsDraftAndManualRetryWithoutAnyLocalFallback() async {
         let api = CaptureAPISpy(results: [
-            .failure(.transport),
-            .failure(.timedOut),
+            .failure(.commandFailed("transport")),
+            .failure(.commandFailed("timed out")),
             .success(BrainCaptureReceipt(id: "eventually-queued", state: "queued")),
         ])
         let key = uuid("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
@@ -408,7 +344,7 @@ struct CaptureControllerTests {
         await controller.retry()
 
         let calls = await api.calls
-        #expect(calls.count == 2)
+        #expect(calls.count == 1)
         #expect(calls.allSatisfy { $0.idempotencyKey == key })
         #expect(calls.allSatisfy { $0.request.text == exactDraft })
         #expect(controller.submissionState == .failed)
@@ -611,7 +547,7 @@ struct CaptureControllerTests {
     }
 
     @Test
-    func acceptedReceiptIsNonblockingPersistsAndShowsWaitingAfterNinetySeconds() async throws {
+    func acceptedReceiptIsNonblockingAndKeepsLocalQueuedStateWhilePolling() async throws {
         let id = "55555555-5555-4555-8555-555555555555"
         let suite = "CaptureController.Waiting.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
@@ -647,12 +583,7 @@ struct CaptureControllerTests {
         clock.withLock { $0 = start.addingTimeInterval(91) }
         sleeps.resumeNext()
         await sleeps.waitForCount(1)
-        #expect(controller.submissionState == .waitingForMacMini(
-            id: id,
-            elapsedSeconds: 91,
-            lastState: .queued,
-            lastError: nil
-        ))
+        #expect(controller.submissionState == .queued(id: id))
         #expect(await api.calls.count == 1, "polling must never resubmit")
 
         sleeps.resumeNext()
@@ -697,10 +628,10 @@ private struct CaptureCall: Equatable, Sendable {
 }
 
 private actor CaptureAPISpy: BrainCaptureAPI {
-    private var results: [Result<BrainCaptureReceipt, BrainAPIError>]
+    private var results: [Result<BrainCaptureReceipt, LocalBrainError>]
     private(set) var calls: [CaptureCall] = []
 
-    init(results: [Result<BrainCaptureReceipt, BrainAPIError>]) {
+    init(results: [Result<BrainCaptureReceipt, LocalBrainError>]) {
         self.results = results
     }
 
@@ -709,23 +640,23 @@ private actor CaptureAPISpy: BrainCaptureAPI {
         idempotencyKey: UUID
     ) async throws -> BrainCaptureReceipt {
         calls.append(CaptureCall(request: capture, idempotencyKey: idempotencyKey))
-        guard !results.isEmpty else { throw BrainAPIError.transport }
+        guard !results.isEmpty else { throw LocalBrainError.commandFailed("transport") }
         return try results.removeFirst().get()
     }
 }
 
 private actor StatusCaptureAPISpy: BrainCaptureAPI {
-    private var captureResults: [Result<BrainCaptureReceipt, BrainAPIError>]
-    private var statusResults: [Result<BrainCaptureStatus, BrainAPIError>]
-    private var listResults: [Result<BrainCaptureListResponse, BrainAPIError>]
+    private var captureResults: [Result<BrainCaptureReceipt, LocalBrainError>]
+    private var statusResults: [Result<BrainCaptureStatus, LocalBrainError>]
+    private var listResults: [Result<BrainCaptureListResponse, LocalBrainError>]
     private(set) var calls: [CaptureCall] = []
     private(set) var statusIDs: [String] = []
     private(set) var listCallCount = 0
 
     init(
-        captureResults: [Result<BrainCaptureReceipt, BrainAPIError>],
-        statusResults: [Result<BrainCaptureStatus, BrainAPIError>],
-        listResults: [Result<BrainCaptureListResponse, BrainAPIError>] = []
+        captureResults: [Result<BrainCaptureReceipt, LocalBrainError>],
+        statusResults: [Result<BrainCaptureStatus, LocalBrainError>],
+        listResults: [Result<BrainCaptureListResponse, LocalBrainError>] = []
     ) {
         self.captureResults = captureResults
         self.statusResults = statusResults
@@ -737,31 +668,22 @@ private actor StatusCaptureAPISpy: BrainCaptureAPI {
         idempotencyKey: UUID
     ) async throws -> BrainCaptureReceipt {
         calls.append(CaptureCall(request: capture, idempotencyKey: idempotencyKey))
-        guard !captureResults.isEmpty else { throw BrainAPIError.transport }
+        guard !captureResults.isEmpty else { throw LocalBrainError.commandFailed("transport") }
         return try captureResults.removeFirst().get()
     }
 
     func captureStatus(id: String) async throws -> BrainCaptureStatus {
         statusIDs.append(id)
-        guard !statusResults.isEmpty else { throw BrainAPIError.invalidResponse }
+        guard !statusResults.isEmpty else { throw LocalBrainError.invalidOutput }
         return try statusResults.removeFirst().get()
     }
 
     func captureList() async throws -> BrainCaptureListResponse {
         listCallCount += 1
-        guard !listResults.isEmpty else { throw BrainAPIError.invalidResponse }
+        guard !listResults.isEmpty else { throw LocalBrainError.invalidOutput }
         return try listResults.removeFirst().get()
     }
 }
-
-private struct CaptureMemoryCredentials: DeviceCredentialStoring {
-    let token: String?
-
-    func save(_ token: String, for account: String) throws {}
-    func load(for account: String) throws -> String? { token }
-    func delete(for account: String) throws {}
-}
-
 private final class CaptureLockedBox<Value>: @unchecked Sendable {
     private var storage: Value
     private let lock = NSLock()
@@ -809,39 +731,6 @@ private final class CaptureSleepGate: @unchecked Sendable {
         lock.unlock()
         continuation.resume()
     }
-}
-
-private final class CaptureURLProtocol: URLProtocol, @unchecked Sendable {
-    typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
-    private static let handler = CaptureLockedBox<Handler?>(nil)
-
-    static func install(_ handler: @escaping Handler) {
-        self.handler.withLock { $0 = handler }
-    }
-
-    static func reset() {
-        handler.withLock { $0 = nil }
-    }
-
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        guard let handler = Self.handler.value else {
-            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
-            return
-        }
-        do {
-            let (response, data) = try handler(request)
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
-        }
-    }
-
-    override func stopLoading() {}
 }
 
 @MainActor

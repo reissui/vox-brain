@@ -63,7 +63,7 @@ struct MeetingViewsTests {
             .upload,
         ])
         #expect(controller.rows[0].badges.allSatisfy { !$0.accessibilityLabel.isEmpty })
-        #expect(controller.rows[0].accessibilityLabel.contains("Upload status: Delivered"))
+        #expect(controller.rows[0].accessibilityLabel.contains("Upload status: Saved to vault"))
 
         for term in ["roadmap", "Alice Jones", "concise summary", "launch timing"] {
             controller.query = term
@@ -473,7 +473,7 @@ struct MeetingViewsTests {
         #expect(controller.viewModel.talkTime.count == 2)
         #expect(controller.viewModel.talkTime.allSatisfy { !$0.accessibilityLabel.isEmpty })
         #expect(controller.viewModel.audioControls == [.reveal, .export, .delete])
-        #expect(controller.viewModel.badges.first { $0.kind == .upload }?.title == "Upload failed")
+        #expect(controller.viewModel.badges.first { $0.kind == .upload }?.title == "Local ingest failed")
         #expect(controller.viewModel.uploadCanRetry)
 
         await controller.perform(.renameSpeaker(id: "you", name: "the owner"))

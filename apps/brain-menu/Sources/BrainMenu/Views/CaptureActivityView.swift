@@ -50,7 +50,7 @@ struct CaptureActivityView: View {
                         value: store.status.map { String($0.counts.inbox) } ?? "—"
                     )
                     metric(
-                        title: "Gateway delivery backlog",
+                        title: "Local delivery backlog",
                         value: store.health?.operations.map { String($0.backlogCount) } ?? "—"
                     )
                     metric(
@@ -143,7 +143,7 @@ struct CaptureActivityView: View {
                     if let source = record.source, !source.isEmpty {
                         Text("·")
                         Text(source)
-                            .foregroundStyle(source.hasPrefix("MCP") ? .blue : .secondary)
+                            .foregroundStyle(.secondary)
                     }
                     Text("·")
                     Text(record.updatedAt, style: .relative)

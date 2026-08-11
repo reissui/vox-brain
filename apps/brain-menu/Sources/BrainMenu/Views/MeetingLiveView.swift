@@ -8,6 +8,11 @@ enum MeetingLiveAction: String, CaseIterable, Equatable, Sendable {
     case stop
 }
 
+enum MeetingLiveTab: String, CaseIterable, Equatable, Sendable {
+    case transcript = "Transcript"
+    case notes = "Notes"
+}
+
 @MainActor
 protocol MeetingLiveActionHandling: AnyObject {
     func pause() async
@@ -277,14 +282,45 @@ final class MeetingLiveDashboardController {
     private(set) var signalStates: [MeetingAudioSource: MeetingAudioSignalState] = [:]
 
     @ObservationIgnored let meetingController: MeetingController
-    @ObservationIgnored let transcriptController: LiveTranscriptController
+    let notesController: MeetingNotesController
+    private(set) var transcriptController: LiveTranscriptController?
+    private(set) var selectedTab: MeetingLiveTab = .transcript
 
     init(
         meetingController: MeetingController,
-        transcriptController: LiveTranscriptController
+        notesController: MeetingNotesController = MeetingNotesController()
+    ) {
+        self.meetingController = meetingController
+        self.notesController = notesController
+        transcriptController = nil
+    }
+
+    init(
+        meetingController: MeetingController,
+        transcriptController: LiveTranscriptController,
+        notesController: MeetingNotesController = MeetingNotesController()
     ) {
         self.meetingController = meetingController
         self.transcriptController = transcriptController
+        self.notesController = notesController
+    }
+
+    func attachTranscript(_ transcriptController: LiveTranscriptController?) {
+        if transcriptController != nil { selectedTab = .transcript }
+        self.transcriptController = transcriptController
+    }
+
+    func attachSession(
+        transcriptController: LiveTranscriptController,
+        meetingID: UUID
+    ) {
+        selectedTab = .transcript
+        self.transcriptController = transcriptController
+        notesController.attach(meetingID: meetingID)
+    }
+
+    func selectTab(_ tab: MeetingLiveTab) {
+        selectedTab = tab
     }
 
     func receive(_ level: MeetingAudioLevel) {
@@ -304,9 +340,9 @@ final class MeetingLiveDashboardController {
         return MeetingLiveViewModel(snapshot: MeetingLiveSnapshot(
             meeting: meetingController.currentMeeting,
             lifecycleState: meetingController.state,
-            utterances: transcriptController.utterances,
-            previewLag: transcriptController.previewLag,
-            transcriptFailures: transcriptController.errors,
+            utterances: transcriptController?.utterances ?? [],
+            previewLag: transcriptController?.previewLag ?? .current,
+            transcriptFailures: transcriptController?.errors ?? [],
             controllerFailure: meetingController.failure,
             levels: currentLevels,
             signalStates: currentSignalStates,
@@ -323,6 +359,7 @@ final class MeetingLiveDashboardController {
 struct MeetingLiveView: View {
     @State private var controller: MeetingLiveDashboardController
     @AccessibilityFocusState private var accessibilityFocus: AccessibilityTarget?
+    @FocusState private var notesEditorFocused: Bool
 
     private enum AccessibilityTarget: Hashable {
         case heading
@@ -341,6 +378,9 @@ struct MeetingLiveView: View {
         .onAppear { accessibilityFocus = .heading }
         .onChange(of: controller.meetingController.failure != nil) { _, hasFailure in
             if hasFailure { accessibilityFocus = .errorSummary }
+        }
+        .onChange(of: controller.selectedTab) { _, tab in
+            notesEditorFocused = tab == .notes
         }
         // Intentionally no onDisappear finalizer: closing this dashboard must
         // never stop an active recording. Only the visible Stop button does.
@@ -373,11 +413,58 @@ struct MeetingLiveView: View {
         VStack(spacing: 0) {
             header(model)
             Divider()
-            transcript(model)
+            Picker("Live meeting content", selection: Binding(
+                get: { controller.selectedTab },
+                set: { controller.selectTab($0) }
+            )) {
+                Text("Transcript").tag(MeetingLiveTab.transcript)
+                Text("Notes").tag(MeetingLiveTab.notes)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal)
+            .padding(.vertical, 10)
+            Divider()
+            switch controller.selectedTab {
+            case .transcript:
+                transcript(model)
+            case .notes:
+                notes
+            }
             Divider()
             controls(model)
         }
         .frame(minWidth: 560, minHeight: 480)
+    }
+
+    private var notes: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextEditor(text: Binding(
+                get: { controller.notesController.text },
+                set: { controller.notesController.text = $0 }
+            ))
+            .font(.body)
+            .focused($notesEditorFocused)
+            .accessibilityLabel("Meeting notes")
+
+            HStack {
+                Spacer()
+                switch controller.notesController.state {
+                case .saved:
+                    Label("Saved", systemImage: "checkmark.circle")
+                        .foregroundStyle(.secondary)
+                case .saving:
+                    Label("Saving…", systemImage: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.secondary)
+                case .error(let message):
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                }
+            }
+            .font(.caption)
+            .accessibilityElement(children: .combine)
+        }
+        .padding()
     }
 
     private func header(_ model: MeetingLiveViewModel) -> some View {
