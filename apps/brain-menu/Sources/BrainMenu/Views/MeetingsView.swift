@@ -165,7 +165,7 @@ final class MeetingsController {
     }
 
     /// Loads only Application Support state. Search subsequently filters this
-    /// in-memory index and cannot contact the paired Brain server.
+    /// in-memory index and does not modify the local vault.
     func load() {
         state = .loading
         do {
@@ -419,21 +419,21 @@ final class MeetingsController {
 
     private static func uploadTitle(_ state: MeetingUploadState) -> String {
         switch state {
-        case .notUploaded: "Not uploaded"
-        case .queued: "Upload queued"
-        case .delivering: "Delivering"
-        case .delivered: "Delivered to inbox"
-        case .failed: "Upload failed"
+        case .notUploaded: "Not saved to vault"
+        case .queued: "Local ingest queued"
+        case .delivering: "Saving locally"
+        case .delivered: "Saved to vault"
+        case .failed: "Local ingest failed"
         }
     }
 
     private static func uploadSymbol(_ state: MeetingUploadState) -> String {
         switch state {
-        case .notUploaded: "icloud.slash"
+        case .notUploaded: "internaldrive"
         case .queued: "clock.arrow.circlepath"
-        case .delivering: "icloud.and.arrow.up"
-        case .delivered: "icloud.and.arrow.up.fill"
-        case .failed: "exclamationmark.icloud.fill"
+        case .delivering: "internaldrive"
+        case .delivered: "checkmark.circle.fill"
+        case .failed: "exclamationmark.triangle.fill"
         }
     }
 

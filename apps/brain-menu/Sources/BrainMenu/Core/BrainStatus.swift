@@ -81,7 +81,7 @@ struct BrainStatusReport: Codable, Equatable, Sendable {
         self.lastRun = lastRun
         self.activity = activity
         self.services = services
-        self.siteURL = siteURL.flatMap { BrainPrivateSiteURL.validated($0.absoluteString) }
+        self.siteURL = siteURL
         self.freshness = freshness
     }
 
@@ -95,7 +95,7 @@ struct BrainStatusReport: Codable, Equatable, Sendable {
         activity = try container.decodeIfPresent(BrainLocalActivity.self, forKey: .activity)
         services = try container.decode([BrainServiceStatus].self, forKey: .services)
         let rawSiteURL = try? container.decode(String.self, forKey: .siteURL)
-        siteURL = rawSiteURL.flatMap(BrainPrivateSiteURL.validated)
+        siteURL = rawSiteURL.flatMap(URL.init(string:))
         freshness = BrainReportFreshness(
             isStale: try container.decodeIfPresent(Bool.self, forKey: .stale) ?? false,
             snapshotAt: try container.decodeIfPresent(Date.self, forKey: .snapshotAt),

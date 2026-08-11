@@ -6,21 +6,16 @@ protocol BrainChatJobAPI: Sendable {
     func jobStatus(id: String) async throws -> BrainJobStatus
 }
 
-extension BrainAPIClient: BrainChatJobAPI {}
-
 enum BrainChatFailure: Equatable, Sendable {
-    case unpaired
-    case revoked
+    case unavailable
     case offline
     case timedOut
     case librarian(String)
 
     var title: String {
         switch self {
-        case .unpaired:
-            "Brain is not paired"
-        case .revoked:
-            "Pairing was revoked"
+        case .unavailable:
+            "Brain is unavailable"
         case .offline:
             "Brain is offline"
         case .timedOut:
@@ -32,10 +27,8 @@ enum BrainChatFailure: Equatable, Sendable {
 
     var detail: String {
         switch self {
-        case .unpaired:
+        case .unavailable:
             "Finish configuring Brain, then retry."
-        case .revoked:
-            "Pair this Mac again, then retry the question."
         case .offline:
             "The Brain vault could not be reached."
         case .timedOut:
@@ -277,7 +270,7 @@ final class BrainChatController {
         defer { isSubmitting = false }
 
         guard let client else {
-            markFailure(.unpaired, turnID: turnID)
+            markFailure(.unavailable, turnID: turnID)
             return
         }
 
@@ -301,7 +294,7 @@ final class BrainChatController {
 
     private func monitorJob(id: String, turnID: UUID) async {
         guard let client else {
-            markFailure(.unpaired, turnID: turnID)
+            markFailure(.unavailable, turnID: turnID)
             return
         }
         isPolling = true
@@ -311,11 +304,11 @@ final class BrainChatController {
             while !Task.isCancelled {
                 let status = try await client.jobStatus(id: id)
                 guard status.id == id, status.kind == .ask else {
-                    throw BrainAPIError.invalidResponse
+                    throw LocalBrainError.invalidOutput
                 }
                 if status.state == .queued || status.state == .running {
                     guard let createdAt = Self.date(from: status.createdAt) else {
-                        throw BrainAPIError.invalidResponse
+                        throw LocalBrainError.invalidOutput
                     }
                     if now().timeIntervalSince(createdAt) >= Self.maximumNonterminalAge {
                         markFailure(.timedOut, turnID: turnID)
@@ -424,28 +417,16 @@ final class BrainChatController {
     }
 
     private static func failure(for error: Error) -> BrainChatFailure {
-        guard let apiError = error as? BrainAPIError else {
+        guard let localError = error as? LocalBrainError else {
             return .librarian(error.localizedDescription)
         }
-        switch apiError {
-        case .notPaired:
-            return .unpaired
-        case .credentialUnavailable:
-            return .revoked
-        case .transport:
-            return .offline
-        case .timedOut:
+        switch localError {
+        case .invalidConfiguration, .notInitialized:
+            return .unavailable
+        case .commandFailed(let detail) where detail.localizedCaseInsensitiveContains("timed out"):
             return .timedOut
-        case .http(let status, let code, let message, _):
-            let normalizedCode = code.lowercased()
-            if status == 401 || status == 403
-                || normalizedCode.contains("revoked")
-                || normalizedCode.contains("credential") {
-                return .revoked
-            }
-            return .librarian(message ?? "Brain request failed (\(status), \(code)).")
-        case .invalidBaseURL, .invalidRequest, .invalidResponse:
-            return .librarian(apiError.localizedDescription)
+        default:
+            return .librarian(localError.localizedDescription)
         }
     }
 }

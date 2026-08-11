@@ -8,6 +8,7 @@ enum LocalBrainError: Error, Equatable, LocalizedError, Sendable {
     case invalidOutput
     case invalidCapture
     case documentNotFound
+    case invalidRequest
 
     var errorDescription: String? {
         switch self {
@@ -23,6 +24,8 @@ enum LocalBrainError: Error, Equatable, LocalizedError, Sendable {
             "The capture could not be stored in the local Brain vault."
         case .documentNotFound:
             "That note was not found in the local Brain vault."
+        case .invalidRequest:
+            "The local Brain request is invalid."
         }
     }
 }
@@ -83,8 +86,8 @@ private actor LocalBrainState {
     }
 }
 
-struct LocalBrainClient: BrainStatusAPI, BrainCaptureAPI, RemoteKnowledgeAPI,
-    RemoteBrainJobAPI, BrainChatJobAPI, @unchecked Sendable {
+struct LocalBrainClient: BrainStatusAPI, BrainCaptureAPI, KnowledgeAPI,
+    BrainChatJobAPI, @unchecked Sendable {
     static let markerFilename = ".brain-data-root"
     static let maximumKnowledgeFileBytes = 1_048_576
     static let maximumCaptureObjectBytes = 6 * 1_024 * 1_024
@@ -93,8 +96,6 @@ struct LocalBrainClient: BrainStatusAPI, BrainCaptureAPI, RemoteKnowledgeAPI,
     ]
 
     let configuration: BrainLocalConfiguration
-    let pairedInstance: BrainInstanceMetadata?
-
     private let fileManager: FileManager
     private let librarianModel: String?
 
@@ -127,13 +128,6 @@ struct LocalBrainClient: BrainStatusAPI, BrainCaptureAPI, RemoteKnowledgeAPI,
         } catch {
             throw LocalBrainError.invalidConfiguration
         }
-        pairedInstance = BrainInstanceMetadata(
-            baseURL: URL(string: "https://local.brain.invalid")!,
-            instanceID: "local",
-            deviceID: "this-mac",
-            deviceName: Host.current().localizedName ?? "This Mac",
-            scopes: BrainDeviceScope.allCases
-        )
     }
 
     static func initialize(_ configuration: BrainLocalConfiguration) async throws {
@@ -242,7 +236,7 @@ struct LocalBrainClient: BrainStatusAPI, BrainCaptureAPI, RemoteKnowledgeAPI,
     ) async throws -> BrainKnowledgeSearchResponse {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, query.count <= 256 else {
-            throw BrainAPIError.invalidRequest
+            throw LocalBrainError.invalidRequest
         }
         let boundedLimit = min(max(limit ?? 30, 1), 50)
         var results: [BrainKnowledgeSearchResult] = []
@@ -282,14 +276,14 @@ struct LocalBrainClient: BrainStatusAPI, BrainCaptureAPI, RemoteKnowledgeAPI,
         case .ask:
             guard let question,
                   !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw BrainAPIError.invalidRequest
+                throw LocalBrainError.invalidRequest
             }
             arguments = ["ask", question]
         case .process:
-            guard question == nil else { throw BrainAPIError.invalidRequest }
+            guard question == nil else { throw LocalBrainError.invalidRequest }
             arguments = ["process"]
         case .digest:
-            guard question == nil else { throw BrainAPIError.invalidRequest }
+            guard question == nil else { throw LocalBrainError.invalidRequest }
             arguments = ["digest"]
         }
 
@@ -530,7 +524,7 @@ struct LocalBrainClient: BrainStatusAPI, BrainCaptureAPI, RemoteKnowledgeAPI,
               !path.hasPrefix("/"),
               !path.contains("\\"),
               !components.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
-            throw BrainAPIError.invalidRequest
+            throw LocalBrainError.invalidRequest
         }
         let candidate = configuration.vaultURL.appendingPathComponent(path).standardizedFileURL
         guard let originalValues = try? candidate.resourceValues(

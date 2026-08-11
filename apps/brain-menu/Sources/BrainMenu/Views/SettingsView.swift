@@ -8,7 +8,6 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case speech = "Speech"
     case audioPrivacy = "Privacy"
     case updates = "Updates"
-    case gmail = "Gmail"
 
     var id: Self { self }
 
@@ -20,7 +19,6 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .speech: "waveform.and.mic"
         case .audioPrivacy: "lock.shield"
         case .updates: "arrow.triangle.2.circlepath"
-        case .gmail: "envelope"
         }
     }
 
@@ -30,7 +28,6 @@ struct SettingsView: View {
     let store: BrainStore?
 
     @State private var launchAtLogin: LaunchAtLoginController
-    @State private var gmail: GmailConnectionController
     @State private var meetingHotkey: MeetingHotkeyController?
     @State private var speech: SpeechSettingsController?
     @State private var updates: UpdateController?
@@ -42,7 +39,6 @@ struct SettingsView: View {
         store: BrainStore? = nil,
         selection: Binding<SettingsSection?>? = nil,
         launchAtLogin: LaunchAtLoginController = LaunchAtLoginController(),
-        gmail: GmailConnectionController = GmailConnectionController(),
         meetingHotkey: MeetingHotkeyController? = nil,
         speech: SpeechSettingsController? = nil,
         updates: UpdateController? = nil,
@@ -51,7 +47,6 @@ struct SettingsView: View {
         self.store = store
         self.externalSelection = selection
         _launchAtLogin = State(initialValue: launchAtLogin)
-        _gmail = State(initialValue: gmail)
         _meetingHotkey = State(initialValue: meetingHotkey)
         _speech = State(initialValue: speech)
         _updates = State(initialValue: updates)
@@ -124,8 +119,6 @@ struct SettingsView: View {
             } else {
                 unavailable("Updates", "Update checks are available in the installed Brain app.")
             }
-        case .gmail:
-            GmailSettingsView(controller: gmail)
         }
     }
 
@@ -134,7 +127,7 @@ struct SettingsView: View {
     }
 
     private var visibleSections: [SettingsSection] {
-        var sections: [SettingsSection] = [
+        [
             .storage,
             .general,
             .shortcuts,
@@ -142,11 +135,6 @@ struct SettingsView: View {
             .audioPrivacy,
             .updates,
         ]
-        if store?.deploymentMode == .remote,
-           store?.status?.services.first(where: { $0.id == "gmail" })?.configured == true {
-            sections.append(.gmail)
-        }
-        return sections
     }
 
     private func unavailable(_ title: String, _ detail: String) -> some View {
@@ -165,23 +153,17 @@ private struct DeploymentSettingsView: View {
         Form {
             Section("Vault") {
                 LabeledContent {
-                    Label(
-                        store.deploymentMode == .local ? "On this Mac" : "Remote",
-                        systemImage: store.deploymentMode == .local ? "internaldrive" : "network"
-                    )
+                    Label("On this Mac", systemImage: "internaldrive")
                 } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Storage")
-                        Text(store.deploymentMode == .local
-                             ? "Your Markdown vault stays on this Mac."
-                             : "This installation is connected to a remote vault.")
+                        Text("Your Markdown vault stays on this Mac.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                if store.deploymentMode == .local,
-                   let configuration = BrainRuntime.localConfiguration() {
+                if let configuration = BrainRuntime.localConfiguration() {
                     LabeledContent("Vault") {
                         Text(configuration.vaultPath)
                             .font(.body.monospaced())
@@ -190,8 +172,6 @@ private struct DeploymentSettingsView: View {
                     Button("Show Vault in Finder") {
                         NSWorkspace.shared.activateFileViewerSelecting([configuration.vaultURL])
                     }
-                } else if let instance = store.pairedInstance {
-                    LabeledContent("Remote instance", value: instance.instanceID)
                 }
             }
 
@@ -489,76 +469,6 @@ private struct UpdateSettingsView: View {
         }
         .foregroundStyle(.secondary)
         .accessibilityElement(children: .combine)
-    }
-}
-
-private struct GmailSettingsView: View {
-    @State var controller: GmailConnectionController
-    @State private var confirmDisconnect = false
-
-    var body: some View {
-        Form {
-            Section("Google Gmail — Deferred") {
-                LabeledContent {
-                    if controller.isWorking {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Label(controller.state.title, systemImage: controller.state.symbolName)
-                    }
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Existing remote connection")
-                        Text(controller.state.detail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Label(
-                    "The Gmail connection and account stay on your remote Brain server. Brain.app receives only connection status.",
-                    systemImage: "lock.shield"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-                Text("Gmail feature expansion is deferred. These existing controls are preserved without storing mail on this Mac.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                if let errorMessage = controller.errorMessage {
-                    Label(errorMessage, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.red)
-                }
-
-                HStack {
-                    switch controller.state {
-                    case .checking, .authorizing:
-                        EmptyView()
-                    case .disconnected, .denied, .expired, .timedOut:
-                        Button("Connect") { Task { await controller.connect() } }
-                    case .connected, .reconnectRequired:
-                        Button("Reconnect") { Task { await controller.connect() } }
-                        Button("Disconnect", role: .destructive) { confirmDisconnect = true }
-                    case .unavailable:
-                        Button("Try Again") { Task { await controller.connect() } }
-                    }
-
-                    Button("Refresh") { Task { await controller.refresh() } }
-                }
-                .disabled(controller.isWorking)
-            }
-        }
-        .formStyle(.grouped)
-        .navigationTitle("Gmail — Deferred")
-        .task { await controller.refresh() }
-        .confirmationDialog("Disconnect Google Gmail?", isPresented: $confirmDisconnect) {
-            Button("Disconnect", role: .destructive) {
-                Task { await controller.disconnect() }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("The remote Brain server will revoke its Gmail connection. Brain.app has no Gmail files to remove, and no email will be changed.")
-        }
     }
 }
 

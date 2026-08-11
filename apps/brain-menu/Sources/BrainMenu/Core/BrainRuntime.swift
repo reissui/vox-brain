@@ -1,28 +1,5 @@
 import Foundation
 
-enum BrainDeploymentMode: String, Codable, CaseIterable, Identifiable, Sendable {
-    case local
-    case remote
-
-    var id: Self { self }
-
-    var title: String {
-        switch self {
-        case .local: "This Mac"
-        case .remote: "Remote Brain"
-        }
-    }
-
-    var detail: String {
-        switch self {
-        case .local:
-            "Keep the vault and run the Brain CLI on this Mac. No server, Cloudflare account, or MCP connection is used."
-        case .remote:
-            "Connect this app to a Brain runner on another Mac through the authenticated remote gateway."
-        }
-    }
-}
-
 struct BrainLocalConfiguration: Codable, Equatable, Sendable {
     let vaultPath: String
     let cliPath: String
@@ -31,14 +8,11 @@ struct BrainLocalConfiguration: Codable, Equatable, Sendable {
     var cliURL: URL { URL(fileURLWithPath: cliPath, isDirectory: false) }
 }
 
+/// Resolves the one supported Brain runtime: the bundled CLI operating on a
+/// vault owned by this user. Historical settings from older app versions are
+/// deliberately not read or removed, so upgrading never mutates old data.
 enum BrainRuntime {
-    static let deploymentModeDefaultsKey = "brain.deployment.mode"
     static let localConfigurationDefaultsKey = "brain.local.configuration"
-
-    static func deploymentMode(defaults: UserDefaults = .standard) -> BrainDeploymentMode? {
-        defaults.string(forKey: deploymentModeDefaultsKey)
-            .flatMap(BrainDeploymentMode.init(rawValue:))
-    }
 
     static func localConfiguration(
         defaults: UserDefaults = .standard
@@ -54,11 +28,10 @@ enum BrainRuntime {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         bundle: Bundle = .main
     ) -> BrainLocalConfiguration? {
-        let applicationSupport = fileManager.urls(
+        let vaultURL = fileManager.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first
-        let vaultURL = applicationSupport?
+        ).first?
             .appendingPathComponent("Brain", isDirectory: true)
             .appendingPathComponent("Vault", isDirectory: true)
         guard let vaultURL, let cliURL = discoverCLI(
@@ -111,119 +84,48 @@ enum BrainRuntime {
         _ configuration: BrainLocalConfiguration,
         defaults: UserDefaults = .standard
     ) throws {
-        let data = try JSONEncoder().encode(configuration)
-        defaults.set(data, forKey: localConfigurationDefaultsKey)
-        defaults.set(BrainDeploymentMode.local.rawValue, forKey: deploymentModeDefaultsKey)
-        clearJobContinuations(defaults: defaults)
+        defaults.set(try JSONEncoder().encode(configuration), forKey: localConfigurationDefaultsKey)
     }
 
-    static func selectRemote(defaults: UserDefaults = .standard) {
-        defaults.set(BrainDeploymentMode.remote.rawValue, forKey: deploymentModeDefaultsKey)
-        clearJobContinuations(defaults: defaults)
-    }
-
-    static func clearDeploymentModeSelection(defaults: UserDefaults = .standard) {
-        defaults.removeObject(forKey: deploymentModeDefaultsKey)
-        clearJobContinuations(defaults: defaults)
-    }
-
-    static func statusClient(defaults: UserDefaults = .standard) -> (any BrainStatusAPI)? {
-        switch deploymentMode(defaults: defaults) {
-        case .local:
-            return localConfiguration(defaults: defaults).flatMap {
-                try? LocalBrainClient(configuration: $0)
-            }
-        case .remote:
-            return remoteAPIClient(defaults: defaults)
-        case nil:
-            return nil
+    static func configuration(
+        defaults: UserDefaults = .standard,
+        fileManager: FileManager = .default,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundle: Bundle = .main
+    ) -> BrainLocalConfiguration? {
+        if let stored = localConfiguration(defaults: defaults),
+           fileManager.isExecutableFile(atPath: stored.cliPath) {
+            return stored
         }
+        return defaultLocalConfiguration(
+            fileManager: fileManager,
+            environment: environment,
+            bundle: bundle
+        )
     }
 
-    static func captureClient(defaults: UserDefaults = .standard) -> (any BrainCaptureAPI)? {
-        switch deploymentMode(defaults: defaults) {
-        case .local:
-            return localConfiguration(defaults: defaults).flatMap {
-                try? LocalBrainClient(configuration: $0)
-            }
-        case .remote:
-            guard let metadata = remoteMetadata(defaults: defaults),
-                  metadata.scopes.contains(.capture) else {
-                return nil
-            }
-            return PairedCaptureClient(metadata: metadata)
-        case nil:
-            return nil
-        }
+    static func client(defaults: UserDefaults = .standard) -> LocalBrainClient? {
+        configuration(defaults: defaults).flatMap { try? LocalBrainClient(configuration: $0) }
     }
 
-    static func knowledgeClient(
-        defaults: UserDefaults = .standard
-    ) -> (any RemoteKnowledgeAPI)? {
-        switch deploymentMode(defaults: defaults) {
-        case .local:
-            return localConfiguration(defaults: defaults).flatMap {
-                try? LocalBrainClient(configuration: $0)
-            }
-        case .remote:
-            guard let metadata = remoteMetadata(defaults: defaults),
-                  metadata.scopes.contains(.read) else {
-                return nil
-            }
-            return try? BrainAPIClient(baseURL: metadata.baseURL, defaults: defaults)
-        case nil:
-            return nil
-        }
+    static func statusClient(defaults: UserDefaults = .standard) -> LocalBrainClient? {
+        client(defaults: defaults)
     }
 
-    static func jobClient(defaults: UserDefaults = .standard) -> (any RemoteBrainJobAPI)? {
-        switch deploymentMode(defaults: defaults) {
-        case .local:
-            return localConfiguration(defaults: defaults).flatMap {
-                try? LocalBrainClient(configuration: $0)
-            }
-        case .remote:
-            return remoteAPIClient(defaults: defaults)
-        case nil:
-            return nil
-        }
+    static func captureClient(defaults: UserDefaults = .standard) -> LocalBrainClient? {
+        client(defaults: defaults)
     }
 
-    static func chatClient(defaults: UserDefaults = .standard) -> (any BrainChatJobAPI)? {
-        switch deploymentMode(defaults: defaults) {
-        case .local:
-            return localConfiguration(defaults: defaults).flatMap {
-                try? LocalBrainClient(configuration: $0)
-            }
-        case .remote:
-            return remoteAPIClient(defaults: defaults)
-        case nil:
-            return nil
-        }
+    static func knowledgeClient(defaults: UserDefaults = .standard) -> LocalBrainClient? {
+        client(defaults: defaults)
     }
 
-    private static func remoteMetadata(
-        defaults: UserDefaults
-    ) -> BrainInstanceMetadata? {
-        guard let data = defaults.data(forKey: BrainAPIClient.metadataDefaultsKey) else {
-            return nil
-        }
-        return try? JSONDecoder().decode(BrainInstanceMetadata.self, from: data)
+    static func jobClient(defaults: UserDefaults = .standard) -> LocalBrainClient? {
+        client(defaults: defaults)
     }
 
-    private static func remoteAPIClient(defaults: UserDefaults) -> BrainAPIClient? {
-        guard let metadata = remoteMetadata(defaults: defaults) else { return nil }
-        return try? BrainAPIClient(baseURL: metadata.baseURL, defaults: defaults)
+    static func chatClient(defaults: UserDefaults = .standard) -> LocalBrainClient? {
+        client(defaults: defaults)
     }
 
-    private static func clearJobContinuations(defaults: UserDefaults) {
-        for key in [
-            "brain.remote.active-job-id",
-            "brain.remote.last-job-id",
-            "brain.remote.refreshed-terminal-job-id",
-            "brain.chat.current-job",
-        ] {
-            defaults.removeObject(forKey: key)
-        }
-    }
 }

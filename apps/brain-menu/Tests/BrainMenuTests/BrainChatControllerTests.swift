@@ -70,18 +70,18 @@ struct BrainChatControllerTests {
         let center = NotificationCenter()
         let capture = NotificationCapture()
 
-        BrainRemoteKnowledgeNavigation.deliver(
+        BrainKnowledgeNavigation.deliver(
             path: "notes/Agent Memory.md",
             center: center
         )
         #expect(capture.paths.isEmpty)
 
         let observer = center.addObserver(
-            forName: BrainRemoteKnowledgeNavigation.notification,
+            forName: BrainKnowledgeNavigation.notification,
             object: nil,
             queue: .main
         ) { notification in
-            if let path = notification.userInfo?[BrainRemoteKnowledgeNavigation.pathKey] as? String {
+            if let path = notification.userInfo?[BrainKnowledgeNavigation.pathKey] as? String {
                 capture.append(path)
             }
         }
@@ -138,7 +138,7 @@ struct BrainChatControllerTests {
             creations: [.success(BrainJobCreated(id: "ask-resume", state: .queued))],
             statuses: [
                 .success(job(id: "ask-resume", state: .running)),
-                .failure(BrainAPIError.transport),
+                .failure(LocalBrainError.commandFailed("offline")),
             ]
         )
         let interrupted = BrainChatController(
@@ -150,7 +150,7 @@ struct BrainChatControllerTests {
 
         await interrupted.submit("Resume this question")
 
-        #expect(interrupted.turns.last?.failure == .offline)
+        #expect(interrupted.turns.last?.failure == .librarian("offline"))
         #expect(defaults.data(forKey: BrainChatController.currentJobDefaultsKey) != nil)
 
         let resumedAPI = ChatJobAPISpy(
@@ -258,12 +258,12 @@ struct BrainChatControllerTests {
 
     @MainActor
     @Test
-    func revokedUnpairedOfflineAndTimeoutFailuresRemainRetryable() async throws {
+    func unavailableAndLocalFailuresRemainRetryable() async throws {
         let cases: [(Error?, BrainChatFailure)] = [
-            (nil, .unpaired),
-            (BrainAPIError.http(status: 403, code: "device_revoked", message: nil, requestID: nil), .revoked),
-            (BrainAPIError.transport, .offline),
-            (BrainAPIError.timedOut, .timedOut),
+            (nil, .unavailable),
+            (LocalBrainError.notInitialized, .unavailable),
+            (LocalBrainError.commandFailed("offline"), .librarian("offline")),
+            (LocalBrainError.commandFailed("timed out"), .timedOut),
         ]
 
         for (error, expected) in cases {
@@ -343,13 +343,13 @@ private actor ChatJobAPISpy: BrainChatJobAPI {
 
     func createJob(kind: BrainJobKind, question: String?) async throws -> BrainJobCreated {
         calls.append(.create(kind: kind, question: question))
-        guard !creations.isEmpty else { throw BrainAPIError.invalidResponse }
+        guard !creations.isEmpty else { throw LocalBrainError.invalidOutput }
         return try creations.removeFirst().get()
     }
 
     func jobStatus(id: String) async throws -> BrainJobStatus {
         calls.append(.status(id: id))
-        guard !statuses.isEmpty else { throw BrainAPIError.invalidResponse }
+        guard !statuses.isEmpty else { throw LocalBrainError.invalidOutput }
         let status = try statuses.removeFirst().get()
         statesServed.append(status.state)
         return status
@@ -381,7 +381,7 @@ private func job(
 private func testDefaults() throws -> UserDefaults {
     let suite = "BrainChatControllerTests.\(UUID().uuidString)"
     guard let defaults = UserDefaults(suiteName: suite) else {
-        throw BrainAPIError.invalidResponse
+        throw LocalBrainError.invalidOutput
     }
     defaults.set(suite, forKey: "test-suite-name")
     return defaults

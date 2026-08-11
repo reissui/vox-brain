@@ -63,7 +63,7 @@ struct MeetingViewsTests {
             .upload,
         ])
         #expect(controller.rows[0].badges.allSatisfy { !$0.accessibilityLabel.isEmpty })
-        #expect(controller.rows[0].accessibilityLabel.contains("Upload status: Delivered"))
+        #expect(controller.rows[0].accessibilityLabel.contains("Upload status: Saved to vault"))
 
         for term in ["roadmap", "Alice Jones", "concise summary", "launch timing"] {
             controller.query = term

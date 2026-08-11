@@ -1182,7 +1182,7 @@ struct MeetingDetailView: View {
                     detail: "Brain is creating the summary, topics, decisions, and follow-up draft."
                 )
             } else {
-                Text("No local analysis yet. The final transcript remains available and uploadable.")
+                Text("No local analysis yet. The final transcript remains available and can be saved to the vault.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -1255,7 +1255,7 @@ struct MeetingDetailView: View {
 
     private func uploadSection(_ model: MeetingDetailViewModel) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Vault delivery").font(.title3.bold())
+            Text("Local vault").font(.title3.bold())
             HStack {
                 if let badge = model.badges.first(where: { $0.kind == .upload }) {
                     Label(badge.title, systemImage: badge.systemImage)
@@ -1263,14 +1263,14 @@ struct MeetingDetailView: View {
                 }
                 Spacer()
                 if model.uploadCanRetry {
-                    Button("Retry Delivery", systemImage: "arrow.clockwise") {
+                    Button("Retry Local Ingest", systemImage: "arrow.clockwise") {
                         Task { await controller.perform(.retryUpload) }
                     }
                 }
                 if model.uploadCanReupload {
                     Button(
-                        model.isVoiceNote ? "Re-upload Changed Voice Note" : "Re-upload Changed Meeting",
-                        systemImage: "icloud.and.arrow.up"
+                        model.isVoiceNote ? "Save Changed Voice Note Again" : "Save Changed Meeting Again",
+                        systemImage: "internaldrive"
                     ) {
                         Task { await controller.perform(.reupload) }
                     }

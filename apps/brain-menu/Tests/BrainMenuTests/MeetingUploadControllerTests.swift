@@ -207,7 +207,7 @@ struct MeetingUploadControllerTests {
         let meeting = completedMeeting(title: "Offline sync")
         try fixture.meetingStore.save(meeting, utterances: sampleUtterances())
         let offline = MeetingUploadAPISpy(
-            captureResults: [.failure(.transport)],
+            captureResults: [.failure(.commandFailed("transport"))],
             statusResults: []
         )
         let first = fixture.controller(api: offline)
@@ -452,7 +452,7 @@ private struct MeetingUploadCall: Equatable, Sendable {
 
 private enum MeetingUploadResult<Value: Sendable>: Sendable {
     case value(Value)
-    case failure(BrainAPIError)
+    case failure(LocalBrainError)
 
     func get() throws -> Value {
         switch self {
@@ -481,13 +481,13 @@ private actor MeetingUploadAPISpy: BrainCaptureAPI {
         idempotencyKey: UUID
     ) async throws -> BrainCaptureReceipt {
         captureCalls.append(MeetingUploadCall(request: capture, idempotencyKey: idempotencyKey))
-        guard !captureResults.isEmpty else { throw BrainAPIError.invalidResponse }
+        guard !captureResults.isEmpty else { throw LocalBrainError.invalidOutput }
         return try captureResults.removeFirst().get()
     }
 
     func captureStatus(id: String) async throws -> BrainCaptureStatus {
         statusIDs.append(id)
-        guard !statusResults.isEmpty else { throw BrainAPIError.invalidResponse }
+        guard !statusResults.isEmpty else { throw LocalBrainError.invalidOutput }
         return try statusResults.removeFirst().get()
     }
 }

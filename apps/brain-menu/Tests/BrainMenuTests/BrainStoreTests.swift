@@ -9,14 +9,14 @@ struct BrainStoreTests {
         BrainOverallState.activity,
         BrainOverallState.failure,
     ])
-    func manualRefreshPublishesPairedRemoteStates(_ overall: BrainOverallState) async throws {
+    func manualRefreshPublishesLocalStates(_ overall: BrainOverallState) async throws {
         let client = StoreAPI(overall: overall)
         let refreshedAt = Date(timeIntervalSince1970: 1_784_112_400)
         let store = BrainStore(client: client, now: { refreshedAt })
 
         await store.refresh()
 
-        #expect(store.isPaired)
+        #expect(store.isReady)
         #expect(store.snapshot?.health.overall == overall)
         #expect(store.snapshot?.refreshedAt == refreshedAt)
         #expect(store.isStale == false)
@@ -25,44 +25,6 @@ struct BrainStoreTests {
         #expect(await client.maximumConcurrentRequests == 1)
     }
 
-    @Test
-    func unpairedIsNeutralAndMakesNoRemoteRequest() async {
-        let client = StoreAPI(paired: false)
-        let store = BrainStore(client: client)
-
-        await store.refresh()
-
-        let presentation = BrainPresentation.state(
-            for: store.snapshot,
-            isPaired: store.isPaired
-        )
-        #expect(store.snapshot == nil)
-        #expect(store.errorMessage == nil)
-        #expect(await client.requests.isEmpty)
-        #expect(presentation.label == "Not paired")
-        #expect(presentation.tone == .neutral)
-    }
-
-    @Test
-    func unpairedRemoteRouteCanReturnToSetupWithoutDeletingPairingData() {
-        let suite = "BrainStoreTests.SetupRoute.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let pairingData = Data("preserve-pairing-metadata".utf8)
-        defaults.set(pairingData, forKey: BrainAPIClient.metadataDefaultsKey)
-        let store = BrainStore(client: nil, defaults: defaults)
-
-        store.selectRemote(defaults: defaults)
-        #expect(store.deploymentMode == .remote)
-
-        store.returnToSetup(defaults: defaults)
-
-        #expect(store.deploymentMode == nil)
-        #expect(BrainRuntime.deploymentMode(defaults: defaults) == nil)
-        #expect(defaults.data(forKey: BrainAPIClient.metadataDefaultsKey) == pairingData)
-        #expect(store.snapshot == nil)
-        #expect(store.errorMessage == nil)
-    }
 
     @Test
     func overlappingRefreshIsIgnoredAndAPIRequestsRemainSequential() async {
@@ -120,7 +82,7 @@ struct BrainStoreTests {
         #expect(store.snapshot?.health.freshness == freshness)
         #expect(store.snapshot?.refreshedAt == snapshotAt)
         #expect(store.isStale)
-        #expect(store.errorMessage == "The remote Brain origin is unavailable. Showing a cached status snapshot.")
+        #expect(store.errorMessage == "The local Brain vault is unavailable. Showing a cached status snapshot.")
         #expect(BrainPresentation.state(for: store.snapshot).tone == .warning)
     }
 
@@ -150,46 +112,6 @@ struct BrainStoreTests {
         #expect(await client.requests == [.status, .health])
     }
 
-    @Test
-    func opensOnlyTheExactValidatedServerSuppliedPrivateSite() async throws {
-        let destination = try #require(URL(string: "https://private.example.test/brain"))
-        let opener = StorePrivateSiteOpener()
-        let client = StoreAPI(siteURL: destination)
-        let store = BrainStore(client: client, privateSiteOpener: opener)
-
-        #expect(store.openPrivateSite() == false)
-        await store.refresh()
-
-        #expect(store.privateSiteURL == destination)
-        #expect(store.openPrivateSite())
-        #expect(opener.openedURLs == [destination])
-    }
-
-    @Test
-    func statusDecodingToleratesMissingSiteAndRejectsEveryUnsafeDestination() throws {
-        let missing = try decodeStatus(siteURL: nil)
-        #expect(missing.siteURL == nil)
-
-        let exact = "https://private.example.test/brain"
-        #expect(try decodeStatus(siteURL: exact).siteURL?.absoluteString == exact)
-
-        for unsafe in [
-            "http://private.example.test",
-            "https://user:secret@private.example.test",
-            "https://private.example.test?token=secret",
-            "https://private.example.test#fragment",
-            "https://private.example.test\\@attacker.test",
-            "https://private.example.test:99999",
-            String(repeating: "x", count: BrainPrivateSiteURL.maximumUTF8Bytes + 1),
-        ] {
-            #expect(try decodeStatus(siteURL: unsafe).siteURL == nil)
-        }
-
-        var wrongType = statusJSONObject()
-        wrongType["site_url"] = 42
-        let data = try JSONSerialization.data(withJSONObject: wrongType)
-        #expect(try JSONDecoder.brainDecoder().decode(BrainStatusReport.self, from: data).siteURL == nil)
-    }
 
     @Test
     func decodesTypedMacMiniQueueAndProgressOperations() throws {
@@ -234,34 +156,6 @@ struct BrainStoreTests {
     }
 }
 
-@MainActor
-private final class StorePrivateSiteOpener: BrainPrivateSiteOpening, @unchecked Sendable {
-    private(set) var openedURLs: [URL] = []
-
-    func open(_ url: URL) -> Bool {
-        openedURLs.append(url)
-        return true
-    }
-}
-
-private func statusJSONObject() -> [String: Any] {
-    [
-        "schema_version": 1,
-        "generated_at": "2026-07-20T10:00:00Z",
-        "vault": ["path": "remote", "state": "clean", "dirty_paths": 0],
-        "counts": ["inbox": 0, "sources": 0, "notes": 0, "people": 0, "projects": 0],
-        "last_run": NSNull(),
-        "services": [],
-    ]
-}
-
-private func decodeStatus(siteURL: String?) throws -> BrainStatusReport {
-    var object = statusJSONObject()
-    if let siteURL { object["site_url"] = siteURL }
-    let data = try JSONSerialization.data(withJSONObject: object)
-    return try JSONDecoder.brainDecoder().decode(BrainStatusReport.self, from: data)
-}
-
 private enum StoreAPIError: Error, LocalizedError, Sendable {
     case failed(String)
 
@@ -278,8 +172,6 @@ private enum StoreRequest: Equatable, Sendable {
 }
 
 private actor StoreAPI: BrainStatusAPI {
-    nonisolated let pairedInstance: BrainInstanceMetadata?
-
     private(set) var requests: [StoreRequest] = []
     private(set) var statusCalls = 0
     private(set) var healthCalls = 0
@@ -292,19 +184,11 @@ private actor StoreAPI: BrainStatusAPI {
     private var statusFailure: String?
 
     init(
-        paired: Bool = true,
         overall: BrainOverallState = .activity,
         delay: Duration = .zero,
         freshness: BrainReportFreshness = .fresh,
         siteURL: URL? = nil
     ) {
-        pairedInstance = paired ? BrainInstanceMetadata(
-            baseURL: URL(string: "https://brain.example.test")!,
-            instanceID: "brain-test",
-            deviceID: "device-test",
-            deviceName: "Test Mac",
-            scopes: [.read]
-        ) : nil
         self.overall = overall
         self.delay = delay
         self.freshness = freshness
@@ -384,16 +268,10 @@ private func makeHealth(
                 scope: "mac_mini_agent",
                 state: overall == .healthy ? .pass : BrainCheckState(rawValue: overall.rawValue) ?? .pass,
                 summary: "Remote agent",
-                detail: "Reported by the paired instance.",
+                detail: "Reported by the local runtime.",
                 remediation: nil
             ),
         ],
         freshness: freshness
     )
-}
-
-extension DashboardScope {
-    static let thisMac = DashboardScope.remoteVault
-    static let macMini = DashboardScope.macMiniAgent
-    static let cloud = DashboardScope.gateway
 }

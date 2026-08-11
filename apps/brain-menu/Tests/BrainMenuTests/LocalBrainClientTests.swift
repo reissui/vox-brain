@@ -16,7 +16,6 @@ struct LocalBrainClientTests {
         #expect(initial.vault.path.hasSuffix("/\(fixture.root.lastPathComponent)/Vault"))
         #expect(FileManager.default.fileExists(atPath: initial.vault.path))
         #expect(initial.counts.inbox == 0)
-        #expect(client.pairedInstance?.instanceID == "local")
 
         let noteID = try #require(UUID(uuidString: "123e4567-e89b-42d3-a456-426614174000"))
         let receipt = try await client.capture(
@@ -93,7 +92,7 @@ struct LocalBrainClientTests {
         defer { defaults.removePersistentDomain(forName: suite) }
         try BrainRuntime.persistLocal(fixture.configuration, defaults: defaults)
 
-        #expect(BrainRuntime.deploymentMode(defaults: defaults) == .local)
+        #expect(BrainRuntime.localConfiguration(defaults: defaults) == fixture.configuration)
         #expect(BrainRuntime.statusClient(defaults: defaults) != nil)
         #expect(BrainRuntime.captureClient(defaults: defaults) != nil)
         #expect(BrainRuntime.knowledgeClient(defaults: defaults) != nil)

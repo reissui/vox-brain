@@ -4,8 +4,8 @@ struct KnowledgeDocument: Identifiable, Hashable, Sendable {
     static let maximumTitleCharacters = 160
     static let maximumSnippetCharacters = 320
 
-    /// Retained for the legacy local index. Remote documents use an internal
-    /// `brain-document` URL and never expose a filesystem location.
+    /// The reading view uses an internal `brain-document` URL and never exposes
+    /// the backing filesystem location to Markdown links.
     let fileURL: URL
     let title: String
     let area: String
@@ -41,7 +41,7 @@ struct KnowledgeDocument: Identifiable, Hashable, Sendable {
     }
 
     init(
-        remoteTitle: String,
+        localTitle: String,
         area: String,
         relativePath: String,
         snippet: String,
@@ -53,7 +53,7 @@ struct KnowledgeDocument: Identifiable, Hashable, Sendable {
         components.queryItems = [URLQueryItem(name: "path", value: relativePath)]
 
         fileURL = components.url ?? URL(string: "brain-document://open")!
-        title = remoteTitle
+        title = localTitle
         self.area = area
         self.relativePath = relativePath
         self.snippet = snippet
