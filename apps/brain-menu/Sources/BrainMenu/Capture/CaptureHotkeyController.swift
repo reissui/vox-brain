@@ -34,6 +34,9 @@ struct CaptureHotkey: Codable, Equatable, Hashable, Sendable {
         modifiers: [.control, .option]
     )
 
+    static let commandShiftD = Self(keyCode: 2, modifiers: [.command, .shift])
+    static let controlOptionL = Self(keyCode: 37, modifiers: [.control, .option])
+
     static let controlOptionM = Self(
         keyCode: 46, // kVK_ANSI_M
         modifiers: [.control, .option]
@@ -44,6 +47,17 @@ struct CaptureHotkey: Codable, Equatable, Hashable, Sendable {
             && !Self.modifierOnlyKeyCodes.contains(keyCode)
             && !modifiers.intersection(.primary).isEmpty
             && modifiers.isSubset(of: [.command, .control, .option, .shift])
+    }
+
+    var displayName: String {
+        var parts: [String] = []
+        if modifiers.contains(.control) { parts.append("Control") }
+        if modifiers.contains(.option) { parts.append("Option") }
+        if modifiers.contains(.shift) { parts.append("Shift") }
+        if modifiers.contains(.command) { parts.append("Command") }
+        let keys: [UInt16: String] = [2: "D", 11: "B", 15: "R", 37: "L", 46: "M"]
+        parts.append(keys[keyCode] ?? "Key \(keyCode)")
+        return parts.joined(separator: "–")
     }
 
     private static let modifierOnlyKeyCodes: Set<UInt16> = [

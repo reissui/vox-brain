@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DictationHistoryView: View {
     let history: DictationHistoryStore
+    let liveDictation: ContinuousDictationController
     let speech: SpeechSettingsController
     let onboarding: OnboardingController
 
@@ -90,8 +91,36 @@ struct DictationHistoryView: View {
                 .accessibilityHint("Requires confirmation before deleting saved snippets")
             }
 
-            Text("VoxType owns dictation and output. This history reader only reads VoxType's existing local log after delivery; it never changes VoxType, its configuration, shortcut, or output path.")
+            Text("VoxType owns recording, transcription, and output. Brain starts Live Dictation on request and reads VoxType's existing local log only after delivery.")
                 .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Label("Live Dictation", systemImage: "waveform.badge.mic")
+                        .font(.headline)
+                    Text(liveDictationDetail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button(liveDictation.state.isActive ? "Stop" : "Start") {
+                    liveDictation.toggle()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(liveDictation.state.isActive ? .red : .accentColor)
+                .disabled(liveDictation.state == .stopping)
+                .accessibilityLabel(
+                    liveDictation.state.isActive
+                        ? "Stop Live Dictation"
+                        : "Start Live Dictation"
+                )
+            }
+
+            if let error = liveDictation.state.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("VoxType shortcut").font(.headline)
@@ -99,6 +128,21 @@ struct DictationHistoryView: View {
                 Text(speech.hotkeyState.detail)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private var liveDictationDetail: String {
+        switch liveDictation.state {
+        case .idle:
+            "Ready · \(liveDictation.hotkey.displayName)"
+        case .starting:
+            "Starting…"
+        case .locked(let segment):
+            "Listening · segment \(segment)"
+        case .stopping:
+            "Finishing and pasting…"
+        case .unavailable, .failed:
+            "Ready to retry · \(liveDictation.hotkey.displayName)"
         }
     }
 

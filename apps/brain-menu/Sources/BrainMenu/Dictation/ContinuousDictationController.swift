@@ -14,7 +14,7 @@ enum ContinuousDictationFailure: Error, Equatable, LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case .shortcutConflict:
-            "Control-Option-D is already in use. Choose another app shortcut; Brain has not changed Quick Capture or VoxType's shortcut."
+            "That Live Dictation shortcut is already in use. Choose another in Brain Settings."
         case .configurationFailed:
             "Brain could not set VoxType's maximum recording duration. Check VoxType Settings, then retry."
         case .voxTypeUnavailable:
@@ -59,22 +59,25 @@ enum ContinuousDictationState: Equatable, Sendable {
     }
 }
 
-/// Owns the explicit privacy-compatible continuous mode. It registers only
-/// Control-Option-D through Carbon and never observes or interprets Fn events.
+/// Owns the explicit privacy-compatible continuous mode. It registers one
+/// user-selected Carbon shortcut and never observes or interprets Fn events.
 /// VoxType remains the sole audio and paste owner.
 @MainActor
 @Observable
 final class ContinuousDictationController {
-    static let hotkey = CaptureHotkey.controlOptionD
-    static let shortcutDescription = "Control-Option-D"
+    static let defaultHotkey = CaptureHotkey.controlOptionD
+    static let keyCodeDefaultsKey = "BrainMenu.liveDictation.keyCode"
+    static let modifiersDefaultsKey = "BrainMenu.liveDictation.modifiers"
     static let maximumDurationSeconds = 3_600
     static let rolloverInterval: Duration = .seconds(55 * 60)
     static let statusTimeout: Duration = .seconds(30)
 
     private(set) var state: ContinuousDictationState = .idle
+    private(set) var hotkey: CaptureHotkey
     private(set) var isShortcutRegistered = false
     private(set) var shortcutErrorMessage: String?
 
+    @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let voxType: (any VoxTypeControlling)?
     @ObservationIgnored private let statuses: (any VoxTypeStatusObserving)?
     @ObservationIgnored private let configuration: any VoxTypeContinuousConfigurationEditing
@@ -95,6 +98,7 @@ final class ContinuousDictationController {
         configuration: any VoxTypeContinuousConfigurationEditing = VoxTypeConfigurationEditor(),
         dictation: DictationController,
         audioCapture: any DictationAudioCaptureChecking = NoMeetingAudioCapture(),
+        defaults: UserDefaults = .standard,
         registrar: any CaptureHotkeyRegistering = SystemCaptureHotkeyRegistrar(identifier: 2),
         rolloverSleep: @escaping @Sendable (Duration) async throws -> Void = { duration in
             try await Task.sleep(for: duration)
@@ -108,15 +112,17 @@ final class ContinuousDictationController {
         self.configuration = configuration
         self.dictation = dictation
         self.audioCapture = audioCapture
+        self.defaults = defaults
         self.registrar = registrar
         self.rolloverSleep = rolloverSleep
         self.timeoutSleep = timeoutSleep
+        hotkey = Self.persistedHotkey(defaults: defaults) ?? Self.defaultHotkey
     }
 
     @discardableResult
     func startShortcut() -> Bool {
         do {
-            try registrar.register(Self.hotkey) { [weak self] in self?.toggle() }
+            try registrar.register(hotkey) { [weak self] in self?.toggle() }
             isShortcutRegistered = true
             shortcutErrorMessage = nil
             if case .failed(.shortcutConflict) = state { state = .idle }
@@ -134,6 +140,39 @@ final class ContinuousDictationController {
         isShortcutRegistered = false
         rolloverTask?.cancel()
         rolloverTask = nil
+    }
+
+    func record(keyCode: UInt16, modifiers: CaptureHotkeyModifiers) throws {
+        let replacement = CaptureHotkey(keyCode: keyCode, modifiers: modifiers)
+        guard replacement.isValid else { throw CaptureHotkeyError.invalidShortcut }
+
+        let previous = hotkey
+        registrar.unregister()
+        do {
+            try registrar.register(replacement) { [weak self] in self?.toggle() }
+            hotkey = replacement
+            defaults.set(Int(replacement.keyCode), forKey: Self.keyCodeDefaultsKey)
+            defaults.set(Int(replacement.modifiers.rawValue), forKey: Self.modifiersDefaultsKey)
+            isShortcutRegistered = true
+            shortcutErrorMessage = nil
+        } catch {
+            hotkey = previous
+            _ = startShortcut()
+            throw error
+        }
+    }
+
+    static func persistedHotkey(defaults: UserDefaults) -> CaptureHotkey? {
+        guard defaults.object(forKey: keyCodeDefaultsKey) != nil,
+              defaults.object(forKey: modifiersDefaultsKey) != nil else { return nil }
+        let keyCode = defaults.integer(forKey: keyCodeDefaultsKey)
+        let modifiers = defaults.integer(forKey: modifiersDefaultsKey)
+        guard keyCode >= 0, keyCode <= Int(UInt16.max), modifiers >= 0 else { return nil }
+        let hotkey = CaptureHotkey(
+            keyCode: UInt16(keyCode),
+            modifiers: CaptureHotkeyModifiers(rawValue: UInt(modifiers))
+        )
+        return hotkey.isValid ? hotkey : nil
     }
 
     func toggle() {

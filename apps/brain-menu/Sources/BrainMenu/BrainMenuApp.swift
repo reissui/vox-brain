@@ -128,6 +128,7 @@ final class BrainAppControllerGraph {
     let captureHotkey: CaptureHotkeyController
     let dictationHistory: DictationHistoryStore
     let dictation: DictationController
+    let continuousDictation: ContinuousDictationController
     let meeting: MeetingController
     let meetingHotkey: MeetingHotkeyController
     let meetingNotes: MeetingNotesController
@@ -154,6 +155,7 @@ final class BrainAppControllerGraph {
     @ObservationIgnored private let meetingAnalysisFactory: @MainActor () -> (any MeetingDetailAnalysisControlling)?
     @ObservationIgnored private var lastNotifiedMeetingID: UUID?
     @ObservationIgnored private var dictationStartedAt: Date?
+    @ObservationIgnored private var lastDictationState: DictationState = .idle
     @ObservationIgnored private var activityClockTask: Task<Void, Never>?
     @ObservationIgnored private let now: @MainActor () -> Date
 
@@ -213,6 +215,7 @@ final class BrainAppControllerGraph {
         meetingNotesStore: (any MeetingNotesStoring)? = nil,
         dictationHistory: DictationHistoryStore = DictationHistoryStore(),
         dictation: DictationController? = nil,
+        continuousDictation: ContinuousDictationController? = nil,
         recordingIsland: RecordingIslandController? = nil,
         meetings: MeetingsController = MeetingsController(),
         launchAtLogin: LaunchAtLoginController = LaunchAtLoginController(),
@@ -245,7 +248,18 @@ final class BrainAppControllerGraph {
 
         let ownership = MeetingAudioOwnership()
         meetingAudioOwnership = ownership
-        self.dictation = dictation ?? DictationController(audioCapture: ownership)
+        let voxType = try? VoxTypeClient.discover()
+        let nativeDictation = dictation ?? DictationController(
+            voxType: voxType,
+            audioCapture: ownership
+        )
+        self.dictation = nativeDictation
+        self.continuousDictation = continuousDictation ?? ContinuousDictationController(
+            voxType: voxType,
+            statuses: voxType,
+            dictation: nativeDictation,
+            audioCapture: ownership
+        )
         let microphoneSelections = MeetingMicrophoneSelectionStore()
         let microphoneInventory = CoreAudioMeetingMicrophoneInventory()
         let nativeMeeting: MeetingController
@@ -340,6 +354,7 @@ final class BrainAppControllerGraph {
         store.start()
         librarianAI.start()
         _ = meetingHotkey.start()
+        _ = continuousDictation.startShortcut()
         updates.start()
         dictationHistory.startMonitoring()
         observeDictation()
@@ -364,6 +379,7 @@ final class BrainAppControllerGraph {
         store.stop()
         librarianAI.stop()
         meetingHotkey.stop()
+        continuousDictation.stopShortcut()
         updates.stop()
         dictationHistory.stopMonitoring()
         dictation.stopMonitoring()
@@ -429,13 +445,17 @@ final class BrainAppControllerGraph {
     fileprivate func performRecordingIslandAction(_ action: RecordingIslandAction) async {
         switch action {
         case .cancel:
-            return
+            dictation.handle(.cancel)
         case .pause:
             await meeting.pause()
         case .resume:
             await meeting.resume()
         case .stop:
-            await meeting.stop()
+            if continuousDictation.state.isActive {
+                continuousDictation.stop()
+            } else {
+                await meeting.stop()
+            }
         case .keepRecording:
             meeting.keepRecording()
         case .showTranscript:
@@ -483,6 +503,8 @@ final class BrainAppControllerGraph {
                 }
                 self.activityRevision &+= 1
                 self.syncActivityClock()
+                self.syncRecordingIsland(previousDictationState: self.lastDictationState)
+                self.lastDictationState = self.dictation.state
                 self.observeDictation()
             }
         }
@@ -510,7 +532,7 @@ final class BrainAppControllerGraph {
         }
     }
 
-    private func syncRecordingIsland() {
+    private func syncRecordingIsland(previousDictationState: DictationState = .idle) {
         if meeting.shouldPresentRecordingIsland {
             recordingIsland.updateMeeting(
                 meeting.state,
@@ -521,6 +543,18 @@ final class BrainAppControllerGraph {
                 guidance: meeting.audioGuidance,
                 microphone: meeting.microphonePresentation
             )
+        } else if dictation.state != .idle {
+            recordingIsland.updateDictation(
+                dictation.state,
+                startedAt: dictationStartedAt,
+                shortcutDescription: continuousDictation.state.isActive
+                    ? continuousDictation.hotkey.displayName
+                    : dictation.shortcutDescription,
+                isContinuous: continuousDictation.state.isActive,
+                now: now()
+            )
+        } else if previousDictationState == .transcribing {
+            recordingIsland.dictationSucceeded(now: now())
         } else {
             recordingIsland.hideImmediately()
         }

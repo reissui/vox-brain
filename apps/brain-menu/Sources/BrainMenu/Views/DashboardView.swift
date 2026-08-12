@@ -121,6 +121,7 @@ struct DashboardView: View {
                         if let graph {
                             DictationHistoryView(
                                 history: graph.dictationHistory,
+                                liveDictation: graph.continuousDictation,
                                 speech: graph.speechSettings,
                                 onboarding: graph.onboarding
                             )
@@ -163,6 +164,7 @@ struct DashboardView: View {
                                 selection: $settingsSelection,
                                 launchAtLogin: graph.launchAtLogin,
                                 meetingHotkey: graph.meetingHotkey,
+                                continuousDictation: graph.continuousDictation,
                                 speech: graph.speechSettings,
                                 updates: graph.updates,
                                 onboarding: graph.onboarding

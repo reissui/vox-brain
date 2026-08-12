@@ -231,9 +231,14 @@ struct AppIntegrationTests {
 
         voxType.yield(appRuntimeStatus(.recording))
         await eventually {
-            graph.activity == .dictation(label: "Dictating", startedAt: dictationStart)
+            guard graph.activity == .dictation(
+                label: "Dictating",
+                startedAt: dictationStart
+            ), case .dictation(let island) = graph.recordingIsland.presentation else {
+                return false
+            }
+            return island.phase == .listening && !island.isContinuous
         }
-
         voxType.yield(appRuntimeStatus(.idle))
         await eventually { graph.activity == .idle }
 
@@ -283,6 +288,35 @@ struct AppIntegrationTests {
         await stoppingVoiceNote.value
         #expect(meeting.state == .completed)
         #expect(graph.activity == .idle)
+    }
+
+    @Test
+    func graphOwnsAndRegistersTheConfiguredLiveDictationShortcut() throws {
+        let suite = "AppIntegrationLiveDictation.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let registrar = AppCaptureHotkeyRegistrar()
+        let dictation = DictationController(voxType: nil)
+        let continuous = ContinuousDictationController(
+            voxType: nil,
+            statuses: nil,
+            dictation: dictation,
+            defaults: defaults,
+            registrar: registrar
+        )
+        let graph = makeGraph(
+            dictation: dictation,
+            continuousDictation: continuous
+        )
+
+        graph.start()
+        #expect(graph.continuousDictation === continuous)
+        #expect(registrar.registeredHotkeys == [.controlOptionD])
+        #expect(continuous.isShortcutRegistered)
+
+        graph.stop()
+        #expect(!continuous.isShortcutRegistered)
+        #expect(registrar.unregisterCalls == 1)
     }
 
     @Test
@@ -504,7 +538,7 @@ struct AppIntegrationTests {
     }
 
     @Test
-    func voxTypeStatusDrivesMenuBarButNeverReplacesBrainsRecordingIsland() async {
+    func voxTypeStatusAutomaticallyPresentsDictationWithoutReplacingActiveMeetings() async {
         let voxType = AppStreamingVoxType()
         let dictation = DictationController(voxType: voxType, sleep: { _ in })
         let meeting = MeetingController(
@@ -521,13 +555,19 @@ struct AppIntegrationTests {
 
         voxType.yield(appRuntimeStatus(.recording))
         await eventually {
-            if case .dictation = graph.activity { return true }
-            return false
+            guard case .dictation(let value) = graph.recordingIsland.presentation else {
+                return false
+            }
+            return value.phase == .listening
         }
-        #expect(graph.recordingIsland.presentation == .hidden)
         voxType.yield(appRuntimeStatus(.transcribing))
-        await eventually { graph.activity == .transcribing("Transcribing dictation") }
-        #expect(graph.recordingIsland.presentation == .hidden)
+        await eventually {
+            guard graph.activity == .transcribing("Transcribing dictation"),
+                  case .dictation(let value) = graph.recordingIsland.presentation else {
+                return false
+            }
+            return value.phase == .transcribing
+        }
 
         // The graph's initial onboarding refresh is deliberately asynchronous.
         // This test owns a ready fixture, so wait until it is observable.
@@ -555,14 +595,11 @@ struct AppIntegrationTests {
         #expect(graph.meetingSavedNotice?.message.contains("top of the list") == true)
 
         voxType.yield(appRuntimeStatus(.recording))
-        await Task.yield()
-        switch graph.recordingIsland.presentation {
-        case .hidden:
-            break // The injected zero-delay auto-hide completed.
-        case .meeting(let stillSaved):
-            #expect(stillSaved.phase == .saved)
-        case .dictation:
-            Issue.record("Standalone VoxType must not replace the meeting-saved notification")
+        await eventually {
+            guard case .dictation(let value) = graph.recordingIsland.presentation else {
+                return false
+            }
+            return value.phase == .listening
         }
 
         graph.stop()
@@ -833,12 +870,20 @@ struct AppIntegrationTests {
         onboarding: OnboardingController? = nil,
         meeting: MeetingController? = nil,
         dictation: DictationController? = nil,
+        continuousDictation: ContinuousDictationController? = nil,
         meetings: MeetingsController? = nil,
         now: @escaping @MainActor () -> Date = Date.init,
         meetingAnalysisFactory: @escaping @MainActor () -> (any MeetingDetailAnalysisControlling)? = { nil },
         captureRegistrar: AppCaptureHotkeyRegistrar = AppCaptureHotkeyRegistrar()
     ) -> BrainAppControllerGraph {
         let onboarding = onboarding ?? AppOnboardingFixture.fallbackController()
+        let dictation = dictation ?? DictationController(voxType: nil)
+        let continuousDictation = continuousDictation ?? ContinuousDictationController(
+            voxType: nil,
+            statuses: nil,
+            dictation: dictation,
+            registrar: AppCaptureHotkeyRegistrar()
+        )
         return BrainAppControllerGraph(
             store: store,
             onboarding: onboarding,
@@ -849,7 +894,8 @@ struct AppIntegrationTests {
                     .appendingPathComponent("AppIntegrationDictation-\(UUID().uuidString)")
                     .appendingPathComponent("Dictation")
             ),
-            dictation: dictation ?? DictationController(voxType: nil),
+            dictation: dictation,
+            continuousDictation: continuousDictation,
             recordingIsland: appTestIsland(),
             meetings: meetings ?? MeetingsController(
                 store: AppEmptyMeetingStore(),
@@ -885,12 +931,12 @@ struct AppIntegrationTests {
     }
 
     private func eventually(
-        attempts: Int = 200,
+        attempts: Int = 5_000,
         _ condition: @escaping @MainActor () -> Bool
     ) async {
         for _ in 0..<attempts {
             if condition() { return }
-            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(1))
         }
         Issue.record("Condition did not become true")
     }

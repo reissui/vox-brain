@@ -70,6 +70,8 @@ struct RecordingIslandControllerTests {
 
         controller.showDictation(.listening, startedAt: start, level: 0.5)
         #expect(controller.controls == [.cancel])
+        controller.showDictation(.listening, startedAt: start, isContinuous: true)
+        #expect(controller.controls == [.stop])
         controller.showDictation(.locked, startedAt: start)
         #expect(controller.controls == [.cancel])
         controller.showDictation(.locked, startedAt: start, isContinuous: true)
