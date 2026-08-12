@@ -12,7 +12,8 @@ struct LiveTranscriptControllerTests {
             client: FakeLiveTranscriptionClient(),
             engine: .whisper,
             originHostTimestamp: 100,
-            wavDirectory: fixture.wavDirectory
+            wavDirectory: fixture.wavDirectory,
+            chunkDuration: LiveTranscriptionService.previewChunkDuration
         )
         let controller = LiveTranscriptController(service: service)
         var checkpoints: [[MeetingUtterance]] = []
@@ -21,7 +22,7 @@ struct LiveTranscriptControllerTests {
         await controller.append(fixture.buffer(
             source: .microphone,
             hostTimestamp: 100,
-            duration: 10,
+            duration: 3,
             amplitude: 0.25
         ))
         await controller.waitForPendingPreview()

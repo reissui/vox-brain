@@ -42,8 +42,9 @@ struct MeetingLiveTranscriptRowModel: Equatable, Identifiable, Sendable {
     let id: UUID
     let timestamp: String
     let speaker: String
-    let text: String
+    var text: String
     let source: MeetingAudioSource
+    var endMilliseconds: Int64
 
     var accessibilityLabel: String { "\(timestamp), \(speaker): \(text)" }
 }
@@ -139,15 +140,23 @@ struct MeetingLiveViewModel: Equatable, Sendable {
         transcript = snapshot.utterances
             .filter { !$0.suppressed }
             .sorted(by: Self.transcriptOrder)
-            .map {
-                MeetingLiveTranscriptRowModel(
-                    id: $0.id,
-                    timestamp: Self.timestamp($0.startMilliseconds),
-                    speaker: $0.humanName
-                        ?? SpeakerEditor.defaultDisplayName(for: $0.baseSpeakerID),
-                    text: $0.text,
-                    source: $0.source
-                )
+            .reduce(into: []) { rows, utterance in
+                if let last = rows.indices.last,
+                   rows[last].source == utterance.source,
+                   rows[last].endMilliseconds == utterance.startMilliseconds {
+                    rows[last].text += " " + utterance.text
+                    rows[last].endMilliseconds = utterance.endMilliseconds
+                } else {
+                    rows.append(MeetingLiveTranscriptRowModel(
+                        id: utterance.id,
+                        timestamp: Self.timestamp(utterance.startMilliseconds),
+                        speaker: utterance.humanName
+                            ?? SpeakerEditor.defaultDisplayName(for: utterance.baseSpeakerID),
+                        text: utterance.text,
+                        source: utterance.source,
+                        endMilliseconds: utterance.endMilliseconds
+                    ))
+                }
             }
         previewMessage = Self.previewMessage(snapshot.previewLag)
         errorMessages = snapshot.transcriptFailures.map {
