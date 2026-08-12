@@ -159,6 +159,7 @@ actor LiveTranscriptionService {
     typealias EventHandler = @Sendable (LiveTranscriptionEvent) async -> Void
 
     static let defaultChunkDuration: TimeInterval = 10
+    static let previewChunkDuration: TimeInterval = 5
     static let defaultMaximumPendingChunksPerSource = 6
     static let defaultVoiceThreshold: Float = 0.01
 
@@ -198,7 +199,8 @@ actor LiveTranscriptionService {
     ) throws {
         guard originHostTimestamp.isFinite,
               chunkDuration.isFinite,
-              chunkDuration == Self.defaultChunkDuration,
+              chunkDuration == Self.defaultChunkDuration
+                || chunkDuration == Self.previewChunkDuration,
               maximumPendingChunksPerSource > 0,
               maximumPendingChunksPerSource <= Self.defaultMaximumPendingChunksPerSource,
               voiceThreshold.isFinite,

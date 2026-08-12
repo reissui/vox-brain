@@ -36,19 +36,13 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
         panel = makePanel()
     }
 
-    /// Attaches the recorder's own controller. A normal meeting opens without
-    /// activating Brain; Voice Notes deliberately remain island-only.
+    /// Attaches the recorder's own controller and opens without activating Brain.
     func beginSession(
         transcriptController: LiveTranscriptController,
         recordingKind: MeetingRecordingKind,
         meetingID: UUID? = nil
     ) {
         self.recordingKind = recordingKind
-        guard recordingKind == .meeting else {
-            dashboardController.attachTranscript(nil)
-            hide()
-            return
-        }
         if let meetingID {
             dashboardController.attachSession(
                 transcriptController: transcriptController,
@@ -69,8 +63,7 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
     /// Reuses the same application-lifetime panel and dashboard. `orderFront`
     /// does not activate the application or steal focus from the current app.
     func showTranscript() {
-        guard recordingKind == .meeting,
-              dashboardController.transcriptController != nil else { return }
+        guard dashboardController.transcriptController != nil else { return }
         isPresented = true
         panelPresentationHandler(panel)
     }
@@ -92,7 +85,7 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        panel.title = "Live Meeting Transcript"
+        panel.title = "Live Transcript"
         panel.isReleasedWhenClosed = false
         panel.level = .floating
         panel.isFloatingPanel = true

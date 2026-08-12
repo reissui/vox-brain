@@ -18,17 +18,16 @@ Brain changes only the speech engine or model the user explicitly selects and
 the maximum recording duration when the user starts Live Dictation.
 
 **Live Dictation** stays active until stopped and uses a configurable global
-shortcut in **Settings → Shortcuts**. Every VoxType dictation session,
-including its normal shortcut, automatically opens Brain's recording island.
+shortcut in **Settings → Shortcuts**.
 
 VoxType model downloads and app updates may use the network. They are optional:
 local capture, Markdown storage, search, and reading remain local.
 
 ## Meetings: floating Transcript / Notes panel
 
-During a meeting, Brain presents a floating **Transcript / Notes** panel. The
-Transcript tab shows the local VoxType transcription; the Notes tab is an
-editable meeting scratchpad.
+During a meeting or Voice Note, Brain presents a floating **Transcript / Notes**
+panel. The Transcript tab shows the local VoxType transcription; the Notes tab
+is an editable meeting scratchpad.
 
 - Closing the panel hides it; it does not stop recording or discard the
   meeting. Reopen the panel to return to the same in-progress session.

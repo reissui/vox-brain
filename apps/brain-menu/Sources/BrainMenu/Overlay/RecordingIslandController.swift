@@ -285,21 +285,15 @@ enum RecordingIslandPresentation: Equatable, Sendable {
             case .chooseMicrophone, .saved:
                 []
             case .starting, .finalizing:
-                presentation.isVoiceNote ? [] : [.showTranscript]
+                [.showTranscript]
             case .recording:
-                presentation.isVoiceNote
-                    ? [.pause, .stop]
-                    : [.showTranscript, .pause, .stop]
+                [.showTranscript, .pause, .stop]
             case .paused:
-                presentation.isVoiceNote
-                    ? [.resume, .stop]
-                    : [.showTranscript, .resume, .stop]
+                [.showTranscript, .resume, .stop]
             case .stopSuggested:
                 // A suggestion has no implicit default. Stop can happen only
                 // when its explicit button dispatches `.stop`.
-                presentation.isVoiceNote
-                    ? [.stop, .keepRecording]
-                    : [.showTranscript, .stop, .keepRecording]
+                [.showTranscript, .stop, .keepRecording]
             }
         }
     }

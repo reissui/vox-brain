@@ -155,7 +155,6 @@ final class BrainAppControllerGraph {
     @ObservationIgnored private let meetingAnalysisFactory: @MainActor () -> (any MeetingDetailAnalysisControlling)?
     @ObservationIgnored private var lastNotifiedMeetingID: UUID?
     @ObservationIgnored private var dictationStartedAt: Date?
-    @ObservationIgnored private var lastDictationState: DictationState = .idle
     @ObservationIgnored private var activityClockTask: Task<Void, Never>?
     @ObservationIgnored private let now: @MainActor () -> Date
 
@@ -459,8 +458,7 @@ final class BrainAppControllerGraph {
         case .keepRecording:
             meeting.keepRecording()
         case .showTranscript:
-            guard meeting.currentMeeting?.recordingKind == .meeting,
-                  meeting.isCapturingAudio else { return }
+            guard meeting.isCapturingAudio else { return }
             meetingLivePanel.showTranscript()
         }
     }
@@ -503,8 +501,6 @@ final class BrainAppControllerGraph {
                 }
                 self.activityRevision &+= 1
                 self.syncActivityClock()
-                self.syncRecordingIsland(previousDictationState: self.lastDictationState)
-                self.lastDictationState = self.dictation.state
                 self.observeDictation()
             }
         }
@@ -532,7 +528,7 @@ final class BrainAppControllerGraph {
         }
     }
 
-    private func syncRecordingIsland(previousDictationState: DictationState = .idle) {
+    private func syncRecordingIsland() {
         if meeting.shouldPresentRecordingIsland {
             recordingIsland.updateMeeting(
                 meeting.state,
@@ -543,18 +539,6 @@ final class BrainAppControllerGraph {
                 guidance: meeting.audioGuidance,
                 microphone: meeting.microphonePresentation
             )
-        } else if dictation.state != .idle {
-            recordingIsland.updateDictation(
-                dictation.state,
-                startedAt: dictationStartedAt,
-                shortcutDescription: continuousDictation.state.isActive
-                    ? continuousDictation.hotkey.displayName
-                    : dictation.shortcutDescription,
-                isContinuous: continuousDictation.state.isActive,
-                now: now()
-            )
-        } else if previousDictationState == .transcribing {
-            recordingIsland.dictationSucceeded(now: now())
         } else {
             recordingIsland.hideImmediately()
         }
@@ -944,7 +928,8 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             engine: engine,
             originHostTimestamp: ProcessInfo.processInfo.systemUptime,
             wavDirectory: store.directoryURL(for: request.meetingID)
-                .appendingPathComponent(".transcription", isDirectory: true)
+                .appendingPathComponent(".transcription", isDirectory: true),
+            chunkDuration: LiveTranscriptionService.previewChunkDuration
         ))
         let writer = try MeetingAudioWriter(
             meetingDirectory: store.directoryURL(for: request.meetingID),

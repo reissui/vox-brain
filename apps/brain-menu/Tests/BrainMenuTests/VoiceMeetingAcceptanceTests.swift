@@ -7,7 +7,7 @@ import Testing
 @Suite(.serialized)
 struct VoiceMeetingAcceptanceTests {
     @Test
-    func voiceNotesRemainCompactAndDoNotExposeTheMeetingNotesPanel() throws {
+    func voiceNotesRemainCompactAndExposeTheLiveTranscript() throws {
         let island = try acceptanceIsland(suite: "voice-note-notes-exclusion")
         island.present(.meeting(RecordingIslandMeetingPresentation(
             phase: .recording,
@@ -16,8 +16,7 @@ struct VoiceMeetingAcceptanceTests {
             startedAt: Date(timeIntervalSince1970: 1_000)
         )))
 
-        #expect(island.controls == [.pause, .stop])
-        #expect(!island.controls.contains(.showTranscript))
+        #expect(island.controls == [.showTranscript, .pause, .stop])
         #expect(island.panel.frame.size == RecordingIslandController.meetingPanelSize)
         island.hideImmediately()
     }
