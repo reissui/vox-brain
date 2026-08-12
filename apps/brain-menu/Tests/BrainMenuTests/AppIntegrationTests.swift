@@ -231,13 +231,10 @@ struct AppIntegrationTests {
 
         voxType.yield(appRuntimeStatus(.recording))
         await eventually {
-            guard graph.activity == .dictation(
+            graph.activity == .dictation(
                 label: "Dictating",
                 startedAt: dictationStart
-            ), case .dictation(let island) = graph.recordingIsland.presentation else {
-                return false
-            }
-            return island.phase == .listening && !island.isContinuous
+            ) && graph.recordingIsland.presentation == .hidden
         }
         voxType.yield(appRuntimeStatus(.idle))
         await eventually { graph.activity == .idle }
@@ -538,7 +535,7 @@ struct AppIntegrationTests {
     }
 
     @Test
-    func voxTypeStatusAutomaticallyPresentsDictationWithoutReplacingActiveMeetings() async {
+    func voxTypeStatusTracksDictationWithoutPresentingOrReplacingTheMeetingIsland() async {
         let voxType = AppStreamingVoxType()
         let dictation = DictationController(voxType: voxType, sleep: { _ in })
         let meeting = MeetingController(
@@ -555,18 +552,13 @@ struct AppIntegrationTests {
 
         voxType.yield(appRuntimeStatus(.recording))
         await eventually {
-            guard case .dictation(let value) = graph.recordingIsland.presentation else {
-                return false
-            }
-            return value.phase == .listening
+            guard case .dictation = graph.activity else { return false }
+            return graph.recordingIsland.presentation == .hidden
         }
         voxType.yield(appRuntimeStatus(.transcribing))
         await eventually {
-            guard graph.activity == .transcribing("Transcribing dictation"),
-                  case .dictation(let value) = graph.recordingIsland.presentation else {
-                return false
-            }
-            return value.phase == .transcribing
+            graph.activity == .transcribing("Transcribing dictation")
+                && graph.recordingIsland.presentation == .hidden
         }
 
         // The graph's initial onboarding refresh is deliberately asynchronous.
@@ -593,14 +585,6 @@ struct AppIntegrationTests {
         }
         #expect(saved.phase == .saved)
         #expect(graph.meetingSavedNotice?.message.contains("top of the list") == true)
-
-        voxType.yield(appRuntimeStatus(.recording))
-        await eventually {
-            guard case .dictation(let value) = graph.recordingIsland.presentation else {
-                return false
-            }
-            return value.phase == .listening
-        }
 
         graph.stop()
         await dictation.waitForMonitoringToStop()

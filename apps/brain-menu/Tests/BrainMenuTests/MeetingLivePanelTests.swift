@@ -124,7 +124,7 @@ struct MeetingLivePanelTests {
     }
 
     @Test
-    func voiceNotesNeverAttachOrAutoShowTheDashboard() throws {
+    func voiceNotesAttachAndAutoShowTheLiveTranscript() throws {
         var presentationCount = 0
         let fixture = try makeFixture { _ in presentationCount += 1 }
 
@@ -133,9 +133,10 @@ struct MeetingLivePanelTests {
             recordingKind: .voiceNote
         )
 
-        #expect(presentationCount == 0)
-        #expect(!fixture.panel.isPresented)
-        #expect(fixture.dashboard.transcriptController == nil)
+        #expect(presentationCount == 1)
+        #expect(fixture.panel.isPresented)
+        #expect(fixture.dashboard.transcriptController === fixture.firstTranscript)
+        fixture.panel.hide()
     }
 
     @Test

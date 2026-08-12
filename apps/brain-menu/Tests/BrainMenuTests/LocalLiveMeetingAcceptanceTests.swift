@@ -167,13 +167,15 @@ extension AppIntegrationTests {
             #expect(!markdown.contains(LocalLiveMeetingVoxTypeClient.previewText))
 
             meeting.resetCompletedMeeting()
-            let panelWasVisibleBeforeVoiceNote = graph.meetingLivePanel.isPresented
             await meeting.startVoiceNote()
-            #expect(panelWasVisibleBeforeVoiceNote)
             #expect(meeting.currentMeeting?.recordingKind == .voiceNote)
             #expect(meeting.state == .recording)
-            #expect(!graph.meetingLivePanel.isPresented)
-            #expect(graph.meetingLiveDashboard.transcriptController == nil)
+            #expect(graph.meetingLivePanel.isPresented)
+            #expect(graph.meetingLivePanel.panel === originalPanel)
+            #expect(graph.meetingLivePanel.recordingKind == .voiceNote)
+            #expect(
+                graph.meetingLiveDashboard.transcriptController
+                    === recorder.liveTranscriptController)
 
             let selectedNote = "Selected text remains a local note."
             let noteCapture = CaptureController(
