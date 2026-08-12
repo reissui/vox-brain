@@ -114,6 +114,7 @@ final class SystemBundledVoxTypeService: BundledVoxTypeServicing {
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = false
             configuration.addsToRecentItems = false
+            configuration.environment = ["RUST_LOG": "voxtype=info,warn"]
             _ = try await workspace.openApplication(
                 at: applicationURL,
                 configuration: configuration

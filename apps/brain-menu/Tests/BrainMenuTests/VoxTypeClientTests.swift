@@ -585,6 +585,7 @@ struct VoxTypeClientTests {
         #expect(!source.contains("/bin/sh"))
         #expect(source.contains("NSRunningApplication"))
         #expect(source.contains("NSWorkspace"))
+        #expect(source.contains(#"configuration.environment = ["RUST_LOG": "voxtype=info,warn"]"#))
     }
 
     @Test @MainActor

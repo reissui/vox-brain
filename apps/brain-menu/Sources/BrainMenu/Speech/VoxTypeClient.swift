@@ -108,6 +108,7 @@ struct SystemVoxTypeApplicationRestarter: VoxTypeApplicationRestarting {
         do {
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = false
+            configuration.environment = ["RUST_LOG": "voxtype=info,warn"]
             _ = try await workspace.openApplication(
                 at: resolvedURL,
                 configuration: configuration
