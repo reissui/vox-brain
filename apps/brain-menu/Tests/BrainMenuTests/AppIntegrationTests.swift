@@ -655,6 +655,10 @@ struct AppIntegrationTests {
         #expect(voxTypeInfo["CFBundleShortVersionString"] as? String == "0.7.5")
         #expect(voxTypeInfo["LSUIElement"] as? Bool == true)
         #expect(
+            (voxTypeInfo["LSEnvironment"] as? [String: String])?["RUST_LOG"]
+                == "voxtype=info,warn"
+        )
+        #expect(
             voxTypeInfo["VoxTypeSourceSHA256"] as? String
                 == "12e794655f0e0efadceb92e6313cec2c618c571892490368d0b90194cc27cc6e"
         )

@@ -24,6 +24,11 @@
 	<string>13.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>LSEnvironment</key>
+	<dict>
+		<key>RUST_LOG</key>
+		<string>voxtype=info,warn</string>
+	</dict>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>VoxType uses accessibility access to type text you dictate.</string>
 	<key>NSInputMonitoringUsageDescription</key>

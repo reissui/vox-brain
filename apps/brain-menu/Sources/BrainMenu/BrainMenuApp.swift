@@ -350,6 +350,9 @@ final class BrainAppControllerGraph {
             meetings.load()
         }
         Task {
+            if ProcessInfo.processInfo.environment["RUST_LOG"] == "warn" {
+                try? await SystemVoxTypeApplicationRestarter().restart()
+            }
             await onboarding.refresh()
             await speechSettings.refresh()
         }
