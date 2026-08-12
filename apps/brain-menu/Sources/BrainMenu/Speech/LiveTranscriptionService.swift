@@ -159,7 +159,7 @@ actor LiveTranscriptionService {
     typealias EventHandler = @Sendable (LiveTranscriptionEvent) async -> Void
 
     static let defaultChunkDuration: TimeInterval = 10
-    static let previewChunkDuration: TimeInterval = 5
+    static let previewChunkDuration: TimeInterval = 3
     static let defaultMaximumPendingChunksPerSource = 6
     static let defaultVoiceThreshold: Float = 0.01
 

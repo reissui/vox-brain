@@ -282,7 +282,15 @@ struct MeetingViewsTests {
 
     @Test
     func liveModelRendersChronologicalTranscriptLevelsLagAndOnlyValidControls() async throws {
-        let transcript = try utterances().reversed()
+        var transcript = try utterances()
+        transcript.append(try MeetingUtterance(
+            source: .system,
+            startMilliseconds: 4_000,
+            endMilliseconds: 7_000,
+            text: "Ship it",
+            baseSpeakerID: "remote"
+        ))
+        transcript.reverse()
         let activeMeeting = meeting(
             title: "Design review",
             start: Date(timeIntervalSince1970: 100)
@@ -316,7 +324,8 @@ struct MeetingViewsTests {
         #expect(model.elapsedText == "1:05")
         #expect(model.audioStatusText == "Receiving microphone audio.")
         #expect(model.isReceivingAudio)
-        #expect(model.transcript.map(\.text) == ["Launch timing", "Looks good"])
+        #expect(model.transcript.map(\.text) == ["Launch timing", "Looks good Ship it"])
+        #expect(model.transcript.map(\.timestamp) == ["00:00", "00:02"])
         #expect(model.levels.map(\.level) == [1, 0])
         #expect(model.levels.allSatisfy { $0.accessibilityLabel.contains("percent") })
         #expect(model.previewMessage?.contains("2 system audio chunks") == true)
