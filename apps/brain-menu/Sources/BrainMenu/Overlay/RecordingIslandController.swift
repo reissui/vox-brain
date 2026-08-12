@@ -274,7 +274,7 @@ enum RecordingIslandPresentation: Equatable, Sendable {
         case .dictation(let presentation):
             switch presentation.phase {
             case .listening:
-                [.cancel]
+                presentation.isContinuous ? [.stop] : [.cancel]
             case .locked:
                 presentation.isContinuous ? [.stop] : [.cancel]
             case .transcribing, .succeeded, .error:
@@ -467,7 +467,7 @@ final class RecordingIslandController: NSObject, NSWindowDelegate {
         isContinuous: Bool = false,
         now: Date = Date()
     ) {
-        if case .meeting = presentation { return }
+        if case .meeting(let meeting) = presentation, meeting.phase != .saved { return }
         updateDictationPresentation(
             state,
             startedAt: startedAt,

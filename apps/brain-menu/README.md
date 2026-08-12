@@ -14,7 +14,12 @@ VoxType owns recording, transcription, shortcuts, limits, models, and output
 behavior. Brain includes a verified VoxType login item for dictation, meetings,
 and Voice Notes, and Speech Setup can enable it and download or select an
 approved model. A compatible standalone VoxType installation takes precedence.
-Brain changes only the speech engine or model the user explicitly selects.
+Brain changes only the speech engine or model the user explicitly selects and
+the maximum recording duration when the user starts Live Dictation.
+
+**Live Dictation** stays active until stopped and uses a configurable global
+shortcut in **Settings → Shortcuts**. Every VoxType dictation session,
+including its normal shortcut, automatically opens Brain's recording island.
 
 VoxType model downloads and app updates may use the network. They are optional:
 local capture, Markdown storage, search, and reading remain local.

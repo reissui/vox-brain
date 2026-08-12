@@ -29,6 +29,7 @@ struct SettingsView: View {
 
     @State private var launchAtLogin: LaunchAtLoginController
     @State private var meetingHotkey: MeetingHotkeyController?
+    @State private var continuousDictation: ContinuousDictationController?
     @State private var speech: SpeechSettingsController?
     @State private var updates: UpdateController?
     @State private var onboarding: OnboardingController
@@ -40,6 +41,7 @@ struct SettingsView: View {
         selection: Binding<SettingsSection?>? = nil,
         launchAtLogin: LaunchAtLoginController = LaunchAtLoginController(),
         meetingHotkey: MeetingHotkeyController? = nil,
+        continuousDictation: ContinuousDictationController? = nil,
         speech: SpeechSettingsController? = nil,
         updates: UpdateController? = nil,
         onboarding: OnboardingController = OnboardingController()
@@ -48,6 +50,7 @@ struct SettingsView: View {
         self.externalSelection = selection
         _launchAtLogin = State(initialValue: launchAtLogin)
         _meetingHotkey = State(initialValue: meetingHotkey)
+        _continuousDictation = State(initialValue: continuousDictation)
         _speech = State(initialValue: speech)
         _updates = State(initialValue: updates)
         _onboarding = State(initialValue: onboarding)
@@ -100,10 +103,13 @@ struct SettingsView: View {
         case .general:
             GeneralSettingsView(controller: launchAtLogin)
         case .shortcuts:
-            if let meetingHotkey {
-                MeetingShortcutSettingsView(controller: meetingHotkey)
+            if let meetingHotkey, let continuousDictation {
+                ShortcutSettingsView(
+                    meeting: meetingHotkey,
+                    liveDictation: continuousDictation
+                )
             } else {
-                unavailable("Shortcuts", "Open Settings from Brain.app to configure the meeting shortcut.")
+                unavailable("Shortcuts", "Open Settings from Brain.app to configure shortcuts.")
             }
         case .speech:
             if let speech {
@@ -260,24 +266,55 @@ private struct GeneralSettingsView: View {
 
 }
 
-private struct MeetingShortcutSettingsView: View {
-    @State var controller: MeetingHotkeyController
-    @State private var errorMessage: String?
+private struct ShortcutSettingsView: View {
+    @State var meeting: MeetingHotkeyController
+    @State var liveDictation: ContinuousDictationController
+    @State private var meetingErrorMessage: String?
+    @State private var dictationErrorMessage: String?
 
     var body: some View {
         Form {
-            Section("Meeting shortcut") {
-                Toggle("Use a global shortcut to start or stop a meeting", isOn: Binding(
-                    get: { controller.isEnabled },
-                    set: { controller.setEnabled($0) }
-                ))
-
+            Section("Live Dictation shortcut") {
                 LabeledContent("Current shortcut") {
-                    Text(shortcutName(controller.hotkey))
+                    Text(liveDictation.hotkey.displayName)
                         .font(.body.monospaced())
                 }
 
-                Picker("Shortcut", selection: shortcutBinding) {
+                Picker("Shortcut", selection: dictationShortcutBinding) {
+                    Text(CaptureHotkey.controlOptionD.displayName)
+                        .tag(CaptureHotkey.controlOptionD)
+                    Text(CaptureHotkey.commandShiftD.displayName)
+                        .tag(CaptureHotkey.commandShiftD)
+                    Text(CaptureHotkey.controlOptionL.displayName)
+                        .tag(CaptureHotkey.controlOptionL)
+                }
+
+                Text("The shortcut starts or stops Live Dictation from any app.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if let message = dictationErrorMessage ?? liveDictation.shortcutErrorMessage {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if liveDictation.isShortcutRegistered {
+                    Label("Shortcut is active.", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                }
+            }
+
+            Section("Meeting shortcut") {
+                Toggle("Use a global shortcut to start or stop a meeting", isOn: Binding(
+                    get: { meeting.isEnabled },
+                    set: { meeting.setEnabled($0) }
+                ))
+
+                LabeledContent("Current shortcut") {
+                    Text(meeting.hotkey.displayName)
+                        .font(.body.monospaced())
+                }
+
+                Picker("Shortcut", selection: meetingShortcutBinding) {
                     Text("Control–Option–M").tag(CaptureHotkey.controlOptionM)
                     Text("Command–Shift–M").tag(CaptureHotkey(
                         keyCode: 46,
@@ -288,17 +325,17 @@ private struct MeetingShortcutSettingsView: View {
                         modifiers: [.control, .option]
                     ))
                 }
-                .disabled(!controller.isEnabled)
+                .disabled(!meeting.isEnabled)
 
                 Text("The shortcut toggles the meeting recorder from any app. Brain never starts a meeting automatically.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                if let message = errorMessage ?? controller.errorMessage {
+                if let message = meetingErrorMessage ?? meeting.errorMessage {
                     Label(message, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
-                } else if controller.isEnabled && controller.isRegistered {
+                } else if meeting.isEnabled && meeting.isRegistered {
                     Label("Shortcut is active.", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
                 }
@@ -308,32 +345,38 @@ private struct MeetingShortcutSettingsView: View {
         .navigationTitle("Shortcuts")
     }
 
-    private var shortcutBinding: Binding<CaptureHotkey> {
+    private var dictationShortcutBinding: Binding<CaptureHotkey> {
         Binding(
-            get: { controller.hotkey },
+            get: { liveDictation.hotkey },
             set: { hotkey in
                 do {
-                    try controller.record(
+                    try liveDictation.record(
                         keyCode: hotkey.keyCode,
                         modifiers: hotkey.modifiers
                     )
-                    errorMessage = nil
+                    dictationErrorMessage = nil
                 } catch {
-                    errorMessage = error.localizedDescription
+                    dictationErrorMessage = error.localizedDescription
                 }
             }
         )
     }
 
-    private func shortcutName(_ hotkey: CaptureHotkey) -> String {
-        var parts: [String] = []
-        if hotkey.modifiers.contains(.control) { parts.append("Control") }
-        if hotkey.modifiers.contains(.option) { parts.append("Option") }
-        if hotkey.modifiers.contains(.shift) { parts.append("Shift") }
-        if hotkey.modifiers.contains(.command) { parts.append("Command") }
-        let keys: [UInt16: String] = [15: "R", 46: "M"]
-        parts.append(keys[hotkey.keyCode] ?? "Key \(hotkey.keyCode)")
-        return parts.joined(separator: "–")
+    private var meetingShortcutBinding: Binding<CaptureHotkey> {
+        Binding(
+            get: { meeting.hotkey },
+            set: { hotkey in
+                do {
+                    try meeting.record(
+                        keyCode: hotkey.keyCode,
+                        modifiers: hotkey.modifiers
+                    )
+                    meetingErrorMessage = nil
+                } catch {
+                    meetingErrorMessage = error.localizedDescription
+                }
+            }
+        )
     }
 }
 
@@ -371,7 +414,7 @@ private struct AudioPrivacySettingsView: View {
             }
             Section("Dictation") {
                 Label("VoxType owns dictation", systemImage: "waveform.and.mic")
-                Text("Brain reads VoxType health and shortcut status but does not observe or post-process dictation output.")
+                Text("Brain can start Live Dictation and show recording status. VoxType still owns audio, transcription, paste, and final output.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

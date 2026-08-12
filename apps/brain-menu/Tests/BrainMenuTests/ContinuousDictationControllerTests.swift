@@ -154,7 +154,40 @@ struct ContinuousDictationControllerTests {
         )
         #expect(!conflict.startShortcut())
         #expect(conflict.state == .failed(.shortcutConflict))
-        #expect(conflict.shortcutErrorMessage?.contains("Control-Option-D") == true)
+        #expect(conflict.shortcutErrorMessage?.contains("already in use") == true)
+    }
+
+    @Test
+    func shortcutChoicePersistsAndReRegistersImmediately() throws {
+        let suite = "ContinuousDictationShortcut.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let registrar = FakeContinuousHotkeyRegistrar()
+        let controller = ContinuousDictationController(
+            voxType: nil,
+            statuses: nil,
+            dictation: DictationController(voxType: nil),
+            defaults: defaults,
+            registrar: registrar
+        )
+
+        #expect(controller.startShortcut())
+        #expect(registrar.registeredHotkey == .controlOptionD)
+        try controller.record(
+            keyCode: CaptureHotkey.commandShiftD.keyCode,
+            modifiers: CaptureHotkey.commandShiftD.modifiers
+        )
+        #expect(registrar.registeredHotkey == .commandShiftD)
+        #expect(ContinuousDictationController.persistedHotkey(defaults: defaults) == .commandShiftD)
+
+        let restored = ContinuousDictationController(
+            voxType: nil,
+            statuses: nil,
+            dictation: DictationController(voxType: nil),
+            defaults: defaults,
+            registrar: FakeContinuousHotkeyRegistrar()
+        )
+        #expect(restored.hotkey == .commandShiftD)
     }
 
     @Test
@@ -216,7 +249,7 @@ struct ContinuousDictationControllerTests {
         ] {
             #expect(!source.contains(forbidden))
         }
-        #expect(source.contains("Control-Option-D"))
+        #expect(source.contains("CaptureHotkey.controlOptionD"))
         #expect(source.contains("never observes or interprets Fn"))
     }
 
