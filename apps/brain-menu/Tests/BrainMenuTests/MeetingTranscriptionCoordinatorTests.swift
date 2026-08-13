@@ -340,6 +340,40 @@ struct MeetingTranscriptionCoordinatorTests {
     }
 
     @Test
+    func artifactFailureLeavesProcessingRetryableAndNeverCommitsCompletion() async throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        let capture = try fixture.makeCapture()
+        let client = CoordinatorSuccessClient()
+        let artifactStore = MeetingTranscriptArtifactStore(
+            rootURL: fixture.rootURL,
+            failureInjector: { event in
+                if event == .beforeAtomicReplacement { throw CoordinatorArtifactFailure() }
+            }
+        )
+        let coordinator = fixture.coordinator(
+            client: client,
+            transcriptArtifactStore: artifactStore
+        )
+        let processing = try coordinator.stage(meeting: fixture.meeting, capture: capture)
+
+        let result = await coordinator.complete(
+            meeting: processing,
+            capture: capture,
+            transcript: try fixture.transcript(client: client, capture: capture)
+        )
+        let stored = try fixture.store.load(fixture.meeting.id)
+
+        #expect(result.transcriptionState == .processing)
+        #expect(stored.meeting.transcriptionState == .processing)
+        #expect(stored.meeting.selectedRawTranscriptAttemptID == nil)
+        #expect(stored.rawTranscriptArtifacts == nil)
+        #expect(stored.meeting.retainedAudio == nil)
+        #expect(fixture.rawURLs(for: capture).allSatisfy {
+            FileManager.default.fileExists(atPath: $0.path)
+        })
+    }
+
+    @Test
     func isolatedInvalidSpanCompletesWithWarningAndUploadsSuccessfulUtterances() async throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
         let capture = try fixture.makeCapture()
@@ -363,7 +397,7 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(stored.utterances.count == 1)
         #expect(stored.utterances.first?.source == .system)
         #expect(scheduledUploads == [fixture.meeting.id])
-        #expect(await client.microphoneCallCount == 1)
+        #expect(await client.microphoneCallCount == 2)
     }
 
     @Test
@@ -398,6 +432,9 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(stored.utterances.count == 1)
         #expect(stored.utterances.first?.source == .microphone)
         #expect(stored.utterances.first?.text == "Keep this successful partial transcript.")
+        #expect(stored.rawTranscriptArtifacts?.attempts.count == 1)
+        #expect(stored.rawTranscriptArtifacts?.selectedAttemptID == nil)
+        #expect(stored.rawTranscriptArtifacts?.attempts.first?.failureTotals.systemic == 1)
         try writeEvidence([
             "scenario": "Systemic transcription failure preserves partial transcript and source audio",
             "lifecycleState": stored.meeting.lifecycleState.rawValue,
@@ -446,6 +483,10 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(completed.retainedAudio != nil)
         #expect(stored.meeting == completed)
         #expect(!stored.utterances.isEmpty)
+        #expect(stored.rawTranscriptArtifacts?.attempts.count == 2)
+        #expect(stored.rawTranscriptArtifacts?.selectedAttemptID
+            == completed.selectedRawTranscriptAttemptID)
+        #expect(stored.rawTranscriptArtifacts?.selectedAttempt?.utterances == stored.utterances)
         #expect(stored.utterances.allSatisfy { !$0.text.contains("unavailable") })
         #expect(rawURLs.allSatisfy {
             !FileManager.default.fileExists(atPath: $0.path)
@@ -1248,6 +1289,8 @@ struct MeetingTranscriptionCoordinatorTests {
     }
 }
 
+private struct CoordinatorArtifactFailure: Error {}
+
 private final class MeetingTranscriptionCoordinatorFixture {
     let rootURL: URL
     let store: MeetingStore
@@ -1290,10 +1333,12 @@ private final class MeetingTranscriptionCoordinatorFixture {
     func coordinator(
         client: any LiveTranscriptionClient,
         retention selectedRetention: AudioRetentionController? = nil,
+        transcriptArtifactStore: MeetingTranscriptArtifactStore? = nil,
         uploadScheduler: @escaping MeetingTranscriptionCoordinator.UploadScheduler = { _ in }
     ) -> MeetingTranscriptionCoordinator {
         MeetingTranscriptionCoordinator(
             store: store,
+            transcriptArtifactStore: transcriptArtifactStore,
             retention: selectedRetention ?? retention,
             uploadScheduler: uploadScheduler,
             clientFactory: { client }
@@ -1321,7 +1366,9 @@ private final class MeetingTranscriptionCoordinatorFixture {
             meetingDirectory: meetingDirectory,
             origin: meeting.startedAt
         )
-        let voicedFrames = [Float](repeating: 0.25, count: 3_200)
+        // Final transcription's speech evidence gate requires at least 300 ms
+        // of voiced audio; keep the shared fixture unambiguously speech-bearing.
+        let voicedFrames = [Float](repeating: 0.25, count: 8_000)
         _ = try writer.append(MeetingAudioSampleBuffer(
             source: .microphone,
             sourceTimestamp: 10,
