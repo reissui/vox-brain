@@ -54,7 +54,6 @@ struct MeetingMarkdownRenderer: Sendable {
             sections.append(Self.listSection(title: "Decisions", values: analysis.decisions))
             sections.append(Self.actionItemsSection(analysis.actionItems))
             sections.append(Self.listSection(title: "Risks", values: analysis.risks))
-            sections.append(Self.followUpSection(analysis.followUp))
         }
 
         if let notes,
@@ -190,16 +189,6 @@ struct MeetingMarkdownRenderer: Sendable {
             return listItem(value, marker: "- [ ] ")
         }.joined(separator: "\n")
         return "## Action items\n\n\(body)"
-    }
-
-    private static func followUpSection(_ draft: MeetingFollowUpDraft) -> String {
-        """
-        ## Follow-up
-
-        **Subject:** \(escapeHeading(draft.subject))
-
-        \(escapeUnexpectedHeadings(draft.body))
-        """
     }
 
     private static func listItem(_ value: String, marker: String = "- ") -> String {

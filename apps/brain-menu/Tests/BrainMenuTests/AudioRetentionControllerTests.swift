@@ -6,6 +6,33 @@ import Testing
 @Suite(.serialized)
 struct AudioRetentionControllerTests {
     @Test
+    func playableRecordingRefusesDeletedAndSymlinkedAudio() throws {
+        let fixture = try AudioRetentionFixture()
+        let controller = fixture.controller()
+        let completed = try controller.finalize(
+            meeting: fixture.meeting,
+            utterances: fixture.utterances,
+            audio: fixture.makeAudio()
+        )
+        #expect(try controller.playableRecordingURL(for: completed.id) == fixture.recordingURL)
+
+        try FileManager.default.removeItem(at: fixture.recordingURL)
+        #expect(throws: AudioRetentionControllerError.retainedAudioUnavailable) {
+            try controller.playableRecordingURL(for: completed.id)
+        }
+
+        let escaped = fixture.rootURL.appendingPathComponent("outside.m4a")
+        try Data(repeating: 0, count: Int(completed.retainedAudio?.sizeBytes ?? 1)).write(to: escaped)
+        try FileManager.default.createSymbolicLink(
+            at: fixture.recordingURL,
+            withDestinationURL: escaped
+        )
+        #expect(throws: AudioRetentionControllerError.retainedAudioUnavailable) {
+            try controller.playableRecordingURL(for: completed.id)
+        }
+    }
+
+    @Test
     func alwaysRetainsRecordingAndCleansTemporaryAudioOnlyAfterPersistence() throws {
         let fixture = try AudioRetentionFixture()
         let controller = fixture.controller()

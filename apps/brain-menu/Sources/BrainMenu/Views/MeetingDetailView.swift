@@ -25,14 +25,9 @@ enum MeetingAudioControl: String, CaseIterable, Equatable, Sendable {
     case delete
 }
 
-enum MeetingDraftCopyAction: String, CaseIterable, Equatable, Sendable {
-    case subject
-    case body
-    case all
-}
-
 struct MeetingDetailTranscriptRowModel: Equatable, Identifiable, Sendable {
     let id: UUID
+    let utteranceIDs: [UUID]
     let timestamp: String
     let speakerID: String
     let speakerName: String
@@ -98,12 +93,6 @@ struct MeetingDetailSpeakerModel: Equatable, Identifiable, Sendable {
     let displayName: String
 }
 
-struct MeetingFollowUpViewModel: Equatable, Sendable {
-    let subject: String
-    let body: String
-    let actions: [MeetingDraftCopyAction] = MeetingDraftCopyAction.allCases
-}
-
 struct MeetingDetailViewModel: Equatable, Sendable {
     let state: MeetingDetailLoadState
     let meetingID: UUID?
@@ -115,11 +104,11 @@ struct MeetingDetailViewModel: Equatable, Sendable {
     let badges: [MeetingStatusBadge]
     let tab: MeetingDetailTab
     let transcript: [MeetingDetailTranscriptRowModel]
+    let transcriptReview: MeetingTranscriptReviewViewModel?
     let voiceNoteTranscript: VoiceNoteTranscriptViewModel
     let speakers: [MeetingDetailSpeakerModel]
     let talkTime: [SpeakerTalkTime]
     let analysis: MeetingAnalysis?
-    let followUp: MeetingFollowUpViewModel?
     let audioControls: [MeetingAudioControl]
     let audioRetentionState: MeetingAudioRetentionState?
     let transcriptionState: MeetingTranscriptionState?
@@ -134,7 +123,9 @@ struct MeetingDetailViewModel: Equatable, Sendable {
     let audioDeletionWarning: String?
 
     var hasTranscript: Bool {
-        isVoiceNote ? !voiceNoteTranscript.paragraphs.isEmpty : !transcript.isEmpty
+        isVoiceNote
+            ? !voiceNoteTranscript.paragraphs.isEmpty
+            : !(transcriptReview?.rawRows.isEmpty ?? transcript.isEmpty)
     }
     var hasAnalysis: Bool { analysis != nil }
 }
@@ -158,6 +149,49 @@ protocol MeetingDetailAnalysisControlling: Sendable {
 }
 
 extension MeetingAnalysisService: MeetingDetailAnalysisControlling {}
+
+protocol MeetingTranscriptArtifactLoading: Sendable {
+    func load(
+        meeting: MeetingRecord,
+        legacyTranscript: [MeetingUtterance]
+    ) throws -> MeetingTranscriptArtifact
+}
+
+extension MeetingTranscriptArtifactStore: MeetingTranscriptArtifactLoading {}
+
+protocol MeetingTranscriptProcessingControlling: Sendable {
+    func process(
+        meeting: MeetingRecord,
+        artifact: MeetingTranscriptArtifact,
+        speakerState: SpeakerEditingState,
+        notes: String,
+        terminology: [String],
+        terminologyHash: String
+    ) async -> MeetingTranscriptProcessingRunResult
+}
+
+extension MeetingTranscriptProcessingService: MeetingTranscriptProcessingControlling {}
+
+struct SavedMeetingTranscriptProcessingControllerFactory {
+    private let settings: any AISettingsPersisting
+    private let providerFactory: any AIProviderMaking
+
+    init(
+        settings: any AISettingsPersisting = AISettingsStore(),
+        providerFactory: any AIProviderMaking = LocalAIProviderFactory()
+    ) {
+        self.settings = settings
+        self.providerFactory = providerFactory
+    }
+
+    func make() -> (any MeetingTranscriptProcessingControlling)? {
+        let configuration = settings.load().canonicalized()
+        guard configuration.provider != .disabled else { return nil }
+        return MeetingTranscriptProcessingService(
+            provider: providerFactory.makeProvider(configuration: configuration)
+        )
+    }
+}
 
 struct SavedMeetingAnalysisControllerFactory {
     private let settings: any AISettingsPersisting
@@ -253,7 +287,9 @@ enum MeetingDetailAction: Equatable, Sendable {
     case analyze
     case reanalyze
     case copyFullTranscript
-    case copyDraft(MeetingDraftCopyAction)
+    case selectTranscriptReviewMode(MeetingTranscriptReviewMode)
+    case retryTranscriptProcessing
+    case seekAudio(Int64)
     case revealAudio
     case exportAudio(URL?)
     case requestAudioDeletion
@@ -290,6 +326,7 @@ final class MeetingDetailController {
     private(set) var isPlayableAudioAvailable = false
     private(set) var isAudioDeletionAvailable = false
     var selectedTab: MeetingDetailTab = .summary
+    var transcriptReviewMode: MeetingTranscriptReviewMode = .raw
     var selectedUtteranceIDs: Set<UUID> = []
     var titleDraft = ""
 
@@ -304,6 +341,15 @@ final class MeetingDetailController {
     @ObservationIgnored private let audioChecker: any MeetingLocalAudioChecking
     @ObservationIgnored private let clipboard: any MeetingClipboardWriting
     @ObservationIgnored private let transcriptionController: any MeetingTranscriptionRetrying
+    @ObservationIgnored private let transcriptArtifactStore: any MeetingTranscriptArtifactLoading
+    @ObservationIgnored private let processedTranscriptStore: any MeetingProcessedTranscriptStoring
+    @ObservationIgnored private let transcriptProcessingController: (any MeetingTranscriptProcessingControlling)?
+    @ObservationIgnored private let terminologyStore: MeetingTerminologyStore
+    let audioPlayback: MeetingAudioPlaybackController
+    private(set) var rawTranscriptArtifact: MeetingTranscriptArtifact?
+    private(set) var processedTranscript: MeetingProcessedTranscript?
+    private(set) var transcriptProcessingMessage: String?
+    private(set) var isTranscriptProcessingRetryInProgress = false
     @ObservationIgnored private var lastKnownRecordingKind: MeetingRecordingKind = .meeting
 
     init(
@@ -317,7 +363,17 @@ final class MeetingDetailController {
         audioChecker: any MeetingLocalAudioChecking = FileMeetingLocalAudioChecker(),
         clipboard: any MeetingClipboardWriting = SystemMeetingClipboard(),
         transcriptionController: any MeetingTranscriptionRetrying =
-            MeetingTranscriptionCoordinator()
+            MeetingTranscriptionCoordinator(),
+        transcriptArtifactStore: any MeetingTranscriptArtifactLoading =
+            MeetingTranscriptArtifactStore(),
+        processedTranscriptStore: any MeetingProcessedTranscriptStoring =
+            MeetingProcessedTranscriptStore(),
+        transcriptProcessingController: (any MeetingTranscriptProcessingControlling)? =
+            SavedMeetingTranscriptProcessingControllerFactory().make(),
+        terminologyStore: MeetingTerminologyStore = MeetingTerminologyStore(),
+        audioPlayback: MeetingAudioPlaybackController = MeetingAudioPlaybackController(
+            engine: SystemMeetingAudioPlayer()
+        )
     ) {
         self.meetingID = meetingID
         self.store = store
@@ -329,30 +385,33 @@ final class MeetingDetailController {
         self.audioChecker = audioChecker
         self.clipboard = clipboard
         self.transcriptionController = transcriptionController
+        self.transcriptArtifactStore = transcriptArtifactStore
+        self.processedTranscriptStore = processedTranscriptStore
+        self.transcriptProcessingController = transcriptProcessingController
+        self.terminologyStore = terminologyStore
+        self.audioPlayback = audioPlayback
     }
 
     var viewModel: MeetingDetailViewModel {
         let meeting = meeting
         let assignments = editor.assignments
         let speakers = editor.speakers
-        let rows = editor.utterances
-            .filter { !$0.suppressed }
-            .sorted(by: Self.transcriptOrder)
-            .map { utterance -> MeetingDetailTranscriptRowModel in
-                let assignment = assignments[utterance.id]
-                    ?? SpeakerAssignment(
-                        speakerID: utterance.baseSpeakerID,
-                        provenance: .sourceDefault
-                    )
+        let rows = MeetingTranscriptTurnAssembler.assemble(
+            utterances: editor.utterances,
+            assignments: assignments,
+            speakers: speakers
+        )
+            .map { turn -> MeetingDetailTranscriptRowModel in
                 return MeetingDetailTranscriptRowModel(
-                    id: utterance.id,
-                    timestamp: Self.timestamp(utterance.startMilliseconds),
-                    speakerID: assignment.speakerID,
-                    speakerName: speakers[assignment.speakerID]?.displayName
-                        ?? SpeakerEditor.defaultDisplayName(for: assignment.speakerID),
-                    provenance: assignment.provenance,
-                    text: utterance.text,
-                    isSelected: selectedUtteranceIDs.contains(utterance.id)
+                    id: turn.id,
+                    utteranceIDs: turn.utteranceIDs,
+                    timestamp: Self.timestamp(turn.startMilliseconds),
+                    speakerID: turn.speakerID,
+                    speakerName: turn.speakerLabel,
+                    provenance: turn.provenance,
+                    text: turn.text,
+                    isSelected: !turn.utteranceIDs.isEmpty
+                        && turn.utteranceIDs.allSatisfy(selectedUtteranceIDs.contains)
                 )
             }
         let speakerModels = speakers.values
@@ -392,16 +451,11 @@ final class MeetingDetailController {
             badges: effectiveMeeting.map(MeetingsController.badges) ?? [],
             tab: selectedTab,
             transcript: rows,
+            transcriptReview: transcriptReviewViewModel,
             voiceNoteTranscript: VoiceNoteTranscriptViewModel(utterances: editor.utterances),
             speakers: speakerModels,
             talkTime: TalkTimeCalculator().calculate(for: editor).data,
             analysis: analysis,
-            followUp: analysis.map {
-                MeetingFollowUpViewModel(
-                    subject: $0.followUp.subject,
-                    body: $0.followUp.body
-                )
-            },
             audioControls: audioControls,
             audioRetentionState: meeting?.audioRetentionState,
             transcriptionState: effectiveTranscriptionState,
@@ -427,6 +481,217 @@ final class MeetingDetailController {
                 ? Self.audioDeletionWarning
                 : nil
         )
+    }
+
+    var transcriptReviewViewModel: MeetingTranscriptReviewViewModel? {
+        guard let attempt = selectedRawTranscriptAttempt else { return nil }
+        let rawTurns = MeetingTranscriptTurnAssembler.assemble(
+            utterances: attempt.utterances,
+            assignments: editor.assignments,
+            speakers: editor.speakers
+        )
+        let rawRows = reviewRows(rawTurns, selected: true)
+        let processedRows: [MeetingTranscriptReviewRowModel]
+        if let processedTranscript {
+            var assignments: [UUID: SpeakerAssignment] = [:]
+            var speakers: [String: MeetingSpeaker] = [:]
+            let utterances = processedTranscript.turns.compactMap { turn -> MeetingUtterance? in
+                assignments[turn.id] = SpeakerAssignment(
+                    speakerID: turn.speakerID,
+                    provenance: .manual
+                )
+                speakers[turn.speakerID] = MeetingSpeaker(
+                    id: turn.speakerID,
+                    displayName: turn.speakerLabel
+                )
+                return try? MeetingUtterance(
+                    id: turn.id,
+                    source: .microphone,
+                    startMilliseconds: turn.startMilliseconds,
+                    endMilliseconds: turn.endMilliseconds,
+                    text: turn.text,
+                    baseSpeakerID: turn.speakerID,
+                    humanName: turn.speakerLabel
+                )
+            }
+            processedRows = reviewRows(
+                MeetingTranscriptTurnAssembler.assemble(
+                    utterances: utterances,
+                    assignments: assignments,
+                    speakers: speakers
+                ),
+                selected: false
+            )
+        } else {
+            processedRows = []
+        }
+
+        let attestation = attempt.modelAttestation
+        let identityMatches = attestation.requestedSelection == attestation.effectiveSelection
+        let isVerified = attestation.verificationState == .verified && identityMatches
+        let verificationLabel: String
+        if attestation.verificationState == .unverifiedLegacy {
+            verificationLabel = "Unverified legacy model identity"
+        } else if !identityMatches {
+            verificationLabel = "Unverified model mismatch"
+        } else {
+            verificationLabel = "Verified model identity"
+        }
+
+        return MeetingTranscriptReviewViewModel(
+            mode: transcriptReviewMode,
+            processedIsCurrent: processedTranscript != nil,
+            processingIsRetrying: isTranscriptProcessingRetryInProgress,
+            processingMessage: transcriptProcessingMessage,
+            bullets: Array(processedTranscript?.bullets.prefix(8) ?? []),
+            rawRows: rawRows,
+            processedRows: processedRows,
+            quality: MeetingTranscriptQualityViewModel(
+                rawUtteranceCount: attempt.utterances.count,
+                retainedPreviewCount: attempt.retainedPreviews.count,
+                skippedFinalCount: attempt.failureTotals.final,
+                correctionCount: processedTranscript?.corrections.count ?? 0
+            ),
+            model: MeetingTranscriptModelViewModel(
+                requested: Self.modelIdentity(attestation.requestedSelection),
+                effective: Self.modelIdentity(attestation.effectiveSelection),
+                verificationLabel: verificationLabel,
+                isVerified: isVerified
+            ),
+            canCreateImprovementPrompt: true
+        )
+    }
+
+    func improvementPrompt() -> String? {
+        guard let meeting, let attempt = selectedRawTranscriptAttempt else { return nil }
+        return MeetingImprovementPrompt.make(
+            meeting: meeting,
+            attempt: attempt,
+            processedTranscript: processedTranscript
+        )
+    }
+
+    private var selectedRawTranscriptAttempt: MeetingTranscriptAttempt? {
+        guard let artifact = rawTranscriptArtifact,
+              let selectedID = artifact.selectedAttemptID,
+              let attempt = artifact.attempts.first(where: {
+                  $0.id == selectedID && $0.isSuccessful
+              }) else { return nil }
+        if let currentID = meeting?.selectedRawTranscriptAttemptID {
+            guard currentID == selectedID else { return nil }
+        } else {
+            guard selectedID == meeting?.id else { return nil }
+        }
+        return attempt
+    }
+
+    private func reviewRows(
+        _ turns: [MeetingTranscriptTurn],
+        selected: Bool
+    ) -> [MeetingTranscriptReviewRowModel] {
+        turns.map { turn in
+            MeetingTranscriptReviewRowModel(
+                id: turn.id,
+                utteranceIDs: turn.utteranceIDs,
+                startMilliseconds: turn.startMilliseconds,
+                timestamp: Self.timestamp(turn.startMilliseconds),
+                speakerName: turn.speakerLabel,
+                provenance: turn.provenance,
+                text: turn.text,
+                isSelected: selected && !turn.utteranceIDs.isEmpty
+                    && turn.utteranceIDs.allSatisfy(selectedUtteranceIDs.contains)
+            )
+        }
+    }
+
+    private func loadTranscriptReview(
+        meeting: MeetingRecord,
+        fallbackUtterances: [MeetingUtterance]
+    ) {
+        terminologyStore.reload()
+        let artifact: MeetingTranscriptArtifact
+        do {
+            artifact = try transcriptArtifactStore.load(
+                meeting: meeting,
+                legacyTranscript: fallbackUtterances
+            )
+            rawTranscriptArtifact = artifact
+        } catch {
+            rawTranscriptArtifact = nil
+            processedTranscript = nil
+            transcriptReviewMode = .raw
+            transcriptProcessingMessage = "Raw transcript review data is unavailable: \(Self.bounded(error))"
+            return
+        }
+        guard let attempt = selectedRawTranscriptAttempt else {
+            processedTranscript = nil
+            transcriptReviewMode = .raw
+            transcriptProcessingMessage = "The selected raw transcript is unavailable."
+            return
+        }
+        do {
+            let loaded = try processedTranscriptStore.load(
+                meetingID: meeting.id,
+                rawAttemptID: attempt.id,
+                terminologyHash: terminologyStore.contentHash
+            )
+            if let loaded,
+               loaded.version == MeetingTranscriptProcessingSchema.currentVersion,
+               loaded.rawAttemptID == attempt.id,
+               loaded.terminologyHash == terminologyStore.contentHash {
+                processedTranscript = loaded
+            } else {
+                processedTranscript = nil
+            }
+            transcriptReviewMode = processedTranscript == nil ? .raw : .processed
+            transcriptProcessingMessage = processedTranscript == nil
+                ? "The processed transcript is unavailable or stale."
+                : nil
+        } catch {
+            processedTranscript = nil
+            transcriptReviewMode = .raw
+            transcriptProcessingMessage = "Processed transcript review data is unavailable: \(Self.bounded(error))"
+        }
+    }
+
+    private func clearTranscriptReview() {
+        rawTranscriptArtifact = nil
+        processedTranscript = nil
+        transcriptReviewMode = .raw
+        transcriptProcessingMessage = nil
+    }
+
+    private func retryTranscriptProcessing() async {
+        guard !isTranscriptProcessingRetryInProgress,
+              let transcriptProcessingController,
+              let meeting,
+              let artifact = rawTranscriptArtifact,
+              selectedRawTranscriptAttempt != nil else {
+            transcriptProcessingMessage = "Configure and test a local AI provider before retrying processing."
+            return
+        }
+        isTranscriptProcessingRetryInProgress = true
+        transcriptProcessingMessage = nil
+        defer { isTranscriptProcessingRetryInProgress = false }
+        let result = await transcriptProcessingController.process(
+            meeting: meeting,
+            artifact: artifact,
+            speakerState: editor.state,
+            notes: "",
+            terminology: terminologyStore.terms,
+            terminologyHash: terminologyStore.contentHash
+        )
+        guard result.failure == nil,
+              let transcript = result.transcript,
+              transcript.rawAttemptID == selectedRawTranscriptAttempt?.id,
+              transcript.terminologyHash == terminologyStore.contentHash else {
+            processedTranscript = nil
+            transcriptReviewMode = .raw
+            transcriptProcessingMessage = Self.processingFailureMessage(result.failure)
+            return
+        }
+        processedTranscript = transcript
+        transcriptReviewMode = .processed
     }
 
     func load() {
@@ -469,6 +734,7 @@ final class MeetingDetailController {
                 editor = SpeakerEditor(utterances: stored.utterances)
                 errorMessage = "Local analysis is unavailable: \(Self.bounded(error))"
             }
+            loadTranscriptReview(meeting: stored.meeting, fallbackUtterances: stored.utterances)
             state = .ready
         } catch let error as MeetingStoreError {
             meeting = nil
@@ -476,6 +742,7 @@ final class MeetingDetailController {
             utterances = []
             uploadRevision = nil
             editor = SpeakerEditor(utterances: [])
+            clearTranscriptReview()
             switch error {
             case .corruptMeeting, .unsafeStorePath:
                 state = .corrupt(error.localizedDescription)
@@ -488,6 +755,7 @@ final class MeetingDetailController {
             utterances = []
             uploadRevision = nil
             editor = SpeakerEditor(utterances: [])
+            clearTranscriptReview()
             state = .failed(Self.bounded(error))
         }
     }
@@ -499,11 +767,11 @@ final class MeetingDetailController {
         reloadMeetingAfterTypedAction()
     }
 
-    func toggleSelection(_ utteranceID: UUID) {
-        if selectedUtteranceIDs.contains(utteranceID) {
-            selectedUtteranceIDs.remove(utteranceID)
+    func toggleSelection(_ utteranceIDs: [UUID]) {
+        if utteranceIDs.allSatisfy(selectedUtteranceIDs.contains) {
+            selectedUtteranceIDs.subtract(utteranceIDs)
         } else {
-            selectedUtteranceIDs.insert(utteranceID)
+            selectedUtteranceIDs.formUnion(utteranceIDs)
         }
     }
 
@@ -537,8 +805,12 @@ final class MeetingDetailController {
             await runAnalysis(isReanalysis: true)
         case .copyFullTranscript:
             copyFullTranscript()
-        case .copyDraft(let copyAction):
-            copyDraft(copyAction)
+        case .selectTranscriptReviewMode(let mode):
+            transcriptReviewMode = mode
+        case .retryTranscriptProcessing:
+            await retryTranscriptProcessing()
+        case .seekAudio(let milliseconds):
+            audioPlayback.seek(to: milliseconds)
         case .revealAudio:
             revealAudio()
         case .exportAudio(let destination):
@@ -715,23 +987,6 @@ final class MeetingDetailController {
         errorMessage = result.failure.map(Self.analysisFailureMessage)
     }
 
-    private func copyDraft(_ action: MeetingDraftCopyAction) {
-        guard let draft = analysis?.followUp else { return }
-        let value: String
-        switch action {
-        case .subject:
-            value = draft.subjectForCopy
-            copiedMessage = "Subject copied"
-        case .body:
-            value = draft.bodyForCopy
-            copiedMessage = "Body copied"
-        case .all:
-            value = "Subject: \(draft.subjectForCopy)\n\n\(draft.bodyForCopy)"
-            copiedMessage = "Follow-up draft copied"
-        }
-        clipboard.write(value)
-    }
-
     private func copyFullTranscript() {
         guard meeting?.isVoiceNote == true else { return }
         let value = viewModel.voiceNoteTranscript.fullText
@@ -766,6 +1021,7 @@ final class MeetingDetailController {
               isAudioDeletionAvailable else { return }
         isAudioDeletionPending = false
         isAudioDeletionInProgress = true
+        audioPlayback.release()
         defer { isAudioDeletionInProgress = false }
 
         do {
@@ -803,6 +1059,7 @@ final class MeetingDetailController {
             }
             isMeetingDeletionPending = false
             meeting = nil
+            audioPlayback.release()
             refreshAudioCapabilities(for: nil)
             utterances = []
             analysis = nil
@@ -823,6 +1080,7 @@ final class MeetingDetailController {
             utterances = stored.utterances
             editor.reprocessFinalUtterances(stored.utterances)
             refreshAudioCapabilities(for: stored.meeting)
+            loadTranscriptReview(meeting: stored.meeting, fallbackUtterances: stored.utterances)
             loadUploadRevision()
             errorMessage = uploadController.errorMessage ?? errorMessage
         } catch {
@@ -834,11 +1092,17 @@ final class MeetingDetailController {
         guard let meeting else {
             isPlayableAudioAvailable = false
             isAudioDeletionAvailable = false
+            audioPlayback.release()
             return
         }
         isPlayableAudioAvailable = meeting.retainedAudio != nil
             && audioChecker.hasLocalAudio(for: meeting)
         isAudioDeletionAvailable = audioController.hasDeletableRecording(for: meetingID)
+        if isPlayableAudioAvailable {
+            audioPlayback.load(meetingID: meetingID)
+        } else {
+            audioPlayback.release()
+        }
     }
 
     private func loadUploadRevision() {
@@ -857,22 +1121,13 @@ final class MeetingDetailController {
         return formatter
     }()
 
-    private static func transcriptOrder(
-        _ lhs: MeetingUtterance,
-        _ rhs: MeetingUtterance
-    ) -> Bool {
-        if lhs.startMilliseconds != rhs.startMilliseconds {
-            return lhs.startMilliseconds < rhs.startMilliseconds
-        }
-        if lhs.endMilliseconds != rhs.endMilliseconds {
-            return lhs.endMilliseconds < rhs.endMilliseconds
-        }
-        return lhs.id.uuidString < rhs.id.uuidString
-    }
-
     private static func timestamp(_ milliseconds: Int64) -> String {
         let totalSeconds = max(0, milliseconds / 1_000)
         return String(format: "%02lld:%02lld", totalSeconds / 60, totalSeconds % 60)
+    }
+
+    private static func modelIdentity(_ selection: SpeechEngineSelection) -> String {
+        "\(selection.engine.rawValue)/\(selection.modelID)"
     }
 
     private static func bounded(_ error: Error) -> String {
@@ -887,6 +1142,21 @@ final class MeetingDetailController {
         case .cancelled: "Analysis was cancelled."
         case .schemaFailure: "The AI response did not match the expected analysis schema."
         case .persistenceFailure: "The previous analysis remains because the new result could not be saved."
+        }
+    }
+
+    private static func processingFailureMessage(
+        _ failure: MeetingTranscriptProcessingFailure?
+    ) -> String {
+        switch failure {
+        case .noSelectedRawAttempt: "The selected raw transcript is unavailable."
+        case .selectedRawAttemptNotSuccessful: "The selected raw attempt did not complete successfully."
+        case .providerNotReady: "The configured local AI provider is not ready."
+        case .providerFailure(let error): error.localizedDescription
+        case .cancelled: "Transcript processing was cancelled."
+        case .schemaFailure: "The processed transcript did not pass its evidence checks."
+        case .persistenceFailure: "The processed transcript could not be saved."
+        case nil: "The processed transcript is unavailable or stale."
         }
     }
 }
@@ -1158,28 +1428,10 @@ struct MeetingDetailView: View {
                             .textSelection(.enabled)
                     }
                 }
-                if let draft = model.followUp {
-                    Divider()
-                    Text("Follow-up draft").font(.headline)
-                    LabeledContent("Subject") { Text(draft.subject).textSelection(.enabled) }
-                    Text(draft.body).textSelection(.enabled)
-                    HStack {
-                        Button("Copy Subject") {
-                            Task { await controller.perform(.copyDraft(.subject)) }
-                        }
-                        Button("Copy Body") {
-                            Task { await controller.perform(.copyDraft(.body)) }
-                        }
-                        Button("Copy All") {
-                            Task { await controller.perform(.copyDraft(.all)) }
-                        }
-                        .keyboardShortcut("c", modifiers: [.command, .shift])
-                    }
-                }
             } else if model.analysisState == .running {
                 MeetingWorkPlaceholder(
                     title: "Analyzing transcript",
-                    detail: "Brain is creating the summary, topics, decisions, and follow-up draft."
+                    detail: "Brain is creating the summary, topics, decisions, and action items."
                 )
             } else {
                 Text("No local analysis yet. The final transcript remains available and can be saved to the vault.")
@@ -1296,6 +1548,9 @@ struct MeetingDetailView: View {
                 }
             }
             if !model.audioControls.isEmpty {
+                if model.audioControls.contains(.reveal), controller.audioPlayback.meetingID != nil {
+                    MeetingAudioPlayerView(controller: controller.audioPlayback)
+                }
                 HStack {
                     if model.audioControls.contains(.reveal) {
                         Button("Reveal", systemImage: "folder") {
@@ -1348,6 +1603,28 @@ struct MeetingDetailView: View {
         } else {
             if model.isVoiceNote {
                 voiceNoteTranscript(model)
+            } else if let review = model.transcriptReview {
+                VStack(spacing: 0) {
+                    if review.mode == .raw {
+                        meetingTranscriptEditingControls(model)
+                        Divider()
+                    }
+                    MeetingTranscriptReviewView(
+                        model: review,
+                        audioPlayback: controller.audioPlayback,
+                        selectMode: { mode in
+                            Task { await controller.perform(.selectTranscriptReviewMode(mode)) }
+                        },
+                        retryProcessing: {
+                            Task { await controller.perform(.retryTranscriptProcessing) }
+                        },
+                        seek: { milliseconds in
+                            Task { await controller.perform(.seekAudio(milliseconds)) }
+                        },
+                        toggleSelection: controller.toggleSelection,
+                        createImprovementPrompt: controller.improvementPrompt
+                    )
+                }
             } else {
                 editableMeetingTranscript(model)
             }
@@ -1394,43 +1671,10 @@ struct MeetingDetailView: View {
 
     private func editableMeetingTranscript(_ model: MeetingDetailViewModel) -> some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Select utterances to reassign or split.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Menu("Reassign") {
-                    ForEach(model.speakers) { speaker in
-                        Button(speaker.displayName) {
-                            Task {
-                                await controller.perform(.reassign(
-                                    utteranceIDs: controller.selectedUtteranceIDs,
-                                    to: speaker.id
-                                ))
-                            }
-                        }
-                    }
-                }
-                .disabled(controller.selectedUtteranceIDs.isEmpty)
-                Menu("Split to new speaker") {
-                    ForEach(model.speakers) { speaker in
-                        Button("From \(speaker.displayName)") {
-                            Task {
-                                await controller.perform(.split(
-                                    speakerID: speaker.id,
-                                    utteranceIDs: controller.selectedUtteranceIDs,
-                                    name: nil
-                                ))
-                            }
-                        }
-                    }
-                }
-                .disabled(controller.selectedUtteranceIDs.isEmpty)
-            }
-            .padding()
+            meetingTranscriptEditingControls(model)
             Divider()
             List(model.transcript) { row in
-                Button { controller.toggleSelection(row.id) } label: {
+                Button { controller.toggleSelection(row.utteranceIDs) } label: {
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: row.isSelected ? "checkmark.circle.fill" : "circle")
                             .accessibilityHidden(true)
@@ -1452,6 +1696,43 @@ struct MeetingDetailView: View {
                 .accessibilityLabel((row.isSelected ? "Selected, " : "") + row.accessibilityLabel)
             }
         }
+    }
+
+    private func meetingTranscriptEditingControls(_ model: MeetingDetailViewModel) -> some View {
+        HStack {
+            Text("Select utterances to reassign or split.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Menu("Reassign") {
+                ForEach(model.speakers) { speaker in
+                    Button(speaker.displayName) {
+                        Task {
+                            await controller.perform(.reassign(
+                                utteranceIDs: controller.selectedUtteranceIDs,
+                                to: speaker.id
+                            ))
+                        }
+                    }
+                }
+            }
+            .disabled(controller.selectedUtteranceIDs.isEmpty)
+            Menu("Split to new speaker") {
+                ForEach(model.speakers) { speaker in
+                    Button("From \(speaker.displayName)") {
+                        Task {
+                            await controller.perform(.split(
+                                speakerID: speaker.id,
+                                utteranceIDs: controller.selectedUtteranceIDs,
+                                name: nil
+                            ))
+                        }
+                    }
+                }
+            }
+            .disabled(controller.selectedUtteranceIDs.isEmpty)
+        }
+        .padding()
     }
 
     private struct MeetingWorkPlaceholder: View {

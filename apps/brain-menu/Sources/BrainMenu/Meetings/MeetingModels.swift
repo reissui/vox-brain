@@ -57,6 +57,11 @@ enum MeetingAudioRetentionState: String, Codable, CaseIterable, Sendable {
     case unresolvedLegacy
 }
 
+enum MeetingSpeechVerificationState: String, Codable, Equatable, Sendable {
+    case verified
+    case unverifiedLegacy
+}
+
 struct RetainedAudioMetadata: Codable, Equatable, Sendable {
     var filename: String
     var format: String
@@ -91,9 +96,16 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     var lifecycleState: MeetingLifecycleState
     var speechEngine: String
     var speechModel: String
+    var requestedSpeechSelection: SpeechEngineSelection
+    var effectiveSpeechSelection: SpeechEngineSelection
+    var speechVerificationState: MeetingSpeechVerificationState
+    var speechVerifiedAt: Date?
+    var voxTypeVersion: VoxTypeVersion?
     var transcriptionState: MeetingTranscriptionState
     var transcriptionAttemptCount: Int
     var transcriptionErrorMessage: String?
+    var selectedRawTranscriptAttemptID: UUID?
+    var rawTranscriptSchemaVersion: Int?
     var analysisState: MeetingAnalysisState
     var uploadState: MeetingUploadState
     var retainedAudio: RetainedAudioMetadata?
@@ -102,6 +114,11 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
 
     var isVoiceNote: Bool {
         recordingKind == .voiceNote
+    }
+
+    var selectedRawAttemptID: UUID? {
+        get { selectedRawTranscriptAttemptID }
+        set { selectedRawTranscriptAttemptID = newValue }
     }
 
     var acceptsAutomaticAnalysisTitle: Bool {
@@ -123,9 +140,12 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         lifecycleState: MeetingLifecycleState,
         speechEngine: String,
         speechModel: String,
+        speechModelAttestation: VoxTypeModelAttestation? = nil,
         transcriptionState: MeetingTranscriptionState? = nil,
         transcriptionAttemptCount: Int = 0,
         transcriptionErrorMessage: String? = nil,
+        selectedRawTranscriptAttemptID: UUID? = nil,
+        rawTranscriptSchemaVersion: Int? = MeetingTranscriptArtifact.currentSchemaVersion,
         analysisState: MeetingAnalysisState = .notRequested,
         uploadState: MeetingUploadState = .notUploaded,
         retainedAudio: RetainedAudioMetadata? = nil,
@@ -143,10 +163,21 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         self.lifecycleState = lifecycleState
         self.speechEngine = speechEngine
         self.speechModel = speechModel
+        let legacySelection = SpeechEngineSelection(
+            engine: SpeechEngineID(rawValue: speechEngine) ?? .whisper,
+            modelID: speechModel
+        )
+        requestedSpeechSelection = speechModelAttestation?.requestedSelection ?? legacySelection
+        effectiveSpeechSelection = speechModelAttestation?.effectiveSelection ?? legacySelection
+        speechVerificationState = speechModelAttestation == nil ? .unverifiedLegacy : .verified
+        speechVerifiedAt = speechModelAttestation?.verifiedAt
+        voxTypeVersion = speechModelAttestation?.voxTypeVersion
         self.transcriptionState = transcriptionState
             ?? (lifecycleState == .completed ? .completed : .pending)
         self.transcriptionAttemptCount = max(0, transcriptionAttemptCount)
         self.transcriptionErrorMessage = transcriptionErrorMessage
+        self.selectedRawTranscriptAttemptID = selectedRawTranscriptAttemptID
+        self.rawTranscriptSchemaVersion = rawTranscriptSchemaVersion
         self.analysisState = analysisState
         self.uploadState = uploadState
         self.retainedAudio = retainedAudio
@@ -167,9 +198,16 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         case lifecycleState
         case speechEngine
         case speechModel
+        case requestedSpeechSelection
+        case effectiveSpeechSelection
+        case speechVerificationState
+        case speechVerifiedAt
+        case voxTypeVersion
         case transcriptionState
         case transcriptionAttemptCount
         case transcriptionErrorMessage
+        case selectedRawTranscriptAttemptID
+        case rawTranscriptSchemaVersion
         case analysisState
         case uploadState
         case retainedAudio
@@ -215,6 +253,8 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
             titleSource: titleSource,
             detectedApplication: detectedApplication
         )
+        let legacyEngine = try container.decode(String.self, forKey: .speechEngine)
+        let legacyModel = try container.decode(String.self, forKey: .speechModel)
         self.init(
             id: try container.decode(UUID.self, forKey: .id),
             title: title,
@@ -228,8 +268,8 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
             startedAt: try container.decode(Date.self, forKey: .startedAt),
             endedAt: try container.decodeIfPresent(Date.self, forKey: .endedAt),
             lifecycleState: lifecycleState,
-            speechEngine: try container.decode(String.self, forKey: .speechEngine),
-            speechModel: try container.decode(String.self, forKey: .speechModel),
+            speechEngine: legacyEngine,
+            speechModel: legacyModel,
             transcriptionState: transcriptionState,
             transcriptionAttemptCount: try container.decodeIfPresent(
                 Int.self,
@@ -239,6 +279,14 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
                 String.self,
                 forKey: .transcriptionErrorMessage
             ),
+            selectedRawTranscriptAttemptID: try container.decodeIfPresent(
+                UUID.self,
+                forKey: .selectedRawTranscriptAttemptID
+            ),
+            rawTranscriptSchemaVersion: try container.decodeIfPresent(
+                Int.self,
+                forKey: .rawTranscriptSchemaVersion
+            ),
             analysisState: try container.decode(MeetingAnalysisState.self, forKey: .analysisState),
             uploadState: try container.decode(MeetingUploadState.self, forKey: .uploadState),
             retainedAudio: retainedAudio,
@@ -247,6 +295,23 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
             // already seen. Only newly completed recordings receive the New state.
             isUnread: try container.decodeIfPresent(Bool.self, forKey: .isUnread) ?? false
         )
+        requestedSpeechSelection = try container.decodeIfPresent(
+            SpeechEngineSelection.self,
+            forKey: .requestedSpeechSelection
+        ) ?? SpeechEngineSelection(
+            engine: SpeechEngineID(rawValue: legacyEngine) ?? .whisper,
+            modelID: legacyModel
+        )
+        effectiveSpeechSelection = try container.decodeIfPresent(
+            SpeechEngineSelection.self,
+            forKey: .effectiveSpeechSelection
+        ) ?? requestedSpeechSelection
+        speechVerificationState = try container.decodeIfPresent(
+            MeetingSpeechVerificationState.self,
+            forKey: .speechVerificationState
+        ) ?? .unverifiedLegacy
+        speechVerifiedAt = try container.decodeIfPresent(Date.self, forKey: .speechVerifiedAt)
+        voxTypeVersion = try container.decodeIfPresent(VoxTypeVersion.self, forKey: .voxTypeVersion)
     }
 
     private static func inferredTitleSource(for title: String) -> MeetingTitleSource {
@@ -352,6 +417,7 @@ struct MeetingUtterance: Codable, Equatable, Identifiable, Sendable {
     var baseSpeakerID: String
     var humanName: String?
     var suppressed: Bool
+    var transcriptionPhase: LiveTranscriptionPhase?
 
     var isSuppressed: Bool {
         get { suppressed }
@@ -366,7 +432,8 @@ struct MeetingUtterance: Codable, Equatable, Identifiable, Sendable {
         text: String,
         baseSpeakerID: String,
         humanName: String? = nil,
-        suppressed: Bool = false
+        suppressed: Bool = false,
+        transcriptionPhase: LiveTranscriptionPhase? = nil
     ) throws {
         guard startMilliseconds >= 0, endMilliseconds >= startMilliseconds else {
             throw MeetingModelError.invalidUtteranceTime(
@@ -384,6 +451,7 @@ struct MeetingUtterance: Codable, Equatable, Identifiable, Sendable {
         self.baseSpeakerID = baseSpeakerID
         self.humanName = humanName
         self.suppressed = suppressed
+        self.transcriptionPhase = transcriptionPhase
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -395,6 +463,7 @@ struct MeetingUtterance: Codable, Equatable, Identifiable, Sendable {
         case baseSpeakerID
         case humanName
         case suppressed
+        case transcriptionPhase
     }
 
     init(from decoder: Decoder) throws {
@@ -407,7 +476,11 @@ struct MeetingUtterance: Codable, Equatable, Identifiable, Sendable {
             text: container.decode(String.self, forKey: .text),
             baseSpeakerID: container.decode(String.self, forKey: .baseSpeakerID),
             humanName: container.decodeIfPresent(String.self, forKey: .humanName),
-            suppressed: container.decode(Bool.self, forKey: .suppressed)
+            suppressed: container.decode(Bool.self, forKey: .suppressed),
+            transcriptionPhase: container.decodeIfPresent(
+                LiveTranscriptionPhase.self,
+                forKey: .transcriptionPhase
+            )
         )
     }
 }
@@ -433,4 +506,19 @@ typealias RetainedMeetingAudio = RetainedAudioMetadata
 struct StoredMeeting: Equatable, Sendable {
     var meeting: MeetingRecord
     var utterances: [MeetingUtterance]
+    var rawTranscriptArtifacts: MeetingTranscriptArtifact?
+
+    init(
+        meeting: MeetingRecord,
+        utterances: [MeetingUtterance],
+        rawTranscriptArtifacts: MeetingTranscriptArtifact? = nil
+    ) {
+        self.meeting = meeting
+        self.utterances = utterances
+        self.rawTranscriptArtifacts = rawTranscriptArtifacts
+    }
+
+    var transcriptArtifacts: MeetingTranscriptArtifact? {
+        rawTranscriptArtifacts
+    }
 }

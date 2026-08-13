@@ -295,8 +295,10 @@ final class SpeechSettingsController {
     @ObservationIgnored private let selections: SpeechSelectionStore
     @ObservationIgnored private let actions: any SpeechSettingsActionHandling
     @ObservationIgnored private let modelActivator: (any VoxTypeModelApplying)?
+    @ObservationIgnored private let modelSource: VoxTypeModelSourceOfTruth?
     @ObservationIgnored private let microphoneService: (any MeetingMicrophoneSettingsServing)?
     @ObservationIgnored private let microphoneSelectionStore: MeetingMicrophoneSelectionStore
+    let meetingTerminology: MeetingTerminologyStore
     @ObservationIgnored private var modelApplicationTask: Task<Void, Never>?
     @ObservationIgnored private var modelApplicationRevision: UInt64 = 0
     @ObservationIgnored private var transientSelections: [SpeechWorkflow: SpeechEngineSelection] = [:]
@@ -306,18 +308,22 @@ final class SpeechSettingsController {
         inventory: any SpeechModelInventoryControlling,
         selections: SpeechSelectionStore,
         modelActivator: (any VoxTypeModelApplying)? = nil,
+        modelSource: VoxTypeModelSourceOfTruth? = nil,
         actions: any SpeechSettingsActionHandling = UnavailableSpeechSettingsActions(),
         microphoneService: (any MeetingMicrophoneSettingsServing)? = nil,
         microphoneSelectionStore: MeetingMicrophoneSelectionStore = MeetingMicrophoneSelectionStore(),
+        meetingTerminology: MeetingTerminologyStore = MeetingTerminologyStore(),
         initialSnapshot: ModelInventorySnapshot = .unknown
     ) {
         self.voxType = voxType
         self.inventory = inventory
         self.selections = selections
         self.modelActivator = modelActivator
+        self.modelSource = modelSource
         self.actions = actions
         self.microphoneService = microphoneService
         self.microphoneSelectionStore = microphoneSelectionStore
+        self.meetingTerminology = meetingTerminology
         microphoneSelection = microphoneSelectionStore.selection
         inventorySnapshot = initialSnapshot
         installationState = voxType == nil ? .missing : .checking
@@ -370,6 +376,7 @@ final class SpeechSettingsController {
 
     func selection(for workflow: SpeechWorkflow) -> SpeechEngineSelection {
         if let transient = transientSelections[workflow] { return transient }
+        if let global = modelSource?.selection { return global }
         let stored = selections.selection(for: workflow)
         if let pending = stored.pending { return pending }
         if let active = stored.active { return active }
@@ -381,7 +388,11 @@ final class SpeechSettingsController {
     }
 
     func activeSelection(for workflow: SpeechWorkflow) -> SpeechEngineSelection? {
-        selections.effectiveSelection(for: workflow, inventory: inventorySnapshot)
+        if let global = modelSource?.selection,
+           inventorySnapshot.availability(for: global.modelID) == .ready {
+            return global
+        }
+        return selections.effectiveSelection(for: workflow, inventory: inventorySnapshot)
     }
 
     func models(for workflow: SpeechWorkflow) -> [SpeechModelDescriptor] {
@@ -399,7 +410,12 @@ final class SpeechSettingsController {
         do {
             if inventorySnapshot.availability(for: model.id) == .ready,
                let modelActivator {
-                beginApplying(requested, for: workflow, using: modelActivator)
+                beginApplying(
+                    requested,
+                    for: workflow,
+                    persisting: modelSource == nil ? nil : Set(SpeechWorkflow.allCases),
+                    using: modelActivator
+                )
             } else {
                 cancelActiveApplication()
                 _ = try selections.select(
@@ -456,6 +472,12 @@ final class SpeechSettingsController {
         inventorySnapshot = await refreshedInventory
         let resolvedVersion = await version
         let resolvedStatus = await status
+        if let modelSource {
+            _ = try? modelSource.migrateIfNeeded(
+                status: resolvedStatus,
+                inventory: inventorySnapshot
+            )
+        }
         if let resolvedVersion {
             installationState = .installed(resolvedVersion)
         } else {
@@ -605,7 +627,11 @@ final class SpeechSettingsController {
             guard let self, revision == self.modelApplicationRevision else { return }
             do {
                 try Task.checkCancellation()
-                try await activator.apply(requested)
+                if let modelSource = self.modelSource {
+                    _ = try await modelSource.activate(requested)
+                } else {
+                    try await activator.apply(requested)
+                }
                 try Task.checkCancellation()
                 guard revision == self.modelApplicationRevision else { return }
                 for target in workflowsToPersist ?? [workflow] {
@@ -711,6 +737,10 @@ struct SpeechSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            workflowSection(.dictation)
+
+            terminologySection
+
             Section("Audio Tests") {
                 Picker("Microphone", selection: Binding(
                     get: { controller.microphoneSelection },
@@ -779,7 +809,7 @@ struct SpeechSettingsView: View {
     @ViewBuilder
     private func workflowSection(_ workflow: SpeechWorkflow) -> some View {
         let selection = controller.selection(for: workflow)
-        Section(workflow.displayName) {
+        Section("Speech Model") {
             Picker("Engine", selection: Binding(
                 get: { controller.selection(for: workflow).engine },
                 set: { controller.selectEngine($0, for: workflow) }
@@ -788,7 +818,7 @@ struct SpeechSettingsView: View {
                     Text(engine.displayName).tag(engine.id)
                 }
             }
-            .accessibilityLabel("\(workflow.displayName) speech engine")
+            .accessibilityLabel("VoxType speech engine")
             .accessibilityValue(
                 SpeechEngineCatalog.engines.first(where: { $0.id == selection.engine })?
                     .displayName ?? selection.engine.rawValue
@@ -802,7 +832,7 @@ struct SpeechSettingsView: View {
                     Text(model.displayName).tag(model.id)
                 }
             }
-            .accessibilityLabel("\(workflow.displayName) speech model")
+            .accessibilityLabel("VoxType speech model for dictation and meetings")
             .accessibilityValue(
                 SpeechEngineCatalog.model(id: selection.modelID)?.displayName
                     ?? selection.modelID
@@ -826,8 +856,50 @@ struct SpeechSettingsView: View {
                 }
                 Link("VoxType model guide", destination: SpeechEngineCatalog.modelGuideURL)
                     .font(.caption)
+                Text("This active model is used for dictation, live meeting preview, and final meeting transcription.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var terminologySection: some View {
+        Section("Meeting terminology") {
+            Text("Private terminology is stored only on this Mac and is used only to correct processed meeting transcripts. It is never sent to VoxType or any service.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ForEach(controller.meetingTerminology.terms, id: \.self) { term in
+                HStack {
+                    TextField("Terminology", text: Binding(
+                        get: { term },
+                        set: { controller.meetingTerminology.replace(term, with: $0) }
+                    ))
+                    Button("Remove", role: .destructive) {
+                        controller.meetingTerminology.remove(term)
+                    }
+                }
+            }
+
+            HStack {
+                TextField("Add terminology", text: $newTerminology)
+                    .onSubmit { addTerminology() }
+                Button("Add", action: addTerminology)
+                    .disabled(newTerminology.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if let terminologyError = controller.meetingTerminology.errorMessage {
+                Label(terminologyError, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("Meeting terminology error: \(terminologyError)")
+            }
+        }
+    }
+
+    @State private var newTerminology = ""
+
+    private func addTerminology() {
+        controller.meetingTerminology.add(newTerminology)
+        if controller.meetingTerminology.errorMessage == nil { newTerminology = "" }
     }
 
     private func statusRow(

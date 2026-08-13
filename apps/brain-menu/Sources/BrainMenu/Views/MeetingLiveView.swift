@@ -49,6 +49,65 @@ struct MeetingLiveTranscriptRowModel: Equatable, Identifiable, Sendable {
     var accessibilityLabel: String { "\(timestamp), \(speaker): \(text)" }
 }
 
+enum MeetingLiveTranscriptHealthSeverity: Equatable, Sendable {
+    case warning
+    case error
+}
+
+struct MeetingLiveTranscriptHealthSourceModel: Equatable, Sendable {
+    let source: MeetingAudioSource
+    let previewCount: Int
+    let finalCount: Int
+
+    var sourceTitle: String { source == .microphone ? "Microphone" : "System audio" }
+
+    var skippedSpansText: String {
+        [
+            Self.countText(previewCount, phase: "preview"),
+            Self.countText(finalCount, phase: "final"),
+        ]
+        .compactMap { $0 }
+        .joined(separator: " and ")
+    }
+
+    private static func countText(_ count: Int, phase: String) -> String? {
+        guard count > 0 else { return nil }
+        return "\(count) \(phase) span\(count == 1 ? "" : "s") skipped"
+    }
+}
+
+/// A single, stable health announcement for all live transcript failures.
+/// Keeping this separate from transcript rows prevents repeated failures from
+/// changing the transcript list identity or its scroll position.
+struct MeetingLiveTranscriptHealthModel: Equatable, Sendable {
+    let sources: [MeetingLiveTranscriptHealthSourceModel]
+    let latestGuidance: String
+    let severity: MeetingLiveTranscriptHealthSeverity
+
+    var text: String {
+        let sourceText = sources.map { "\($0.sourceTitle): \($0.skippedSpansText)" }
+            .joined(separator: "; ")
+        return "Transcript health — \(sourceText). Latest guidance: \(latestGuidance)"
+    }
+
+    var accessibilityLabel: String {
+        "Transcript health \(severity == .error ? "error" : "warning"). \(text)"
+    }
+}
+
+struct MeetingLiveCaptureGuidanceModel: Equatable, Identifiable, Sendable {
+    let sources: [MeetingAudioSource]
+    let message: String
+
+    var id: String { sources.map(\.rawValue).joined(separator: ",") + message }
+    var sourceTitle: String {
+        sources.map { $0 == .microphone ? "Microphone" : "System audio" }
+            .joined(separator: " and ")
+    }
+    var text: String { "\(sourceTitle): \(message)" }
+    var accessibilityLabel: String { "Capture guidance. \(text)" }
+}
+
 enum MeetingLivePresentationState: Equatable, Sendable {
     case unavailable
     case active
@@ -105,7 +164,8 @@ struct MeetingLiveViewModel: Equatable, Sendable {
     let levels: [MeetingSourceLevelModel]
     let transcript: [MeetingLiveTranscriptRowModel]
     let previewMessage: String?
-    let errorMessages: [String]
+    let transcriptHealth: MeetingLiveTranscriptHealthModel?
+    let captureGuidance: [MeetingLiveCaptureGuidanceModel]
     let actions: [MeetingLiveAction]
 
     init(snapshot: MeetingLiveSnapshot) {
@@ -137,31 +197,20 @@ struct MeetingLiveViewModel: Equatable, Sendable {
         levels = MeetingAudioSource.allCases.map {
             MeetingSourceLevelModel(source: $0, level: snapshot.levels[$0] ?? 0)
         }
-        transcript = snapshot.utterances
-            .filter { !$0.suppressed }
-            .sorted(by: Self.transcriptOrder)
-            .reduce(into: []) { rows, utterance in
-                if let last = rows.indices.last,
-                   rows[last].source == utterance.source,
-                   rows[last].endMilliseconds == utterance.startMilliseconds {
-                    rows[last].text += " " + utterance.text
-                    rows[last].endMilliseconds = utterance.endMilliseconds
-                } else {
-                    rows.append(MeetingLiveTranscriptRowModel(
-                        id: utterance.id,
-                        timestamp: Self.timestamp(utterance.startMilliseconds),
-                        speaker: utterance.humanName
-                            ?? SpeakerEditor.defaultDisplayName(for: utterance.baseSpeakerID),
-                        text: utterance.text,
-                        source: utterance.source,
-                        endMilliseconds: utterance.endMilliseconds
-                    ))
-                }
+        transcript = MeetingTranscriptTurnAssembler.assemble(utterances: snapshot.utterances)
+            .map { turn in
+                MeetingLiveTranscriptRowModel(
+                    id: turn.id,
+                    timestamp: Self.timestamp(turn.startMilliseconds),
+                    speaker: turn.speakerLabel,
+                    text: turn.text,
+                    source: turn.source,
+                    endMilliseconds: turn.endMilliseconds
+                )
             }
         previewMessage = Self.previewMessage(snapshot.previewLag)
-        errorMessages = snapshot.transcriptFailures.map {
-            "\($0.source == .microphone ? "Microphone" : "System audio") preview: \($0.message)"
-        } + MeetingAudioSource.allCases.compactMap { snapshot.audioGuidance[$0] }
+        transcriptHealth = Self.transcriptHealth(snapshot.transcriptFailures)
+        captureGuidance = Self.captureGuidance(snapshot.audioGuidance)
         actions = Self.actions(snapshot.lifecycleState)
     }
 
@@ -253,17 +302,54 @@ struct MeetingLiveViewModel: Equatable, Sendable {
         return "Preview is behind; skipped " + details.joined(separator: " and ") + ". Final transcription is unaffected."
     }
 
-    private static func transcriptOrder(
-        _ lhs: MeetingUtterance,
-        _ rhs: MeetingUtterance
-    ) -> Bool {
-        if lhs.startMilliseconds != rhs.startMilliseconds {
-            return lhs.startMilliseconds < rhs.startMilliseconds
+    private static func transcriptHealth(
+        _ failures: [LiveTranscriptFailure]
+    ) -> MeetingLiveTranscriptHealthModel? {
+        guard let latest = failures.last else { return nil }
+        let sources = MeetingAudioSource.allCases.compactMap { source -> MeetingLiveTranscriptHealthSourceModel? in
+            let sourceFailures = failures.filter { $0.source == source }
+            let previewCount = sourceFailures.count { $0.phase == .preview }
+            let finalCount = sourceFailures.count { $0.phase == .final }
+            guard previewCount + finalCount > 0 else { return nil }
+            return MeetingLiveTranscriptHealthSourceModel(
+                source: source,
+                previewCount: previewCount,
+                finalCount: finalCount
+            )
         }
-        if lhs.endMilliseconds != rhs.endMilliseconds {
-            return lhs.endMilliseconds < rhs.endMilliseconds
+        let severity: MeetingLiveTranscriptHealthSeverity = failures.contains {
+            $0.isSystemic || $0.phase == .final
+        } ? .error : .warning
+        return MeetingLiveTranscriptHealthModel(
+            sources: sources,
+            latestGuidance: boundedMessage(latest.message),
+            severity: severity
+        )
+    }
+
+    private static func captureGuidance(
+        _ guidance: [MeetingAudioSource: String]
+    ) -> [MeetingLiveCaptureGuidanceModel] {
+        var grouped: [(message: String, sources: [MeetingAudioSource])] = []
+        for source in MeetingAudioSource.allCases {
+            guard let rawMessage = guidance[source] else { continue }
+            let message = boundedMessage(rawMessage)
+            guard !message.isEmpty else { continue }
+            if let index = grouped.firstIndex(where: { $0.message == message }) {
+                grouped[index].sources.append(source)
+            } else {
+                grouped.append((message, [source]))
+            }
         }
-        return lhs.id.uuidString < rhs.id.uuidString
+        return grouped.prefix(2).map {
+            MeetingLiveCaptureGuidanceModel(sources: $0.sources, message: $0.message)
+        }
+    }
+
+    private static func boundedMessage(_ message: String) -> String {
+        let normalized = message.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard normalized.count > 240 else { return normalized }
+        return String(normalized.prefix(237)) + "…"
     }
 
     private static func timestamp(_ milliseconds: Int64) -> String {
@@ -273,6 +359,7 @@ struct MeetingLiveViewModel: Equatable, Sendable {
 
     private static func failureMessage(_ failure: MeetingControllerFailure) -> String {
         switch failure {
+        case .speechModelUnavailable(let message): message
         case .startFailed(let message): "Start failed: \(message)"
         case .microphoneSelectionRequired(let message): message
         case .pauseFailed(let message): "Pause failed: \(message)"
@@ -522,18 +609,35 @@ struct MeetingLiveView: View {
                     .foregroundStyle(.orange)
                     .accessibilityLabel("Transcript preview lag. \(preview)")
             }
-            ForEach(model.errorMessages, id: \.self) { error in
-                Label(error, systemImage: "exclamationmark.triangle")
+            if let health = model.transcriptHealth {
+                Label(
+                    health.text,
+                    systemImage: health.severity == .error
+                        ? "exclamationmark.triangle"
+                        : "exclamationmark.bubble"
+                )
+                    .font(.caption)
+                    .foregroundStyle(health.severity == .error ? .red : .orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(health.accessibilityLabel)
+                    .brainAccessibleStatus(
+                        health.severity == .error ? .failed : .waiting,
+                        detail: health.accessibilityLabel
+                    )
+            }
+            ForEach(model.captureGuidance) { guidance in
+                Label(guidance.text, systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .brainAccessibleStatus(
-                        error.localizedCaseInsensitiveContains("microphone")
+                        guidance.sources.contains(.microphone)
                             ? .microphoneMissing
                             : .failed,
-                        detail: error
+                        detail: guidance.accessibilityLabel
                     )
-                    .accessibilityFocused($accessibilityFocus, equals: .errorSummary)
+                    .accessibilityLabel(guidance.accessibilityLabel)
             }
         }
         .padding()

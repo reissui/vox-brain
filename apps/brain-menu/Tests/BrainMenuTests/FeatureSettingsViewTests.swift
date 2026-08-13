@@ -6,14 +6,14 @@ import Testing
 @MainActor
 struct FeatureSettingsViewTests {
     @Test
-    func freshSpeechSettingsUseABundledCompatibleWhisperDefaultForBothWorkflows() throws {
+    func freshSpeechSettingsUseLargeV3AsTheOneDefaultForAllSpeech() throws {
         let controller = speechController(snapshot: readySnapshot())
         let expected = SpeechEngineSelection(
             engine: .whisper,
-            modelID: "small.en"
+            modelID: "large-v3"
         )
 
-        #expect(SpeechEngineCatalog.englishDefaultModelID == "small.en")
+        #expect(SpeechEngineCatalog.englishDefaultModelID == "large-v3")
         #expect(controller.selection(for: .dictation) == expected)
         #expect(controller.selection(for: .meetings) == expected)
         #expect(OnboardingController.defaultDictationModelID == expected.modelID)
@@ -27,7 +27,8 @@ struct FeatureSettingsViewTests {
         )
         #expect(recommended.recommendation?.title == "Recommended")
         #expect(recommended.engine == .whisper)
-        #expect(recommended.recommendation?.detail.contains("bundled") == true)
+        #expect(recommended.recommendation?.detail.contains("dictation") == true)
+        #expect(recommended.recommendation?.detail.contains("meeting") == true)
         #expect(multilingual.recommendation?.title == "Multilingual fallback")
         #expect(SpeechEngineCatalog.modelGuideURL.absoluteString
             == "https://voxtype.io/docs/MODEL_SELECTION_GUIDE")
@@ -522,6 +523,21 @@ struct FeatureSettingsViewTests {
         #expect(ai.contains("accessibilityFocused($accessibilityFocus, equals: .errorSummary)"))
         #expect(ai.contains(".accessibilityLabel(accessibilityLabel)"))
         #expect(ai.contains(".accessibilityValue(canTestConnection ? \"Enabled\" : \"Disabled\")"))
+    }
+
+    @Test
+    func speechSettingsExposeLocalProcessedTranscriptTerminologyOnly() throws {
+        let speech = try String(
+            contentsOf: sourceRoot.appendingPathComponent("Views/SpeechSettingsView.swift"),
+            encoding: .utf8
+        )
+
+        #expect(speech.contains("Section(\"Meeting terminology\")"))
+        #expect(speech.contains("processed meeting transcripts"))
+        #expect(speech.contains("never sent to VoxType or any service"))
+        #expect(speech.contains("controller.meetingTerminology.add"))
+        #expect(speech.contains("controller.meetingTerminology.replace"))
+        #expect(speech.contains("controller.meetingTerminology.remove"))
     }
 
     private func speechController(

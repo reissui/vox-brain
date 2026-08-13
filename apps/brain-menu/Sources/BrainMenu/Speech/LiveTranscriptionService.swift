@@ -15,7 +15,7 @@ extension LiveTranscriptionClient {
 
 extension VoxTypeClient: LiveTranscriptionClient {}
 
-enum LiveTranscriptionPhase: String, Equatable, Sendable {
+enum LiveTranscriptionPhase: String, Codable, Equatable, Sendable {
     case preview
     case final
 }
@@ -118,9 +118,34 @@ enum LiveTranscriptionEvent: Equatable, Sendable {
 struct LiveTranscriptionFinalization: Equatable, Sendable {
     let segments: [LiveTranscriptSegment]
     let failures: [LiveTranscriptFailure]
+    let spanOutcomes: [RawTranscriptionSpanOutcome]
     let previewLag: LiveTranscriptPreviewLagState
     let wasCancelled: Bool
     let effectiveEngine: String
+
+    var outcomes: [RawTranscriptionSpanOutcome] { spanOutcomes }
+}
+
+/// Auditable result for one speech-bearing span planned from retained audio.
+/// Text is present only after an actual successful engine response; failures
+/// and cancellation never create transcript placeholder text.
+struct RawTranscriptionSpanOutcome: Equatable, Sendable {
+    let source: MeetingAudioSource
+    let originalStartMilliseconds: Int64
+    let originalEndMilliseconds: Int64
+    let attemptedStartMilliseconds: Int64
+    let attemptedEndMilliseconds: Int64
+    let speechEvidence: SpeechActivityGate.Result
+    let requestCount: Int
+    let text: String?
+    let failure: String?
+    let wasCancelled: Bool
+    let attestedEngine: String
+    let attestedModel: String?
+
+    var failureMessage: String? { failure }
+    var engine: String { attestedEngine }
+    var model: String? { attestedModel }
 }
 
 struct LiveTranscriptionServiceSnapshot: Equatable, Sendable {
@@ -139,7 +164,7 @@ enum LiveTranscriptionServiceError: Error, Equatable, LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case .invalidConfiguration:
-            "Live transcription has an invalid origin, duration, queue bound, or threshold."
+            "Live transcription has an invalid capture origin."
         case .unsafeDirectory:
             "Live transcript WAV files require a private regular directory."
         case .alreadyStopped:
@@ -152,30 +177,23 @@ enum LiveTranscriptionServiceError: Error, Equatable, LocalizedError, Sendable {
     }
 }
 
-/// Chunks each source against one meeting clock while allowing microphone and
-/// system VoxType work to progress independently. A source has one worker and
-/// at most `maximumPendingChunksPerSource` queued WAVs behind it.
+/// Segments each source against one meeting clock while allowing microphone and
+/// system VoxType work to progress independently. A source has one active
+/// request and retains only its newest pending speech window behind it.
 actor LiveTranscriptionService {
     typealias EventHandler = @Sendable (LiveTranscriptionEvent) async -> Void
 
-    static let defaultChunkDuration: TimeInterval = 10
-    static let previewChunkDuration: TimeInterval = 3
-    static let defaultMaximumPendingChunksPerSource = 6
     static let defaultVoiceThreshold: Float = 0.01
 
     let engine: SpeechEngineID
+    let attestedModel: String?
     let originHostTimestamp: TimeInterval
-    let chunkDuration: TimeInterval
-    let maximumPendingChunksPerSource: Int
-
     private let client: any LiveTranscriptionClient
     private let wavDirectory: URL
     private let fileManager: FileManager
-    private let voiceThreshold: Float
     private let sampleRate = MeetingAudioWriter.sampleRate
-    private let chunkFrameCount: Int
 
-    private var windows: [MeetingAudioSource: SourceWindow] = [:]
+    private var segmenter = LivePreviewSegmenter()
     private var queues: [MeetingAudioSource: [PendingChunk]] = [:]
     private var workerTasks: [MeetingAudioSource: Task<Void, Never>] = [:]
     private var activeSources = Set<MeetingAudioSource>()
@@ -189,38 +207,21 @@ actor LiveTranscriptionService {
     init(
         client: any LiveTranscriptionClient,
         engine: SpeechEngineID,
+        attestedModel: String? = nil,
         originHostTimestamp: TimeInterval,
         wavDirectory: URL,
-        chunkDuration: TimeInterval = LiveTranscriptionService.defaultChunkDuration,
-        maximumPendingChunksPerSource: Int = LiveTranscriptionService
-            .defaultMaximumPendingChunksPerSource,
-        voiceThreshold: Float = LiveTranscriptionService.defaultVoiceThreshold,
         fileManager: FileManager = .default
     ) throws {
-        guard originHostTimestamp.isFinite,
-              chunkDuration.isFinite,
-              chunkDuration == Self.defaultChunkDuration
-                || chunkDuration == Self.previewChunkDuration,
-              maximumPendingChunksPerSource > 0,
-              maximumPendingChunksPerSource <= Self.defaultMaximumPendingChunksPerSource,
-              voiceThreshold.isFinite,
-              voiceThreshold >= 0 else {
-            throw LiveTranscriptionServiceError.invalidConfiguration
-        }
-        let frames = Int((chunkDuration * Double(MeetingAudioWriter.sampleRate)).rounded())
-        guard frames > 0 else {
+        guard originHostTimestamp.isFinite else {
             throw LiveTranscriptionServiceError.invalidConfiguration
         }
 
         self.client = client
         self.engine = engine
+        self.attestedModel = attestedModel
         self.originHostTimestamp = originHostTimestamp
         self.wavDirectory = wavDirectory.standardizedFileURL
-        self.chunkDuration = chunkDuration
-        self.maximumPendingChunksPerSource = maximumPendingChunksPerSource
-        self.voiceThreshold = voiceThreshold
         self.fileManager = fileManager
-        chunkFrameCount = frames
         try Self.preparePrivateDirectory(self.wavDirectory, fileManager: fileManager)
     }
 
@@ -246,73 +247,13 @@ actor LiveTranscriptionService {
         }
         guard firstSampleIndex < normalized.count else { return }
 
-        var globalFrame = firstGlobalFrame
-        var sampleIndex = firstSampleIndex
-        while sampleIndex < normalized.count {
-            var window = windows[buffer.source] ?? SourceWindow()
-            let targetIndex = globalFrame / Int64(chunkFrameCount)
-
-            if let currentIndex = window.index, targetIndex > currentIndex {
-                if let chunk = finishWindow(
-                    source: buffer.source,
-                    window: window,
-                    fullWindow: true
-                ) {
-                    await enqueue(chunk)
-                }
-                window = SourceWindow(nextMinimumIndex: currentIndex + 1)
-            }
-
-            if window.index == nil {
-                guard targetIndex >= window.nextMinimumIndex else {
-                    let obsoleteFrames = min(
-                        normalized.count - sampleIndex,
-                        Int((window.nextMinimumIndex * Int64(chunkFrameCount)) - globalFrame)
-                    )
-                    guard obsoleteFrames > 0 else { break }
-                    sampleIndex += obsoleteFrames
-                    globalFrame += Int64(obsoleteFrames)
-                    windows[buffer.source] = window
-                    continue
-                }
-                window.begin(index: targetIndex, frameCount: chunkFrameCount)
-            }
-
-            guard let currentIndex = window.index else { break }
-            if targetIndex < currentIndex {
-                let skip = min(
-                    normalized.count - sampleIndex,
-                    Int((Int64(currentIndex) * Int64(chunkFrameCount)) - globalFrame)
-                )
-                guard skip > 0 else { break }
-                sampleIndex += skip
-                globalFrame += Int64(skip)
-                windows[buffer.source] = window
-                continue
-            }
-
-            let offset = Int(globalFrame % Int64(chunkFrameCount))
-            let count = min(normalized.count - sampleIndex, chunkFrameCount - offset)
-            let values = normalized[sampleIndex..<(sampleIndex + count)]
-            window.samples.replaceSubrange(offset..<(offset + count), with: values)
-            window.lastWrittenOffset = max(window.lastWrittenOffset, offset + count)
-            if !window.hasVoice {
-                window.hasVoice = values.contains { abs($0) >= voiceThreshold }
-            }
-            sampleIndex += count
-            globalFrame += Int64(count)
-
-            if offset + count == chunkFrameCount {
-                if let chunk = finishWindow(
-                    source: buffer.source,
-                    window: window,
-                    fullWindow: true
-                ) {
-                    await enqueue(chunk)
-                }
-                window = SourceWindow(nextMinimumIndex: currentIndex + 1)
-            }
-            windows[buffer.source] = window
+        let segments = segmenter.append(
+            source: buffer.source,
+            startFrame: firstGlobalFrame,
+            samples: Array(normalized[firstSampleIndex...])
+        )
+        for segment in segments {
+            await enqueue(PendingSamples(segment: segment))
         }
     }
 
@@ -347,6 +288,7 @@ actor LiveTranscriptionService {
             return LiveTranscriptionFinalization(
                 segments: [],
                 failures: [],
+                spanOutcomes: [],
                 previewLag: previewLagState,
                 wasCancelled: wasCancelled,
                 effectiveEngine: engine.rawValue
@@ -360,15 +302,10 @@ actor LiveTranscriptionService {
             )
         }
 
-        let tailChunks = MeetingAudioSource.allCases.compactMap { source -> PendingSamples? in
-            guard let window = windows[source], window.index != nil else { return nil }
-            return finishWindow(source: source, window: window, fullWindow: false)
-        }
-        await cancelPreviewWork()
-        // Preserve at most one unfinished preview window per source. This keeps
-        // short acknowledgements that fall below final VAD thresholds without
-        // draining an arbitrary backlog before final transcription.
+        let tailChunks = segmenter.flush().map(PendingSamples.init(segment:))
         for chunk in tailChunks { await enqueue(chunk) }
+        // The public stop boundary settles the one active and newest pending
+        // preview per source before starting authoritative final transcription.
         await drainWorkers()
         if wasCancelled || Task.isCancelled {
             isStopping = false
@@ -376,6 +313,7 @@ actor LiveTranscriptionService {
             return LiveTranscriptionFinalization(
                 segments: [],
                 failures: [],
+                spanOutcomes: [],
                 previewLag: previewLagState,
                 wasCancelled: true,
                 effectiveEngine: await client.effectiveEngine(for: engine.rawValue)
@@ -386,9 +324,12 @@ actor LiveTranscriptionService {
         do {
             let timeline = try MeetingTimelineAudio(capture: capture)
             let spans = try timeline.speechSpans()
+            let plannedSpans = try spans.map {
+                PlannedFinalSpan(span: $0, speechEvidence: try timeline.speechEvidence(for: $0))
+            }
             let task = Task { [client, engine, wavDirectory] in
                 await Self.transcribeFinalSpans(
-                    spans,
+                    plannedSpans,
                     timeline: timeline,
                     client: client,
                     engine: engine,
@@ -401,19 +342,25 @@ actor LiveTranscriptionService {
         } catch {
             final = FinalSpanBatch(
                 segments: [],
-                failures: Self.timelineFailures(capture: capture, error: error)
+                failures: Self.timelineFailures(capture: capture, error: error),
+                spanOutcomes: []
             )
         }
 
+        let effectiveEngine = await client.effectiveEngine(for: engine.rawValue)
+        let attestedOutcomes = final.spanOutcomes.map {
+            $0.attesting(engine: effectiveEngine, model: attestedModel)
+        }
         if wasCancelled || Task.isCancelled {
             isStopping = false
             isStopped = true
             return LiveTranscriptionFinalization(
                 segments: [],
-                failures: [],
+                failures: final.failures.sorted(by: Self.failuresAreOrdered),
+                spanOutcomes: attestedOutcomes.sorted(by: Self.outcomesAreOrdered),
                 previewLag: previewLagState,
                 wasCancelled: true,
-                effectiveEngine: await client.effectiveEngine(for: engine.rawValue)
+                effectiveEngine: effectiveEngine
             )
         }
 
@@ -422,9 +369,10 @@ actor LiveTranscriptionService {
         return LiveTranscriptionFinalization(
             segments: final.segments.sorted(by: Self.segmentsAreOrdered),
             failures: final.failures.sorted(by: Self.failuresAreOrdered),
+            spanOutcomes: attestedOutcomes.sorted(by: Self.outcomesAreOrdered),
             previewLag: previewLagState,
             wasCancelled: false,
-            effectiveEngine: await client.effectiveEngine(for: engine.rawValue)
+            effectiveEngine: effectiveEngine
         )
     }
 
@@ -433,6 +381,7 @@ actor LiveTranscriptionService {
     func cancel() async {
         wasCancelled = true
         isStopping = true
+        segmenter.cancel()
         let finalTask = finalizationTask
         finalTask?.cancel()
         let tasks = Array(workerTasks.values)
@@ -446,7 +395,6 @@ actor LiveTranscriptionService {
         workerTasks.removeAll()
         finalizationTask = nil
         activeSources.removeAll()
-        windows.removeAll()
         isStopping = false
         isStopped = true
         MeetingTranscriptionAudioCleanup.removeDirectoryIfEmpty(
@@ -455,58 +403,12 @@ actor LiveTranscriptionService {
         )
     }
 
-    /// Preview text is opportunistic. Stop never waits for queued preview
-    /// commands before starting the authoritative final pass, and cancellation
-    /// is propagated to any in-flight VoxType child process.
-    private func cancelPreviewWork() async {
-        windows.removeAll()
-        let tasks = Array(workerTasks.values)
-        for task in tasks { task.cancel() }
-        for task in tasks { await task.value }
-        for queue in queues.values {
-            for chunk in queue { try? fileManager.removeItem(at: chunk.wavURL) }
-        }
-        queues.removeAll()
-        workerTasks.removeAll()
-        activeSources.removeAll()
-    }
-
     private var previewLagState: LiveTranscriptPreviewLagState {
         let values = droppedChunks.filter { $0.value > 0 }
         return values.isEmpty ? .current : .lagging(droppedChunksBySource: values)
     }
 
-    private func finishWindow(
-        source: MeetingAudioSource,
-        window: SourceWindow,
-        fullWindow: Bool
-    ) -> PendingSamples? {
-        guard let index = window.index,
-              window.hasVoice,
-              window.lastWrittenOffset > 0 else { return nil }
-        let frameCount = fullWindow ? chunkFrameCount : window.lastWrittenOffset
-        let start = Int64(
-            (Double(index * Int64(chunkFrameCount)) / Double(sampleRate) * 1_000).rounded()
-        )
-        let end = Int64(
-            (Double(index * Int64(chunkFrameCount) + Int64(frameCount))
-                / Double(sampleRate) * 1_000).rounded()
-        )
-        return PendingSamples(
-            source: source,
-            startMilliseconds: start,
-            endMilliseconds: end,
-            samples: Array(window.samples.prefix(frameCount))
-        )
-    }
-
     private func enqueue(_ samples: PendingSamples) async {
-        if queues[samples.source, default: []].count >= maximumPendingChunksPerSource {
-            droppedChunks[samples.source, default: 0] += 1
-            await eventHandler(.previewLagChanged(previewLagState))
-            return
-        }
-
         do {
             let url = try writePreviewWAV(samples)
             let pending = PendingChunk(
@@ -515,13 +417,13 @@ actor LiveTranscriptionService {
                 endMilliseconds: samples.endMilliseconds,
                 wavURL: url
             )
-            queues[samples.source, default: []].append(pending)
-            queues[samples.source]?.sort {
-                if $0.startMilliseconds != $1.startMilliseconds {
-                    return $0.startMilliseconds < $1.startMilliseconds
-                }
-                return $0.endMilliseconds < $1.endMilliseconds
+            let replaced = queues[samples.source, default: []]
+            if !replaced.isEmpty {
+                for chunk in replaced { try? fileManager.removeItem(at: chunk.wavURL) }
+                droppedChunks[samples.source, default: 0] += replaced.count
+                await eventHandler(.previewLagChanged(previewLagState))
             }
+            queues[samples.source] = [pending]
             startWorkerIfNeeded(for: samples.source)
         } catch {
             await eventHandler(.failure(LiveTranscriptFailure(
@@ -595,7 +497,7 @@ actor LiveTranscriptionService {
     }
 
     private static func transcribeFinalSpans(
-        _ spans: [MeetingTimelineSpeechSpan],
+        _ spans: [PlannedFinalSpan],
         timeline: MeetingTimelineAudio,
         client: any LiveTranscriptionClient,
         engine: SpeechEngineID,
@@ -603,29 +505,30 @@ actor LiveTranscriptionService {
     ) async -> FinalSpanBatch {
         await withTaskGroup(of: FinalSpanBatch.self) { group in
             for source in MeetingAudioSource.allCases {
-                let sourceSpans = spans.filter { $0.source == source }
+                let sourceSpans = spans.filter { $0.span.source == source }
                 guard !sourceSpans.isEmpty else { continue }
                 group.addTask {
                     var batch = FinalSpanBatch()
-                    var consecutiveFailures = 0
-                    sourceLoop: for span in sourceSpans {
-                        guard !Task.isCancelled else { break }
+                    for plannedSpan in sourceSpans {
+                        if Task.isCancelled {
+                            let cancellation = Self.cancelledFinalSpan(plannedSpan, engine: engine)
+                            batch.failures.append(cancellation.failure)
+                            batch.spanOutcomes.append(cancellation.outcome)
+                            continue
+                        }
                         switch await Self.transcribeFinalSpan(
-                            span,
+                            plannedSpan,
                             timeline: timeline,
                             client: client,
                             engine: engine,
                             wavDirectory: wavDirectory
                         ) {
-                        case .segment(let segment):
+                        case .segment(let segment, let outcome):
                             batch.segments.append(segment)
-                            consecutiveFailures = 0
-                        case .failure(let failure, let shouldStopSource):
+                            batch.spanOutcomes.append(outcome)
+                        case .failure(let failure, let outcome):
                             batch.failures.append(failure)
-                            consecutiveFailures += 1
-                            if shouldStopSource || consecutiveFailures >= 3 {
-                                break sourceLoop
-                            }
+                            batch.spanOutcomes.append(outcome)
                         }
                     }
                     return batch
@@ -636,79 +539,176 @@ actor LiveTranscriptionService {
             for await batch in group {
                 combined.segments.append(contentsOf: batch.segments)
                 combined.failures.append(contentsOf: batch.failures)
+                combined.spanOutcomes.append(contentsOf: batch.spanOutcomes)
             }
             return combined
         }
     }
 
     private static func transcribeFinalSpan(
-        _ span: MeetingTimelineSpeechSpan,
+        _ plannedSpan: PlannedFinalSpan,
         timeline: MeetingTimelineAudio,
         client: any LiveTranscriptionClient,
         engine: SpeechEngineID,
         wavDirectory: URL
     ) async -> FinalSpanOutcome {
-        let wavURL: URL
-        do {
-            wavURL = try timeline.writeWAV(for: span, to: wavDirectory)
-        } catch {
-            return .failure(finalFailure(span: span, error: error), stopSource: false)
-        }
-        defer { try? FileManager.default.removeItem(at: wavURL) }
+        let original = plannedSpan.span
+        var requestCount = 0
+        var isSystemic = false
 
-        var finalMessage = "VoxType returned no text for a detected speech span."
-        for attempt in 0..<2 {
+        func attempt(_ attemptedSpan: MeetingTimelineSpeechSpan) async -> SpanRequestResult {
+            guard !Task.isCancelled else { return .cancelled(madeRequest: false) }
+            let wavURL: URL
+            do {
+                wavURL = try timeline.writeWAV(for: attemptedSpan, to: wavDirectory)
+            } catch {
+                return .failure(Self.boundedMessage(error), isSystemic: false, madeRequest: false)
+            }
+            defer { try? FileManager.default.removeItem(at: wavURL) }
+            guard !Task.isCancelled else { return .cancelled(madeRequest: false) }
             do {
                 let text = try await client.transcribe(
                     wavURL: wavURL,
                     engine: engine.rawValue
                 ).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else {
-                    if attempt == 0 { continue }
-                    break
+                    return .failure(
+                        "VoxType returned no text for a detected speech span.",
+                        isSystemic: false,
+                        madeRequest: true
+                    )
                 }
-                return .segment(LiveTranscriptSegment(
-                    source: span.source,
-                    startMilliseconds: span.startMilliseconds,
-                    endMilliseconds: span.endMilliseconds,
-                    text: text,
-                    phase: .final
-                ))
+                return .text(text, madeRequest: true)
             } catch is CancellationError {
-                finalMessage = CancellationError().localizedDescription
-                break
+                return .cancelled(madeRequest: true)
             } catch {
-                if let error = error as? VoxTypeClientError,
-                   error == .invalidTranscript {
-                    return .failure(
-                        finalFailure(span: span, error: error, isSystemic: false),
-                        stopSource: false
-                    )
-                }
-                if isSystemicFinalFailure(error) {
-                    return .failure(
-                        finalFailure(span: span, error: error, isSystemic: true),
-                        stopSource: true
-                    )
-                }
-                finalMessage = boundedMessage(error)
+                return .failure(
+                    boundedMessage(error),
+                    isSystemic: isSystemicFinalFailure(error),
+                    madeRequest: true
+                )
             }
         }
-        return .failure(
-            LiveTranscriptFailure(
-                source: span.source,
-                phase: .final,
-                startMilliseconds: span.startMilliseconds,
-                endMilliseconds: span.endMilliseconds,
-                message: String(finalMessage.prefix(240))
-            ),
-            stopSource: false
+
+        let exactResult = await attempt(original)
+        requestCount += exactResult.madeRequest ? 1 : 0
+        switch exactResult {
+        case .text(let text, _):
+            return .segment(
+                finalSegment(for: original, text: text),
+                rawOutcome(
+                    plannedSpan,
+                    attemptedSpan: original,
+                    requestCount: requestCount,
+                    text: text,
+                    failure: nil,
+                    wasCancelled: false,
+                    engine: engine
+                )
+            )
+        case .cancelled:
+            let cancellation = cancelledFinalSpan(
+                plannedSpan,
+                attemptedSpan: original,
+                requestCount: requestCount,
+                engine: engine
+            )
+            return .failure(cancellation.failure, cancellation.outcome)
+        case .failure(let message, let systemic, let madeRequest):
+            isSystemic = systemic
+            guard madeRequest else {
+                let failure = finalFailure(span: original, message: message)
+                return .failure(
+                    failure,
+                    rawOutcome(
+                        plannedSpan,
+                        attemptedSpan: original,
+                        requestCount: requestCount,
+                        text: nil,
+                        failure: message,
+                        wasCancelled: false,
+                        engine: engine
+                    )
+                )
+            }
+        }
+
+        let retrySpan: MeetingTimelineSpeechSpan
+        do {
+            retrySpan = try timeline.retrySpan(for: original)
+        } catch {
+            let message = boundedMessage(error)
+            return .failure(
+                finalFailure(span: original, message: message, isSystemic: isSystemic),
+                rawOutcome(
+                    plannedSpan,
+                    attemptedSpan: original,
+                    requestCount: requestCount,
+                    text: nil,
+                    failure: message,
+                    wasCancelled: false,
+                    engine: engine
+                )
+            )
+        }
+
+        let retryResult = await attempt(retrySpan)
+        requestCount += retryResult.madeRequest ? 1 : 0
+        switch retryResult {
+        case .text(let text, _):
+            return .segment(
+                finalSegment(for: original, text: text),
+                rawOutcome(
+                    plannedSpan,
+                    attemptedSpan: retrySpan,
+                    requestCount: requestCount,
+                    text: text,
+                    failure: nil,
+                    wasCancelled: false,
+                    engine: engine
+                )
+            )
+        case .cancelled:
+            let cancellation = cancelledFinalSpan(
+                plannedSpan,
+                attemptedSpan: retrySpan,
+                requestCount: requestCount,
+                engine: engine
+            )
+            return .failure(cancellation.failure, cancellation.outcome)
+        case .failure(let message, let systemic, _):
+            let systemicFailure = isSystemic || systemic
+            return .failure(
+                finalFailure(span: original, message: message, isSystemic: systemicFailure),
+                rawOutcome(
+                    plannedSpan,
+                    attemptedSpan: retrySpan,
+                    requestCount: requestCount,
+                    text: nil,
+                    failure: message,
+                    wasCancelled: false,
+                    engine: engine
+                )
+            )
+        }
+    }
+
+    private static func finalSegment(
+        for span: MeetingTimelineSpeechSpan,
+        text: String
+    ) -> LiveTranscriptSegment {
+        LiveTranscriptSegment(
+            source: span.source,
+            startMilliseconds: span.startMilliseconds,
+            endMilliseconds: span.endMilliseconds,
+            text: text,
+            phase: .final
         )
     }
 
     private static func finalFailure(
         span: MeetingTimelineSpeechSpan,
-        error: Error,
+        message: String,
         isSystemic: Bool = false
     ) -> LiveTranscriptFailure {
         LiveTranscriptFailure(
@@ -716,8 +716,55 @@ actor LiveTranscriptionService {
             phase: .final,
             startMilliseconds: span.startMilliseconds,
             endMilliseconds: span.endMilliseconds,
-            message: boundedMessage(error),
+            message: String(message.prefix(240)),
             isSystemic: isSystemic
+        )
+    }
+
+    private static func rawOutcome(
+        _ plannedSpan: PlannedFinalSpan,
+        attemptedSpan: MeetingTimelineSpeechSpan,
+        requestCount: Int,
+        text: String?,
+        failure: String?,
+        wasCancelled: Bool,
+        engine: SpeechEngineID
+    ) -> RawTranscriptionSpanOutcome {
+        RawTranscriptionSpanOutcome(
+            source: plannedSpan.span.source,
+            originalStartMilliseconds: plannedSpan.span.startMilliseconds,
+            originalEndMilliseconds: plannedSpan.span.endMilliseconds,
+            attemptedStartMilliseconds: attemptedSpan.startMilliseconds,
+            attemptedEndMilliseconds: attemptedSpan.endMilliseconds,
+            speechEvidence: plannedSpan.speechEvidence,
+            requestCount: requestCount,
+            text: text,
+            failure: failure.map { String($0.prefix(240)) },
+            wasCancelled: wasCancelled,
+            attestedEngine: engine.rawValue,
+            attestedModel: nil
+        )
+    }
+
+    private static func cancelledFinalSpan(
+        _ plannedSpan: PlannedFinalSpan,
+        attemptedSpan: MeetingTimelineSpeechSpan? = nil,
+        requestCount: Int = 0,
+        engine: SpeechEngineID
+    ) -> (failure: LiveTranscriptFailure, outcome: RawTranscriptionSpanOutcome) {
+        let message = "Transcription cancelled."
+        let attempted = attemptedSpan ?? plannedSpan.span
+        return (
+            finalFailure(span: plannedSpan.span, message: message),
+            rawOutcome(
+                plannedSpan,
+                attemptedSpan: attempted,
+                requestCount: requestCount,
+                text: nil,
+                failure: message,
+                wasCancelled: true,
+                engine: engine
+            )
         )
     }
 
@@ -766,6 +813,19 @@ actor LiveTranscriptionService {
         if lhs.source != rhs.source { return lhs.source.rawValue < rhs.source.rawValue }
         if lhs.phase != rhs.phase { return lhs.phase.rawValue < rhs.phase.rawValue }
         return lhs.message < rhs.message
+    }
+
+    private static func outcomesAreOrdered(
+        _ lhs: RawTranscriptionSpanOutcome,
+        _ rhs: RawTranscriptionSpanOutcome
+    ) -> Bool {
+        if lhs.originalStartMilliseconds != rhs.originalStartMilliseconds {
+            return lhs.originalStartMilliseconds < rhs.originalStartMilliseconds
+        }
+        if lhs.originalEndMilliseconds != rhs.originalEndMilliseconds {
+            return lhs.originalEndMilliseconds < rhs.originalEndMilliseconds
+        }
+        return lhs.source.rawValue < rhs.source.rawValue
     }
 
     private static func timelineFailures(
@@ -896,32 +956,50 @@ enum MeetingTranscriptionAudioCleanup {
 private struct FinalSpanBatch: Sendable {
     var segments: [LiveTranscriptSegment] = []
     var failures: [LiveTranscriptFailure] = []
+    var spanOutcomes: [RawTranscriptionSpanOutcome] = []
 }
 
 private enum FinalSpanOutcome: Sendable {
-    case segment(LiveTranscriptSegment)
-    case failure(LiveTranscriptFailure, stopSource: Bool)
+    case segment(LiveTranscriptSegment, RawTranscriptionSpanOutcome)
+    case failure(LiveTranscriptFailure, RawTranscriptionSpanOutcome)
 }
 
-private struct SourceWindow {
-    var index: Int64?
-    var nextMinimumIndex: Int64
-    var samples: [Float]
-    var lastWrittenOffset = 0
-    var hasVoice = false
+private struct PlannedFinalSpan: Sendable {
+    let span: MeetingTimelineSpeechSpan
+    let speechEvidence: SpeechActivityGate.Result
+}
 
-    init(nextMinimumIndex: Int64 = 0) {
-        index = nil
-        self.nextMinimumIndex = nextMinimumIndex
-        samples = []
+private enum SpanRequestResult: Sendable {
+    case text(String, madeRequest: Bool)
+    case failure(String, isSystemic: Bool, madeRequest: Bool)
+    case cancelled(madeRequest: Bool)
+
+    var madeRequest: Bool {
+        switch self {
+        case .text(_, let madeRequest),
+             .failure(_, _, let madeRequest),
+             .cancelled(let madeRequest):
+            madeRequest
+        }
     }
+}
 
-    mutating func begin(index: Int64, frameCount: Int) {
-        self.index = index
-        nextMinimumIndex = index
-        samples = [Float](repeating: 0, count: frameCount)
-        lastWrittenOffset = 0
-        hasVoice = false
+private extension RawTranscriptionSpanOutcome {
+    func attesting(engine: String, model: String?) -> Self {
+        Self(
+            source: source,
+            originalStartMilliseconds: originalStartMilliseconds,
+            originalEndMilliseconds: originalEndMilliseconds,
+            attemptedStartMilliseconds: attemptedStartMilliseconds,
+            attemptedEndMilliseconds: attemptedEndMilliseconds,
+            speechEvidence: speechEvidence,
+            requestCount: requestCount,
+            text: text,
+            failure: failure,
+            wasCancelled: wasCancelled,
+            attestedEngine: engine,
+            attestedModel: model
+        )
     }
 }
 
@@ -930,6 +1008,13 @@ private struct PendingSamples: Sendable {
     let startMilliseconds: Int64
     let endMilliseconds: Int64
     let samples: [Float]
+
+    init(segment: LivePreviewSegmenter.Segment) {
+        source = segment.source
+        startMilliseconds = segment.startMilliseconds
+        endMilliseconds = segment.endMilliseconds
+        samples = segment.samples
+    }
 }
 
 private struct PendingChunk: Sendable {

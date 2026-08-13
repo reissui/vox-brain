@@ -21,8 +21,11 @@ analysis → finalized text → local inbox
 2. Allow **Microphone** and **Accessibility** when prompted. Meetings also need
    **Screen & System Audio Recording**. Accessibility supports selected-text
    context and paste-related features; Brain does not monitor global keys.
-3. Choose a model in Speech Setup. Whisper Small (English) is the default for
-   English transcription; Whisper Large v3 Turbo is the multilingual fallback.
+3. Choose a model in Speech Setup. Whisper Large v3 is Brain's single verified
+   default for dictation, live preview, and final meeting transcription. Other
+   approved models, including Whisper Large v3 Turbo, remain explicit
+   fallbacks. Brain blocks recording if VoxType reports a different effective
+   model from the one requested.
 4. In **Audio Tests**, confirm microphone input. A pinned input uses its
    persistent Core Audio UID and never silently switches when missing.
 5. Optionally configure and test an AI provider. Brain discloses that finalized
@@ -41,8 +44,13 @@ starts or stops recording automatically.
 3. Pause and resume explicitly. Dictation cannot use the microphone during a
    recording.
 4. Choose **End & Process**. Dismissing the prompt keeps recording.
-5. Review the saved item. Meetings support speaker editing and talk-time
-   totals; Voice Notes show readable paragraphs and **Copy Full Transcript**.
+5. Review the saved item. **Processed** is selected automatically when a
+   current processed transcript exists; **Raw** remains the immutable fallback
+   with preserved previews, failed-span diagnostics, and verified model
+   metadata. Same-speaker utterances separated by less than eight seconds are
+   one readable turn; eight seconds or a speaker change starts a new turn.
+   Meetings support speaker editing and talk-time totals; Voice Notes show
+   readable paragraphs and **Copy Full Transcript**.
 6. Finalize the transcript to write it to the local inbox. Later edits create
    an explicit revision.
 
@@ -52,10 +60,21 @@ return to the same session. Notes autosave atomically after edits and are
 available after relaunch recovery.
 
 After transcription, Brain retains compact AAC audio locally and exposes
-reveal, export, and explicit delete controls. Failed or interrupted attempts
-keep private source audio for recovery. Deleting a recording removes its audio;
-deleting its entire item removes all of that item’s data. Brain never
-automatically deletes a saved recording.
+reveal, export, playback, timestamp seek, and explicit delete controls. Pause,
+resume, seek, and audio deletion leave both transcript versions readable.
+Failed or interrupted attempts keep private source audio for recovery. Deleting
+a recording removes its audio; deleting its entire item removes all of that
+item’s data. Brain never automatically deletes a saved recording.
+
+Processed text is a separate, replaceable projection of the immutable raw
+attempt. Private terminology can correct supported spellings while every change
+keeps an audit record; unsupported invented content is rejected. Optional
+analysis uses the current processed transcript and falls back to raw evidence
+when processing is unavailable. A stale or failed processed transcript stays
+retryable from review and never hides the raw transcript. **Create Improvement
+Prompt** runs only when pressed and produces bounded quality diagnostics for
+copying—no transcript content and no automatic follow-up generation, rendering,
+or export.
 
 ## Smoke test
 
@@ -77,6 +96,9 @@ Keep the previous app artifact until this passes.
 - **Recording interrupted:** reconnect the microphone, run the Speech test,
   and start a new recording. The partial transcript and source audio remain
   available for review and transcription retry.
+- **Processed transcript unavailable:** switch to **Raw** to keep reviewing the
+  immutable transcript, then choose **Retry Processing**. A failed retry does
+  not replace the last valid analysis or alter the raw attempt.
 - **No system track:** recheck Screen & System Audio Recording permission.
 - **VoxType or a model is missing:** use **Enable Speech** or **Download** in
   Speech Setup.

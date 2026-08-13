@@ -53,6 +53,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
 
     private static let registry = MeetingTranscriptionJobRegistry.shared
     private let store: MeetingStore
+    private let transcriptArtifactStore: MeetingTranscriptArtifactStore
     private let retention: AudioRetentionController
     private let scheduleUpload: UploadScheduler
     private let clientFactory: ClientFactory
@@ -60,6 +61,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
 
     init(
         store: MeetingStore = MeetingStore(),
+        transcriptArtifactStore: MeetingTranscriptArtifactStore? = nil,
         retention: AudioRetentionController = AudioRetentionController(),
         uploader: MeetingUploadController = MeetingUploadController(),
         uploadScheduler: UploadScheduler? = nil,
@@ -68,10 +70,12 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             guard let client = try VoxTypeClient.discover() else {
                 throw MeetingTranscriptionCoordinatorError.voxTypeUnavailable
             }
-            return FallbackLiveTranscriptionClient(client: client)
+            return client
         }
     ) {
         self.store = store
+        self.transcriptArtifactStore = transcriptArtifactStore
+            ?? MeetingTranscriptArtifactStore(rootURL: store.rootURL, fileManager: fileManager)
         self.retention = retention
         scheduleUpload = uploadScheduler ?? { [uploader] meetingID in
             Task {
@@ -203,8 +207,32 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         if let qualityIssue = MeetingAudioCaptureQuality.issue(in: capture) {
             let partialUtterances = transcript.utterances
             await transcript.cancel()
-            let outcome = await Task.detached(priority: .utility) { [store] in
-                MeetingTranscriptionPersistenceOutcome(
+            let attempt = Self.makeAttempt(
+                meeting: meeting,
+                utterances: partialUtterances,
+                retainedPreviews: partialUtterances,
+                failures: [MeetingTranscriptFailureDiagnostic(
+                    message: qualityIssue.message
+                )],
+                isSuccessful: false
+            )
+            let outcome = await Task.detached(
+                priority: .utility
+            ) { [store, transcriptArtifactStore] in
+                guard (try? transcriptArtifactStore.append(
+                    attempt,
+                    meetingID: meeting.id
+                )) != nil else {
+                    return MeetingTranscriptionPersistenceOutcome(
+                        meeting: Self.currentRecord(
+                            for: meeting.id,
+                            fallback: meeting,
+                            store: store
+                        ),
+                        shouldScheduleUpload: false
+                    )
+                }
+                return MeetingTranscriptionPersistenceOutcome(
                     meeting: Self.persistFailureIfCurrent(
                         meeting: meeting,
                         attemptUtterances: partialUtterances,
@@ -227,20 +255,31 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             return currentRecord(for: meeting.id, fallback: meeting)
         }
 
-        var resolvedMeeting = meeting
-        if let finalEngine = transcript.finalEngine,
-           finalEngine != meeting.speechEngine {
-            resolvedMeeting.speechEngine = finalEngine
-            resolvedMeeting.speechModel = "VoxType configured \(finalEngine) model"
-        }
+        let resolvedMeeting = meeting
         let utterances = transcript.utterances
         let failures = transcript.errors.filter { $0.phase == .final }
-        let outcome = await Task.detached(priority: .utility) { [store, retention] in
+        let allFailureDiagnostics = transcript.errors.map(MeetingTranscriptFailureDiagnostic.init)
+        let systemicFailures = failures.filter(\.isSystemic)
+        let isSuccessful = systemicFailures.isEmpty
+            && (utterances.isEmpty ? failures.isEmpty : true)
+        let attempt = Self.makeAttempt(
+            meeting: meeting,
+            spanOutcomes: transcript.finalSpanOutcomes,
+            utterances: utterances,
+            retainedPreviews: utterances.filter { $0.transcriptionPhase == .preview },
+            failures: allFailureDiagnostics,
+            isSuccessful: isSuccessful
+        )
+        let outcome = await Task.detached(
+            priority: .utility
+        ) { [store, retention, transcriptArtifactStore] in
             Self.persistFinalResult(
                 meeting: resolvedMeeting,
                 capture: capture,
                 utterances: utterances,
                 failures: failures,
+                attempt: attempt,
+                transcriptArtifactStore: transcriptArtifactStore,
                 store: store,
                 retention: retention
             )
@@ -332,6 +371,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 let service = try LiveTranscriptionService(
                     client: client,
                     engine: requestedEngine,
+                    attestedModel: processing.speechModel,
                     originHostTimestamp: capture.originHostTimestamp,
                     wavDirectory: store.directoryURL(for: meetingID)
                         .appendingPathComponent(".transcription", isDirectory: true)
@@ -352,6 +392,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 return Self.persistFailureIfCurrent(
                     meeting: candidate,
                     message: Self.bounded(error),
+                    transcriptArtifactStore: transcriptArtifactStore,
                     store: store
                 )
             }
@@ -400,7 +441,15 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         failed.transcriptionState = .failed
         failed.transcriptionAttemptCount = generation
         failed.transcriptionErrorMessage = String(message.prefix(720))
+        let attempt = Self.makeAttempt(
+            meeting: failed,
+            utterances: current.utterances,
+            retainedPreviews: current.utterances,
+            failures: [MeetingTranscriptFailureDiagnostic(message: message)],
+            isSuccessful: false
+        )
         do {
+            try transcriptArtifactStore.append(attempt, meetingID: meeting.id)
             try store.save(failed, utterances: current.utterances)
             return failed
         } catch {
@@ -613,6 +662,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         capture: MeetingAudioCaptureSummary,
         utterances: [MeetingUtterance],
         failures: [LiveTranscriptFailure],
+        attempt: MeetingTranscriptAttempt,
+        transcriptArtifactStore: MeetingTranscriptArtifactStore,
         store: MeetingStore,
         retention: AudioRetentionController
     ) -> MeetingTranscriptionPersistenceOutcome {
@@ -626,6 +677,27 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         currentMeeting.speechEngine = meeting.speechEngine
         currentMeeting.speechModel = meeting.speechModel
         let systemicFailures = failures.filter(\.isSystemic)
+        let isSuccessful = systemicFailures.isEmpty
+            && (utterances.isEmpty ? failures.isEmpty : true)
+        do {
+            try transcriptArtifactStore.append(
+                attempt,
+                meetingID: meeting.id
+            )
+            if isSuccessful {
+                try transcriptArtifactStore.select(
+                    attemptID: attempt.id,
+                    meetingID: meeting.id
+                )
+            }
+        } catch {
+            // The processing record is intentionally left retryable. No terminal
+            // state may claim an attempt whose immutable diagnostics are absent.
+            return MeetingTranscriptionPersistenceOutcome(
+                meeting: currentRecord(for: meeting.id, fallback: meeting, store: store),
+                shouldScheduleUpload: false
+            )
+        }
         guard systemicFailures.isEmpty && (utterances.isEmpty ? failures.isEmpty : true) else {
             let blockingFailures = systemicFailures.isEmpty ? failures : systemicFailures
             let message = blockingFailures.prefix(3)
@@ -643,6 +715,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         }
 
         var completed = currentMeeting
+        completed.selectedRawTranscriptAttemptID = attempt.id
         completed.transcriptionState = .completed
         completed.transcriptionErrorMessage = failures.isEmpty
             ? nil
@@ -702,6 +775,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         meeting: MeetingRecord,
         attemptUtterances: [MeetingUtterance] = [],
         message: String,
+        transcriptArtifactStore: MeetingTranscriptArtifactStore? = nil,
         store: MeetingStore
     ) -> MeetingRecord {
         guard let current = try? store.load(meeting.id),
@@ -730,11 +804,39 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             current.utterances
         }
         do {
+            if let transcriptArtifactStore {
+                let attempt = makeAttempt(
+                    meeting: meeting,
+                    utterances: attemptUtterances,
+                    retainedPreviews: attemptUtterances,
+                    failures: [MeetingTranscriptFailureDiagnostic(message: message)],
+                    isSuccessful: false
+                )
+                try transcriptArtifactStore.append(attempt, meetingID: meeting.id)
+            }
             try store.save(failed, utterances: durableUtterances)
             return failed
         } catch {
             return currentRecord(for: meeting.id, fallback: failed, store: store)
         }
+    }
+
+    private nonisolated static func makeAttempt(
+        meeting: MeetingRecord,
+        spanOutcomes: [RawTranscriptionSpanOutcome] = [],
+        utterances: [MeetingUtterance],
+        retainedPreviews: [MeetingUtterance],
+        failures: [MeetingTranscriptFailureDiagnostic],
+        isSuccessful: Bool
+    ) -> MeetingTranscriptAttempt {
+        MeetingTranscriptAttempt(
+            modelAttestation: MeetingTranscriptModelAttestation(meeting: meeting),
+            spanOutcomes: spanOutcomes.map(MeetingTranscriptSpanOutcome.init),
+            retainedPreviews: retainedPreviews,
+            utterances: utterances,
+            failures: failures,
+            isSuccessful: isSuccessful
+        )
     }
 
     private func isCurrentProcessingGeneration(_ meeting: MeetingRecord) -> Bool {

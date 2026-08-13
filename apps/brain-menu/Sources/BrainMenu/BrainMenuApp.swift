@@ -248,6 +248,18 @@ final class BrainAppControllerGraph {
         let ownership = MeetingAudioOwnership()
         meetingAudioOwnership = ownership
         let voxType = try? VoxTypeClient.discover()
+        let modelActivator: VoxTypeModelActivator? = voxType.map {
+            VoxTypeModelActivator(
+                configuration: VoxTypeConfigurationEditor(),
+                statuses: $0
+            )
+        }
+        let modelSource: VoxTypeModelSourceOfTruth? = voxType.map {
+            VoxTypeModelSourceOfTruth(
+                activator: modelActivator,
+                voxType: $0
+            )
+        }
         let nativeDictation = dictation ?? DictationController(
             voxType: voxType,
             audioCapture: ownership
@@ -272,7 +284,8 @@ final class BrainAppControllerGraph {
                 audioRetention: audioRetention,
                 ownership: ownership,
                 microphoneSelections: microphoneSelections,
-                microphoneInventory: microphoneInventory
+                microphoneInventory: microphoneInventory,
+                modelAttester: modelSource
             )
             nativeMeeting = built.controller
             nativeNotesStore = meetingNotesStore ?? built.notesStore
@@ -316,6 +329,9 @@ final class BrainAppControllerGraph {
         self.recordingIsland = island
 
         self.speechSettings = speechSettings ?? Self.makeSpeechSettings(
+            client: voxType,
+            modelActivator: modelActivator,
+            modelSource: modelSource,
             microphoneSelections: microphoneSelections,
             microphoneService: SystemMeetingMicrophoneService(
                 inventoryProvider: microphoneInventory
@@ -603,11 +619,25 @@ final class BrainAppControllerGraph {
         }
 
         automaticMeetingAnalysisTask = Task { @MainActor [weak self] in
-            let result = await analysisController.analyzeAfterFinalTranscription(
-                meeting: runningMeeting,
-                utterances: stored.utterances,
-                speakerState: SpeakerEditingState()
-            )
+            let result: MeetingAnalysisRunResult
+            if let processingAnalysis = analysisController as? MeetingAnalysisService,
+               let self {
+                let terminology = self.speechSettings.meetingTerminology
+                result = await processingAnalysis.analyzeAfterFinalTranscription(
+                    meeting: runningMeeting,
+                    utterances: stored.utterances,
+                    artifact: stored.rawTranscriptArtifacts,
+                    speakerState: SpeakerEditingState(),
+                    terminology: terminology.terms,
+                    terminologyHash: terminology.contentHash
+                )
+            } else {
+                result = await analysisController.analyzeAfterFinalTranscription(
+                    meeting: runningMeeting,
+                    utterances: stored.utterances,
+                    speakerState: SpeakerEditingState()
+                )
+            }
             guard !Task.isCancelled, let self else { return }
             guard let merged = try? self.meetings.mergeAnalysisResult(result) else { return }
             self.meeting.replaceCompletedMeeting(merged)
@@ -625,7 +655,8 @@ final class BrainAppControllerGraph {
         audioRetention: AudioRetentionController,
         ownership: MeetingAudioOwnership,
         microphoneSelections: MeetingMicrophoneSelectionStore,
-        microphoneInventory: any MeetingMicrophoneInventoryProviding
+        microphoneInventory: any MeetingMicrophoneInventoryProviding,
+        modelAttester: (any VoxTypeModelAttesting)?
     ) -> (
         controller: MeetingController,
         transcription: MeetingTranscriptionCoordinator,
@@ -658,16 +689,20 @@ final class BrainAppControllerGraph {
             recorder: recorder,
             speechEngine: SpeechEngineID.whisper.rawValue,
             speechModel: OnboardingController.defaultMeetingModelID,
+            modelAttester: modelAttester,
             audioMonitor: audioMonitor
         )
         return (controller, transcription, notesStore)
     }
 
     private static func makeSpeechSettings(
+        client: VoxTypeClient?,
+        modelActivator: VoxTypeModelActivator?,
+        modelSource: VoxTypeModelSourceOfTruth?,
         microphoneSelections: MeetingMicrophoneSelectionStore,
         microphoneService: any MeetingMicrophoneSettingsServing
     ) -> SpeechSettingsController {
-        guard let client = try? VoxTypeClient.discover() else {
+        guard let client else {
             return SpeechSettingsController(
                 voxType: nil,
                 inventory: UnavailableSpeechModelInventory(),
@@ -680,10 +715,8 @@ final class BrainAppControllerGraph {
             voxType: client,
             inventory: ModelInventory(client: client),
             selections: SpeechSelectionStore(),
-            modelActivator: VoxTypeModelActivator(
-                configuration: VoxTypeConfigurationEditor(),
-                statuses: client
-            ),
+            modelActivator: modelActivator,
+            modelSource: modelSource,
             microphoneService: microphoneService,
             microphoneSelectionStore: microphoneSelections
         )
@@ -918,18 +951,20 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
 
         let discoveredClient = try? VoxTypeClient.discover()
         let transcriptionClient: any LiveTranscriptionClient = if let discoveredClient {
-            FallbackLiveTranscriptionClient(client: discoveredClient)
+            discoveredClient
         } else {
             UnavailableMeetingTranscriptionClient()
         }
-        let engine = SpeechEngineID(rawValue: speechEngine) ?? .parakeet
+        let engine = request.speechModelAttestation?.effectiveSelection.engine
+            ?? SpeechEngineID(rawValue: speechEngine)
+            ?? .whisper
         let transcript = LiveTranscriptController(service: try LiveTranscriptionService(
             client: transcriptionClient,
             engine: engine,
+            attestedModel: request.speechModelAttestation?.effectiveSelection.modelID,
             originHostTimestamp: ProcessInfo.processInfo.systemUptime,
             wavDirectory: store.directoryURL(for: request.meetingID)
-                .appendingPathComponent(".transcription", isDirectory: true),
-            chunkDuration: LiveTranscriptionService.previewChunkDuration
+                .appendingPathComponent(".transcription", isDirectory: true)
         ))
         let writer = try MeetingAudioWriter(
             meetingDirectory: store.directoryURL(for: request.meetingID),
@@ -1314,8 +1349,10 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             startedAt: request.startedAt,
             endedAt: date,
             lifecycleState: .completed,
-            speechEngine: speechEngine,
-            speechModel: speechModel
+            speechEngine: request.speechModelAttestation?.effectiveSelection.engine.rawValue
+                ?? speechEngine,
+            speechModel: request.speechModelAttestation?.effectiveSelection.modelID ?? speechModel,
+            speechModelAttestation: request.speechModelAttestation
         )
         let processing: MeetingRecord
         do {
@@ -1745,8 +1782,10 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             startedAt: request.startedAt,
             endedAt: endedAt,
             lifecycleState: lifecycleState,
-            speechEngine: speechEngine,
-            speechModel: speechModel,
+            speechEngine: request.speechModelAttestation?.effectiveSelection.engine.rawValue
+                ?? speechEngine,
+            speechModel: request.speechModelAttestation?.effectiveSelection.modelID ?? speechModel,
+            speechModelAttestation: request.speechModelAttestation,
             transcriptionState: transcriptionState,
             transcriptionErrorMessage: errorMessage
         )

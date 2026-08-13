@@ -12,28 +12,36 @@ struct LiveTranscriptControllerTests {
             client: FakeLiveTranscriptionClient(),
             engine: .whisper,
             originHostTimestamp: 100,
-            wavDirectory: fixture.wavDirectory,
-            chunkDuration: LiveTranscriptionService.previewChunkDuration
+            wavDirectory: fixture.wavDirectory
         )
         let controller = LiveTranscriptController(service: service)
         var checkpoints: [[MeetingUtterance]] = []
         controller.setUtteranceCheckpointHandler { checkpoints.append($0) }
 
-        await controller.append(fixture.buffer(
+        let speech = fixture.buffer(
             source: .microphone,
             hostTimestamp: 100,
             duration: 3,
             amplitude: 0.25
-        ))
+        )
+        let pause = fixture.buffer(
+            source: .microphone,
+            hostTimestamp: 103,
+            duration: 1.3,
+            amplitude: 0
+        )
+        await controller.append(speech)
+        await controller.append(pause)
         await controller.waitForPendingPreview()
 
         #expect(checkpoints.last == controller.utterances)
         #expect(checkpoints.last?.first?.text == "preview microphone 0")
+        #expect(checkpoints.last?.first?.endMilliseconds == 3_500)
     }
 
     @Test
     @MainActor
-    func chunksSourcesOnMeetingWindowsSkipsSilenceFlushesTailAndCleansWAVs() async throws {
+    func segmentsContextualSpeechSkipsSilenceFlushesTailAndCleansWAVs() async throws {
         let fixture = try LiveTranscriptFixture()
         let client = FakeLiveTranscriptionClient()
         let service = try LiveTranscriptionService(
@@ -44,30 +52,40 @@ struct LiveTranscriptControllerTests {
         )
         let controller = LiveTranscriptController(service: service)
 
-        await controller.append(fixture.buffer(
+        let firstSpeech = fixture.buffer(
             source: .microphone,
             hostTimestamp: 100,
-            duration: 10,
+            duration: 4,
             amplitude: 0.25
-        ))
-        await controller.append(fixture.buffer(
+        )
+        let closingPause = fixture.buffer(
+            source: .microphone,
+            hostTimestamp: 104,
+            duration: 1.3,
+            amplitude: 0
+        )
+        let systemSilence = fixture.buffer(
             source: .system,
             hostTimestamp: 100,
-            duration: 10,
+            duration: 12,
             amplitude: 0
-        ))
-        await controller.append(fixture.buffer(
+        )
+        let shortTail = fixture.buffer(
             source: .microphone,
             hostTimestamp: 110,
             duration: 2,
             amplitude: 0.2
-        ))
+        )
+        await controller.append(firstSpeech)
+        await controller.append(closingPause)
+        await controller.append(systemSilence)
+        await controller.append(shortTail)
         await controller.waitForPendingPreview()
 
         #expect(controller.utterances.count == 1)
         #expect(controller.utterances.first?.source == .microphone)
         #expect(controller.utterances.first?.startMilliseconds == 0)
-        #expect(controller.utterances.first?.endMilliseconds == 10_000)
+        #expect(controller.utterances.first?.endMilliseconds == 4_520)
         #expect(controller.utterances.first?.humanName == "You")
 
         let capture = try fixture.captureSummary(
@@ -79,15 +97,15 @@ struct LiveTranscriptControllerTests {
         let previews = calls.filter { $0.phase == .preview }
         let finals = calls.filter { $0.phase == .final }.sorted(by: callOrder)
         #expect(previews.map(\.source) == [.microphone, .microphone])
-        #expect(previews.map(\.startMilliseconds) == [0, 10_000])
-        #expect(previews.map(\.endMilliseconds) == [10_000, 12_000])
+        #expect(previews.map(\.startMilliseconds) == [0, 9_490])
+        #expect(previews.map(\.endMilliseconds) == [4_520, 12_000])
         #expect(finals.map(\.source) == [.microphone, .system])
         #expect(finals.map(\.startMilliseconds) == [0, 0])
         #expect(calls.allSatisfy { $0.engine == "whisper" })
         #expect(calls.allSatisfy { $0.wasOwnerOnly && $0.hadWAVHeader })
         #expect(previews.map(\.wavDataByteCount) == [
-            10 * MeetingAudioWriter.sampleRate * MemoryLayout<Float>.size,
-            2 * MeetingAudioWriter.sampleRate * MemoryLayout<Float>.size,
+            4_520 * MeetingAudioWriter.sampleRate / 1_000 * MemoryLayout<Float>.size,
+            2_510 * MeetingAudioWriter.sampleRate / 1_000 * MemoryLayout<Float>.size,
         ])
         #expect(try transcriptionDirectoryIsAbsentOrEmpty(fixture.wavDirectory))
 
@@ -95,9 +113,20 @@ struct LiveTranscriptControllerTests {
         #expect(Set(controller.utterances.map(\.humanName)) == Set(["You", "Remote"]))
         #expect(controller.utterances.filter { $0.text.hasPrefix("final ") }.count == 2)
         #expect(controller.utterances.contains {
-            $0.text == "preview microphone 10000"
-                && $0.startMilliseconds == 10_000
+            $0.text == "preview microphone 9490"
+                && $0.startMilliseconds == 9_490
                 && $0.endMilliseconds == 12_000
+        })
+        #expect(controller.utterances.allSatisfy {
+            controller.provenance(for: $0.id)
+                == ($0.text.hasPrefix("preview ") ? .preview : .final)
+        })
+        #expect(controller.utterances.allSatisfy {
+            $0.transcriptionPhase == controller.provenance(for: $0.id)
+        })
+        #expect(controller.finalSpanOutcomes.count == 2)
+        #expect(controller.finalSpanOutcomes.allSatisfy {
+            $0.requestCount == 1 && $0.text != nil && $0.failure == nil
         })
         #expect(controller.errors.isEmpty)
         #expect(controller.previewLag == .current)
@@ -121,7 +150,7 @@ struct LiveTranscriptControllerTests {
 
     @Test
     @MainActor
-    func boundsEachOrderedSourceQueueAndPublishesPreviewLagWithoutConcurrentProcesses() async throws {
+    func keepsOneActiveAndNewestPendingPerSourceWithoutConcurrentProcesses() async throws {
         let fixture = try LiveTranscriptFixture()
         let client = FakeLiveTranscriptionClient(blockFirstPreviewSource: .microphone)
         let service = try LiveTranscriptionService(
@@ -136,7 +165,7 @@ struct LiveTranscriptControllerTests {
         let firstMicrophone = fixture.buffer(
             source: .microphone,
             hostTimestamp: 50,
-            duration: 10,
+            duration: 20,
             amplitude: 0.3
         )
         capturedBuffers.append(firstMicrophone)
@@ -148,7 +177,7 @@ struct LiveTranscriptControllerTests {
         let system = fixture.buffer(
             source: .system,
             hostTimestamp: 50,
-            duration: 10,
+            duration: 20,
             amplitude: 0.4
         )
         capturedBuffers.append(system)
@@ -157,11 +186,11 @@ struct LiveTranscriptControllerTests {
         await service.waitForPendingPreview(source: .system)
         #expect(controller.utterances.map(\.source) == [.system])
 
-        for index in 1...7 {
+        for index in 1...3 {
             let buffer = fixture.buffer(
                 source: .microphone,
-                hostTimestamp: 50 + Double(index * 10),
-                duration: 10,
+                hostTimestamp: 50 + Double(index * 20),
+                duration: 20,
                 amplitude: 0.3
             )
             capturedBuffers.append(buffer)
@@ -170,18 +199,19 @@ struct LiveTranscriptControllerTests {
 
         let backedUp = await service.snapshot()
         #expect(backedUp.activeSources.contains(.microphone))
-        #expect(backedUp.pendingChunksBySource[.microphone] == 6)
-        #expect(backedUp.previewLag == .lagging(droppedChunksBySource: [.microphone: 1]))
-        #expect(controller.previewLag == .lagging(droppedChunksBySource: [.microphone: 1]))
+        #expect(backedUp.pendingChunksBySource[.microphone] == 1)
+        #expect(backedUp.previewLag == .lagging(droppedChunksBySource: [.microphone: 2]))
+        #expect(controller.previewLag == .lagging(droppedChunksBySource: [.microphone: 2]))
 
         await client.releaseBlockedPreview()
         await controller.waitForPendingPreview()
 
         let calls = await client.calls.filter { $0.phase == .preview }
         let microphoneCalls = calls.filter { $0.source == .microphone }
-        #expect(microphoneCalls.count == 7)
-        #expect(microphoneCalls.map(\.startMilliseconds) == [0, 10_000, 20_000, 30_000, 40_000, 50_000, 60_000])
-        #expect(!microphoneCalls.contains { $0.startMilliseconds == 70_000 })
+        #expect(microphoneCalls.count == 2)
+        #expect(microphoneCalls.map(\.startMilliseconds) == [0, 60_000])
+        #expect(!microphoneCalls.contains { $0.startMilliseconds == 20_000 })
+        #expect(!microphoneCalls.contains { $0.startMilliseconds == 40_000 })
         #expect(await client.maximumConcurrent(for: .microphone) == 1)
         #expect(await client.maximumConcurrent(for: .system) == 1)
         #expect(controller.utterances == controller.utterances.sorted(by: utteranceOrder))
@@ -200,6 +230,42 @@ struct LiveTranscriptControllerTests {
             $0.source == .microphone && $0.endMilliseconds > 70_000
         })
         #expect(controller.previewLag == .current)
+    }
+
+    @Test
+    @MainActor
+    func stopWaitsForAdmittedActivePreviewAtPublicBoundary() async throws {
+        let fixture = try LiveTranscriptFixture()
+        let client = FakeLiveTranscriptionClient(blockFirstPreviewSource: .microphone)
+        let service = try LiveTranscriptionService(
+            client: client,
+            engine: .parakeet,
+            originHostTimestamp: 90,
+            wavDirectory: fixture.wavDirectory
+        )
+        let controller = LiveTranscriptController(service: service)
+        let buffer = fixture.buffer(
+            source: .microphone,
+            hostTimestamp: 90,
+            duration: 20,
+            amplitude: 0.2
+        )
+        await controller.append(buffer)
+        await client.waitUntilFirstBlockedPreviewStarts()
+        let capture = try fixture.captureSummary(buffers: [buffer])
+
+        let stopping = Task { await controller.stop(capture: capture) }
+        for _ in 0..<100 where !controller.isFinalizing { await Task.yield() }
+
+        #expect(controller.isFinalizing)
+        #expect(await client.calls.filter { $0.phase == .final }.isEmpty)
+        await client.releaseBlockedPreview()
+        await stopping.value
+
+        #expect(controller.isFinalized)
+        #expect(await client.calls.first?.phase == .preview)
+        #expect(await client.calls.contains { $0.phase == .final })
+        #expect(try transcriptionDirectoryIsAbsentOrEmpty(fixture.wavDirectory))
     }
 
     @Test
@@ -267,11 +333,10 @@ struct LiveTranscriptControllerTests {
 
         await controller.stop(capture: try fixture.captureSummary(buffers: buffers))
 
-        #expect(controller.utterances.map(\.source) == [.system, .microphone, .system])
-        #expect(controller.utterances.map(\.startMilliseconds) == [0, 430, 700])
+        #expect(controller.utterances.map(\.source) == [.system, .system])
+        #expect(controller.utterances.map(\.startMilliseconds) == [0, 700])
         #expect(controller.utterances.map(\.text) == [
             "final system 0",
-            "final microphone 430",
             "final system 700",
         ])
     }
@@ -368,7 +433,7 @@ struct LiveTranscriptControllerTests {
 
     @Test
     @MainActor
-    func systemicFinalTimeoutTripsPerSourceCircuitAfterOneCall() async throws {
+    func systemicFinalTimeoutRetriesEveryPlannedSpanExactlyOnce() async throws {
         let fixture = try LiveTranscriptFixture()
         let client = FakeLiveTranscriptionClient(systemicFinalFailureSources: [.system])
         let service = try LiveTranscriptionService(
@@ -388,15 +453,19 @@ struct LiveTranscriptControllerTests {
         await controller.stop(capture: try fixture.captureSummary(buffers: buffers))
 
         let finalCalls = await client.calls.filter { $0.phase == .final }
-        #expect(finalCalls.count == 1)
-        #expect(controller.errors.count == 1)
-        #expect(controller.utterances.count == 1)
-        #expect(controller.utterances.first?.text.hasPrefix("preview ") == true)
+        #expect(finalCalls.count == 6)
+        #expect(controller.errors.count == 3)
+        #expect(controller.finalSpanOutcomes.count == 3)
+        #expect(controller.finalSpanOutcomes.allSatisfy {
+            $0.requestCount == 2 && $0.text == nil && $0.failure != nil
+        })
+        #expect(!controller.utterances.isEmpty)
+        #expect(controller.utterances.allSatisfy { $0.text.hasPrefix("preview ") })
     }
 
     @Test
     @MainActor
-    func repeatedOrdinaryFinalFailuresStopAfterThreeSpans() async throws {
+    func repeatedOrdinaryFinalFailuresRecordEveryPlannedSpan() async throws {
         let fixture = try LiveTranscriptFixture()
         let client = FakeLiveTranscriptionClient(failingFinalSources: [.system])
         let service = try LiveTranscriptionService(
@@ -419,10 +488,10 @@ struct LiveTranscriptControllerTests {
         await controller.stop(capture: try fixture.captureSummary(buffers: buffers))
 
         let finalCalls = await client.calls.filter { $0.phase == .final }
-        #expect(finalCalls.count == 6)
-        #expect(controller.errors.count == 3)
-        #expect(controller.utterances.count == 1)
-        #expect(controller.utterances.first?.text.hasPrefix("preview ") == true)
+        #expect(finalCalls.count == 8)
+        #expect(controller.errors.count == 4)
+        #expect(controller.utterances.count == 2)
+        #expect(controller.utterances.allSatisfy { $0.text.hasPrefix("preview ") })
     }
 
     @Test
@@ -441,7 +510,7 @@ struct LiveTranscriptControllerTests {
             source: .microphone,
             hostTimestamp: 400,
             duration: 0.8,
-            amplitude: 0.02
+            amplitude: 0.2
         )
         await controller.append(buffer)
 
@@ -452,11 +521,125 @@ struct LiveTranscriptControllerTests {
         #expect(controller.utterances.count == 1)
         #expect(controller.utterances.first?.source == .microphone)
         #expect(controller.errors.isEmpty)
+        let outcome = try #require(controller.finalSpanOutcomes.first)
+        #expect(outcome.requestCount == 2)
+        #expect(outcome.text != nil)
+        #expect(outcome.failure == nil)
+        #expect(outcome.speechEvidence.isSpeechBearing)
+        #expect(outcome.attemptedStartMilliseconds >= 0)
+        #expect(outcome.originalStartMilliseconds == controller.utterances.first?.startMilliseconds)
+        #expect(outcome.originalEndMilliseconds == controller.utterances.first?.endMilliseconds)
     }
 
     @Test
     @MainActor
-    func validTimelineWithNoFinalSpeechSpansKeepsUsefulPreview() async throws {
+    func emptyAndInvalidFinalResponsesEachRetryOnceAndPreservePreview() async throws {
+        for response in FinalResponseFailure.allCases {
+            let fixture = try LiveTranscriptFixture()
+            let client = FakeLiveTranscriptionClient(
+                emptyFinalSources: response == .empty ? [.microphone] : [],
+                invalidFinalSources: response == .invalid ? [.microphone] : []
+            )
+            let controller = LiveTranscriptController(service: try LiveTranscriptionService(
+                client: client,
+                engine: .whisper,
+                originHostTimestamp: 410,
+                wavDirectory: fixture.wavDirectory
+            ))
+            let buffer = fixture.buffer(
+                source: .microphone,
+                hostTimestamp: 410,
+                duration: 1,
+                amplitude: 0.2
+            )
+            await controller.append(buffer)
+
+            await controller.stop(capture: try fixture.captureSummary(buffers: [buffer]))
+
+            #expect(await client.calls.filter { $0.phase == .final }.count == 2)
+            let outcome = try #require(controller.finalSpanOutcomes.first)
+            #expect(outcome.requestCount == 2)
+            #expect(outcome.text == nil)
+            #expect(outcome.failure != nil)
+            #expect((outcome.failure?.count ?? 0) <= 240)
+            #expect(controller.utterances.count == 1)
+            let preview = try #require(controller.utterances.first)
+            #expect(preview.text.hasPrefix("preview "))
+            #expect(controller.provenance(for: preview.id) == .preview)
+            #expect(preview.transcriptionPhase == .preview)
+        }
+    }
+
+    @Test
+    func retryUsesClippedAdjacentAudioAndAttestsModelWithoutChangingFinalBounds() async throws {
+        let fixture = try LiveTranscriptFixture()
+        let client = FakeLiveTranscriptionClient(transientFinalFailures: [.microphone: 1])
+        let service = try LiveTranscriptionService(
+            client: client,
+            engine: .whisper,
+            attestedModel: "large-v3",
+            originHostTimestamp: 400,
+            wavDirectory: fixture.wavDirectory
+        )
+        let buffers = [
+            fixture.buffer(source: .microphone, hostTimestamp: 400, duration: 2, amplitude: 0),
+            fixture.buffer(source: .microphone, hostTimestamp: 402, duration: 1, amplitude: 0.2),
+            fixture.buffer(source: .microphone, hostTimestamp: 403, duration: 2, amplitude: 0),
+        ]
+
+        let result = await service.stop(capture: try fixture.captureSummary(buffers: buffers))
+
+        let calls = await client.calls.filter { $0.phase == .final }
+        let outcome = try #require(result.spanOutcomes.first)
+        let segment = try #require(result.segments.first)
+        #expect(calls.count == 2)
+        #expect(calls[0].startMilliseconds == outcome.originalStartMilliseconds)
+        #expect(calls[0].endMilliseconds == outcome.originalEndMilliseconds)
+        #expect(calls[1].startMilliseconds == outcome.attemptedStartMilliseconds)
+        #expect(calls[1].endMilliseconds == outcome.attemptedEndMilliseconds)
+        #expect(outcome.attemptedStartMilliseconds
+            == max(0, outcome.originalStartMilliseconds - 1_500))
+        #expect(outcome.attemptedEndMilliseconds
+            == min(5_000, outcome.originalEndMilliseconds + 1_500))
+        #expect(segment.startMilliseconds == outcome.originalStartMilliseconds)
+        #expect(segment.endMilliseconds == outcome.originalEndMilliseconds)
+        #expect(outcome.requestCount == 2)
+        #expect(outcome.attestedEngine == "whisper")
+        #expect(outcome.attestedModel == "large-v3")
+        #expect(outcome.failure == nil)
+    }
+
+    @Test
+    @MainActor
+    func overlappingFinalTextUsesEchoDuplicateSuppression() async throws {
+        let fixture = try LiveTranscriptFixture()
+        let client = FakeLiveTranscriptionClient(fixedFinalText: "shared release decision")
+        let controller = LiveTranscriptController(service: try LiveTranscriptionService(
+            client: client,
+            engine: .whisper,
+            originHostTimestamp: 425,
+            wavDirectory: fixture.wavDirectory
+        ))
+        let buffers = MeetingAudioSource.allCases.map {
+            fixture.buffer(source: $0, hostTimestamp: 425, duration: 1, amplitude: 0.2)
+        }
+        for buffer in buffers { await controller.append(buffer) }
+
+        await controller.stop(capture: try fixture.captureSummary(buffers: buffers))
+
+        let microphone = try #require(controller.utterances.first { $0.source == .microphone })
+        let system = try #require(controller.utterances.first { $0.source == .system })
+        #expect(microphone.suppressed)
+        #expect(!system.suppressed)
+        #expect(microphone.text == "shared release decision")
+        #expect(system.text == "shared release decision")
+        #expect(controller.provenance(for: microphone.id) == .final)
+        #expect(controller.provenance(for: system.id) == .final)
+    }
+
+    @Test
+    @MainActor
+    func validTimelineWithNoFinalSpeechSpansRejectsWeakPreview() async throws {
         let fixture = try LiveTranscriptFixture()
         let client = FakeLiveTranscriptionClient()
         let service = try LiveTranscriptionService(
@@ -476,10 +659,7 @@ struct LiveTranscriptControllerTests {
 
         await controller.stop(capture: try fixture.captureSummary(buffers: [shortTurn]))
 
-        #expect(controller.utterances.count == 1)
-        #expect(controller.utterances.first?.text == "preview microphone 0")
-        #expect(controller.utterances.first?.startMilliseconds == 0)
-        #expect(controller.utterances.first?.endMilliseconds == 60)
+        #expect(controller.utterances.isEmpty)
         #expect(await client.calls.filter { $0.phase == .final }.isEmpty)
         #expect(controller.errors.isEmpty)
     }
@@ -515,15 +695,14 @@ struct LiveTranscriptControllerTests {
         await controller.stop(capture: try fixture.captureSummary(buffers: buffers))
 
         let microphone = try #require(controller.utterances.first { $0.source == .microphone })
-        let system = try #require(controller.utterances.first { $0.source == .system })
         #expect(microphone.text.hasPrefix("final "))
-        #expect(system.text.hasPrefix("preview "))
+        #expect(!controller.utterances.contains { $0.source == .system })
         #expect(controller.errors.isEmpty)
     }
 
     @Test
     @MainActor
-    func preservesLaterMissedPreviewWindowAfterEarlierFinalSuccess() async throws {
+    func rejectsLaterWeakPreviewAfterEarlierFinalSuccess() async throws {
         let fixture = try LiveTranscriptFixture()
         let client = FakeLiveTranscriptionClient()
         let service = try LiveTranscriptionService(
@@ -551,16 +730,13 @@ struct LiveTranscriptControllerTests {
             buffers: [loud, sparseAcknowledgement]
         ))
 
-        #expect(controller.utterances.count == 2)
-        #expect(controller.utterances[0].text.hasPrefix("final "))
-        #expect(controller.utterances[1].text == "preview microphone 10000")
-        #expect(controller.utterances[1].startMilliseconds == 10_000)
-        #expect(controller.utterances[1].endMilliseconds == 10_060)
+        #expect(controller.utterances.count == 1)
+        #expect(controller.utterances.first?.text.hasPrefix("final ") == true)
     }
 
     @Test
     @MainActor
-    func sameWindowSparseAcknowledgementIsFinalizedBesideLoudSpeech() async throws {
+    func sameWindowSparseAcknowledgementIsRejectedBySharedFinalGate() async throws {
         let fixture = try LiveTranscriptFixture()
         let client = FakeLiveTranscriptionClient()
         let service = try LiveTranscriptionService(
@@ -588,10 +764,10 @@ struct LiveTranscriptControllerTests {
             buffers: [loud, sparseAcknowledgement]
         ))
 
-        #expect(controller.utterances.count == 2)
+        #expect(controller.utterances.count == 1)
         #expect(controller.utterances.allSatisfy { $0.text.hasPrefix("final ") })
-        #expect(controller.utterances.map(\.startMilliseconds) == [0, 4_780])
-        #expect(controller.utterances.map(\.endMilliseconds) == [1_220, 5_330])
+        #expect(controller.utterances.map(\.startMilliseconds) == [0])
+        #expect(controller.utterances.map(\.endMilliseconds) == [1_220])
     }
 
     @Test
@@ -639,7 +815,9 @@ struct LiveTranscriptControllerTests {
 
         await controller.stop(capture: invalid)
 
-        #expect(controller.utterances == previews)
+        #expect(previews.isEmpty)
+        #expect(controller.utterances.count == 2)
+        #expect(controller.utterances.allSatisfy { $0.text.hasPrefix("preview ") })
         #expect(Set(controller.errors.map(\.source)) == Set(MeetingAudioSource.allCases))
         #expect(controller.errors.allSatisfy { $0.phase == .final })
         #expect(controller.errors.allSatisfy { $0.endMilliseconds == .max })
@@ -673,6 +851,11 @@ struct LiveTranscriptControllerTests {
         #expect(await client.wasCancelled)
         #expect(controller.utterances.isEmpty)
         #expect(controller.errors.isEmpty)
+        let cancelled = try #require(controller.finalSpanOutcomes.first)
+        #expect(cancelled.wasCancelled)
+        #expect(cancelled.requestCount == 1)
+        #expect(cancelled.text == nil)
+        #expect(cancelled.failure == "Transcription cancelled.")
         #expect(!controller.isFinalizing)
         #expect(!controller.isFinalized)
         #expect(try transcriptionDirectoryIsAbsentOrEmpty(fixture.wavDirectory))
@@ -694,7 +877,7 @@ struct LiveTranscriptControllerTests {
             await controller.append(fixture.buffer(
                 source: .system,
                 hostTimestamp: 0,
-                duration: 10,
+                duration: 20,
                 amplitude: 0.2
             ))
             await controller.waitForPendingPreview()
@@ -721,13 +904,22 @@ struct LiveTranscriptControllerTests {
             await controller.append(fixture.buffer(
                 source: .microphone,
                 hostTimestamp: 0,
-                duration: 10,
+                duration: 20,
                 amplitude: 0.2
             ))
             await client.waitUntilStarted()
             #expect(try !FileManager.default.contentsOfDirectory(
                 atPath: fixture.wavDirectory.path
             ).isEmpty)
+
+            // While one request is active, retain only the newest pending WAV;
+            // cancellation must remove both active and pending files.
+            await controller.append(fixture.buffer(
+                source: .microphone,
+                hostTimestamp: 20,
+                duration: 20,
+                amplitude: 0.2
+            ))
 
             await controller.cancel()
 
@@ -845,12 +1037,20 @@ private enum FakeLiveTranscriptionError: Error, LocalizedError, Sendable {
     var errorDescription: String? { "Fake final transcription failed." }
 }
 
+private enum FinalResponseFailure: CaseIterable {
+    case empty
+    case invalid
+}
+
 private actor FakeLiveTranscriptionClient: LiveTranscriptionClient {
     private let blockFirstPreviewSource: MeetingAudioSource?
     private let failingPreviewSources: Set<MeetingAudioSource>
     private let failingPreviewStarts: [MeetingAudioSource: Set<Int64>]
     private let failingFinalSources: Set<MeetingAudioSource>
     private let systemicFinalFailureSources: Set<MeetingAudioSource>
+    private let emptyFinalSources: Set<MeetingAudioSource>
+    private let invalidFinalSources: Set<MeetingAudioSource>
+    private let fixedFinalText: String?
     private var remainingTransientFinalFailures: [MeetingAudioSource: Int]
     private var recordedCalls: [RecordedLiveTranscriptionCall] = []
     private var activeBySource: [MeetingAudioSource: Int] = [:]
@@ -867,13 +1067,19 @@ private actor FakeLiveTranscriptionClient: LiveTranscriptionClient {
         failingPreviewStarts: [MeetingAudioSource: Set<Int64>] = [:],
         failingFinalSources: Set<MeetingAudioSource> = [],
         systemicFinalFailureSources: Set<MeetingAudioSource> = [],
-        transientFinalFailures: [MeetingAudioSource: Int] = [:]
+        transientFinalFailures: [MeetingAudioSource: Int] = [:],
+        emptyFinalSources: Set<MeetingAudioSource> = [],
+        invalidFinalSources: Set<MeetingAudioSource> = [],
+        fixedFinalText: String? = nil
     ) {
         self.blockFirstPreviewSource = blockFirstPreviewSource
         self.failingPreviewSources = failingPreviewSources
         self.failingPreviewStarts = failingPreviewStarts
         self.failingFinalSources = failingFinalSources
         self.systemicFinalFailureSources = systemicFinalFailureSources
+        self.emptyFinalSources = emptyFinalSources
+        self.invalidFinalSources = invalidFinalSources
+        self.fixedFinalText = fixedFinalText
         remainingTransientFinalFailures = transientFinalFailures
     }
 
@@ -930,6 +1136,10 @@ private actor FakeLiveTranscriptionClient: LiveTranscriptionClient {
             throw FakeLiveTranscriptionError.finalFailure
         }
         if call.phase == .final {
+            if invalidFinalSources.contains(call.source) {
+                throw VoxTypeClientError.invalidTranscript
+            }
+            if emptyFinalSources.contains(call.source) { return "   \n" }
             if systemicFinalFailureSources.contains(call.source) {
                 throw VoxTypeClientError.timedOut(command: .transcribe)
             }
@@ -940,7 +1150,8 @@ private actor FakeLiveTranscriptionClient: LiveTranscriptionClient {
                 remainingTransientFinalFailures[call.source, default: 0] -= 1
                 throw FakeLiveTranscriptionError.finalFailure
             }
-            return "final \(call.source.rawValue) \(call.startMilliseconds ?? -1)"
+            return fixedFinalText
+                ?? "final \(call.source.rawValue) \(call.startMilliseconds ?? -1)"
         }
         return "preview \(call.source.rawValue) \(call.startMilliseconds ?? -1)"
     }

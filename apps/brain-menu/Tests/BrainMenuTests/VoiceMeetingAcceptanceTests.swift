@@ -205,6 +205,12 @@ struct VoiceMeetingAcceptanceTests {
         ))
         for source in MeetingAudioSource.allCases {
             await live.append(acceptanceAudioBuffer(source: source, hostTimestamp: 100))
+            await live.append(acceptanceAudioBuffer(
+                source: source,
+                hostTimestamp: 110,
+                duration: 1.3,
+                amplitude: 0
+            ))
         }
         await live.waitForPendingPreview()
         #expect(live.utterances.count == 2)
@@ -289,7 +295,7 @@ struct VoiceMeetingAcceptanceTests {
     }
 
     @Test
-    func authenticatedCodexAndClaudeProduceStructuredCopyOnlyAnalysisAndFailureUploadsRaw() async throws {
+    func authenticatedCodexAndClaudeProduceStructuredV2AnalysisAndFailureUploadsRaw() async throws {
         let fixture = try AcceptanceDirectory(prefix: "VoiceMeeting-AI")
         defer { fixture.remove() }
         let utterance = try MeetingUtterance(
@@ -312,8 +318,7 @@ struct VoiceMeetingAcceptanceTests {
             actionItems: [.init(text: "Send plan", owner: "Jamie", due: "Friday")],
             risks: [],
             quotes: [.init(utteranceID: utterance.id, text: "send the launch plan")],
-            speakerSuggestions: [.init(utteranceID: utterance.id, suggestedName: "Jamie")],
-            followUp: .init(subject: "Launch follow-up", body: "Jamie, please send the plan.")
+            speakerSuggestions: [.init(utteranceID: utterance.id, suggestedName: "Jamie")]
         )
         let encodedAnalysis = try JSONEncoder().encode(analysis)
         let directlyDecoded = try MeetingAnalysisSchema.decode(
@@ -357,8 +362,6 @@ struct VoiceMeetingAcceptanceTests {
             #expect(result.failure == nil)
             #expect(result.analysis == analysis)
             #expect(result.analysis?.speakerSuggestions.first?.utteranceID == utterance.id)
-            #expect(result.analysis?.followUp.subjectForCopy == "Launch follow-up")
-            #expect(result.analysis?.followUp.bodyForCopy == "Jamie, please send the plan.")
             var editor = SpeakerEditor(utterances: [utterance])
             #expect(try service.acceptSpeakerSuggestion(
                 meetingID: meeting.id,
@@ -405,6 +408,713 @@ struct VoiceMeetingAcceptanceTests {
             #expect(request.image == nil)
             #expect(String(describing: request).contains(AcceptanceCLIRunner.providerSecret) == false)
         }
+    }
+
+    @Test
+    func processedFirstPipelineRegeneratesDeduplicatesFallsBackAndPersistsIndependently() async throws {
+        let fixture = try AcceptanceDirectory(prefix: "VoiceMeeting-ProcessedPipeline")
+        defer { fixture.remove() }
+        let utterance = try MeetingUtterance(
+            id: UUID(),
+            source: .system,
+            startMilliseconds: 0,
+            endMilliseconds: 2_000,
+            text: "We discussed vox brane and will ship Friday.",
+            baseSpeakerID: "remote"
+        )
+        var meeting = completedMeeting(id: UUID(), title: "Pipeline acceptance")
+        let attempt = MeetingTranscriptAttempt(
+            id: UUID(),
+            createdAt: meeting.endedAt ?? meeting.startedAt,
+            modelAttestation: MeetingTranscriptModelAttestation.legacy(meeting: meeting),
+            utterances: [utterance],
+            isSuccessful: true
+        )
+        meeting.selectedRawTranscriptAttemptID = attempt.id
+        let artifact = MeetingTranscriptArtifact(
+            meetingID: meeting.id,
+            attempts: [attempt],
+            selectedAttemptID: attempt.id
+        )
+        let processed = MeetingProcessedTranscript(
+            rawAttemptID: attempt.id,
+            terminologyHash: "current",
+            turns: [MeetingProcessedTranscriptTurn(
+                id: utterance.id,
+                utteranceIDs: [utterance.id],
+                startMilliseconds: 0,
+                endMilliseconds: 2_000,
+                speakerID: "remote",
+                speakerLabel: "Remote",
+                text: "We discussed Vox Brain and will ship Friday.",
+                unclear: false
+            )],
+            bullets: [],
+            corrections: [MeetingTranscriptCorrection(
+                id: UUID(),
+                utteranceIDs: [utterance.id],
+                kind: .terminology,
+                before: "vox brane",
+                after: "Vox Brain",
+                reason: "Glossary spelling.",
+                confidence: 1
+            )]
+        )
+        let analysis = MeetingAnalysis(
+            title: "Vox Brain ship plan",
+            summary: "The corrected project name is used for the readable summary.",
+            topics: ["Vox Brain"],
+            decisions: ["Ship Friday"],
+            actionItems: [],
+            risks: [],
+            quotes: [.init(utteranceID: utterance.id, text: "vox brane")],
+            speakerSuggestions: []
+        )
+        let provider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(processed),
+            analysis: try JSONEncoder().encode(analysis),
+            processingDelay: .milliseconds(80)
+        )
+        let processedStore = MeetingProcessedTranscriptStore(rootURL: fixture.root)
+        let analysisStore = FileMeetingAnalysisStore(rootURL: fixture.root)
+        let stale = MeetingProcessedTranscript(
+            rawAttemptID: attempt.id,
+            terminologyHash: "stale",
+            turns: processed.turns,
+            bullets: [],
+            corrections: []
+        )
+        try processedStore.replace(stale, meetingID: meeting.id)
+        let serviceA = MeetingAnalysisService(
+            provider: provider,
+            store: analysisStore,
+            processedTranscriptStore: processedStore
+        )
+        let serviceB = MeetingAnalysisService(
+            provider: provider,
+            store: analysisStore,
+            processedTranscriptStore: processedStore
+        )
+        let automaticMeeting = meeting
+        let manualMeeting = meeting
+
+        async let automatic = serviceA.analyzeAfterFinalTranscription(
+            meeting: automaticMeeting,
+            utterances: [utterance],
+            artifact: artifact,
+            terminology: ["Vox Brain"],
+            terminologyHash: "current"
+        )
+        async let manual = serviceB.reanalyze(
+            meeting: manualMeeting,
+            utterances: [utterance],
+            artifact: artifact,
+            speakerState: SpeakerEditingState(),
+            terminology: ["Vox Brain"],
+            terminologyHash: "current"
+        )
+        let (automaticResult, manualResult) = await (automatic, manual)
+
+        #expect(automaticResult.failure == nil)
+        #expect(manualResult.failure == nil)
+        #expect(automaticResult.analysis?.quotes.first?.text == "vox brane")
+        #expect(await provider.processingRunCount == 1)
+        #expect(await provider.analysisRunCount == 2)
+        #expect(await provider.analysisPrompts.allSatisfy {
+            $0.contains("Vox Brain")
+                && $0.contains("vox brane")
+                && $0.contains(utterance.id.uuidString)
+        })
+        #expect(try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "current"
+        ) == processed)
+
+        let supersededProcessed = MeetingProcessedTranscript(
+            rawAttemptID: attempt.id,
+            terminologyHash: "superseded",
+            turns: processed.turns,
+            bullets: [],
+            corrections: processed.corrections
+        )
+        let newestProcessed = MeetingProcessedTranscript(
+            rawAttemptID: attempt.id,
+            terminologyHash: "newest",
+            turns: processed.turns,
+            bullets: [],
+            corrections: processed.corrections
+        )
+        let slowOldProvider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(supersededProcessed),
+            analysis: try JSONEncoder().encode(analysis),
+            processingDelay: .milliseconds(160)
+        )
+        let fastNewProvider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(newestProcessed),
+            analysis: try JSONEncoder().encode(analysis)
+        )
+        let slowOldService = MeetingAnalysisService(
+            provider: slowOldProvider,
+            store: analysisStore,
+            processedTranscriptStore: processedStore
+        )
+        let fastNewService = MeetingAnalysisService(
+            provider: fastNewProvider,
+            store: analysisStore,
+            processedTranscriptStore: processedStore
+        )
+        let supersededTask = Task {
+            await slowOldService.reanalyze(
+                meeting: meeting,
+                utterances: [utterance],
+                artifact: artifact,
+                speakerState: SpeakerEditingState(),
+                terminology: ["Vox Brain"],
+                terminologyHash: "superseded"
+            )
+        }
+        while await slowOldProvider.processingRunCount == 0 {
+            await Task.yield()
+        }
+        let newestResult = await fastNewService.reanalyze(
+            meeting: meeting,
+            utterances: [utterance],
+            artifact: artifact,
+            speakerState: SpeakerEditingState(),
+            terminology: ["Vox Brain"],
+            terminologyHash: "newest"
+        )
+        let supersededResult = await supersededTask.value
+        #expect(newestResult.failure == nil)
+        #expect(supersededResult.failure == nil)
+        #expect(try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "newest"
+        ) == newestProcessed)
+        #expect(try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "superseded"
+        ) == nil)
+
+        await provider.setProcessingFailure(.commandFailed(exitStatus: 9))
+        await provider.setAnalysisFailure(.timedOut)
+        let loadedPrior = try analysisStore.load(meetingID: meeting.id)
+        let prior = try #require(loadedPrior)
+        let changedHash = await serviceA.reanalyze(
+            meeting: meeting,
+            utterances: [utterance],
+            artifact: artifact,
+            speakerState: SpeakerEditingState(),
+            terminology: ["Vox Brain", "Codex"],
+            terminologyHash: "changed"
+        )
+        #expect(changedHash.failure == .providerFailure(.timedOut))
+        #expect(changedHash.analysis == prior.analysis)
+        #expect(changedHash.meeting.transcriptionState == .completed)
+        #expect(try analysisStore.load(meetingID: meeting.id) == prior)
+        #expect(try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "newest"
+        ) == newestProcessed)
+
+        let fallbackProvider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(processed),
+            analysis: try JSONEncoder().encode(analysis),
+            processingDelay: .milliseconds(80)
+        )
+        await fallbackProvider.setProcessingFailure(.commandFailed(exitStatus: 4))
+        let fallbackService = MeetingAnalysisService(
+            provider: fallbackProvider,
+            store: FileMeetingAnalysisStore(rootURL: fixture.root.appendingPathComponent("fallback")),
+            processedTranscriptStore: MeetingProcessedTranscriptStore(
+                rootURL: fixture.root.appendingPathComponent("fallback")
+            )
+        )
+        let fallback = await fallbackService.analyzeAfterFinalTranscription(
+            meeting: meeting,
+            utterances: [utterance],
+            artifact: artifact,
+            terminology: [],
+            terminologyHash: "fallback"
+        )
+        #expect(fallback.failure == nil)
+        #expect(fallback.meeting.transcriptionState == .completed)
+        #expect(await fallbackProvider.analysisPrompts.first?.contains("FINAL RAW TRANSCRIPT") == true)
+
+        let cancellationProvider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(processed),
+            analysis: try JSONEncoder().encode(analysis),
+            processingDelay: .milliseconds(120)
+        )
+        let cancellationService = MeetingAnalysisService(
+            provider: cancellationProvider,
+            store: FileMeetingAnalysisStore(rootURL: fixture.root.appendingPathComponent("cancel")),
+            processedTranscriptStore: MeetingProcessedTranscriptStore(
+                rootURL: fixture.root.appendingPathComponent("cancel")
+            )
+        )
+        let cancellationTask = Task {
+            await cancellationService.analyzeAfterFinalTranscription(
+                meeting: meeting,
+                utterances: [utterance],
+                artifact: artifact,
+                terminology: [],
+                terminologyHash: "cancel"
+            )
+        }
+        while await cancellationProvider.processingRunCount == 0 {
+            await Task.yield()
+        }
+        cancellationTask.cancel()
+        let cancelledProcessing = await cancellationTask.value
+        #expect(cancelledProcessing.failure == nil)
+        #expect(cancelledProcessing.meeting.transcriptionState == .completed)
+        #expect(await cancellationProvider.analysisPrompts.first?.contains("FINAL RAW TRANSCRIPT") == true)
+
+        let survivingProcessedProvider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(processed),
+            analysis: try JSONEncoder().encode(analysis)
+        )
+        await survivingProcessedProvider.setAnalysisFailure(.timedOut)
+        let survivingRoot = fixture.root.appendingPathComponent("analysis-fails")
+        let survivingProcessedStore = MeetingProcessedTranscriptStore(rootURL: survivingRoot)
+        let survivingService = MeetingAnalysisService(
+            provider: survivingProcessedProvider,
+            store: FileMeetingAnalysisStore(rootURL: survivingRoot),
+            processedTranscriptStore: survivingProcessedStore
+        )
+        let analysisFailure = await survivingService.analyzeAfterFinalTranscription(
+            meeting: meeting,
+            utterances: [utterance],
+            artifact: artifact,
+            terminology: ["Vox Brain"],
+            terminologyHash: "current"
+        )
+        #expect(analysisFailure.failure == .providerFailure(.timedOut))
+        #expect(try survivingProcessedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "current"
+        ) == processed)
+    }
+
+    @Test
+    func reliableTranscriptEvidenceStaysAuditableReadableAndLocalThroughRecovery() async throws {
+        let fixture = try AcceptanceDirectory(prefix: "VoiceMeeting-ReliableTranscript")
+        defer { fixture.remove() }
+
+        // The shared local speech gate rejects silence and impulses for either
+        // source, while sustained speech is eligible for contextual previews.
+        let gate = SpeechActivityGate()
+        let silence = [Float](
+            repeating: 0,
+            count: SpeechActivityGate.samplesPerFrame * 40
+        )
+        var impulse = silence
+        impulse[SpeechActivityGate.samplesPerFrame * 20] = 1
+        let sustained = (0..<(SpeechActivityGate.samplesPerFrame * 40)).map {
+            $0.isMultiple(of: 2) ? Float(0.2) : Float(-0.2)
+        }
+        #expect(!gate.evaluate(silence).isSpeechBearing)
+        #expect(!gate.evaluate(impulse).isSpeechBearing)
+        #expect(gate.evaluate(sustained).isSpeechBearing)
+
+        var segmenter = LivePreviewSegmenter()
+        for source in MeetingAudioSource.allCases {
+            #expect(segmenter.append(source: source, startFrame: 0, samples: silence).isEmpty)
+            #expect(segmenter.append(
+                source: source,
+                startFrame: Int64(silence.count),
+                samples: impulse
+            ).isEmpty)
+            _ = segmenter.append(
+                source: source,
+                startFrame: Int64(silence.count + impulse.count),
+                samples: sustained
+            )
+        }
+        let contextual = segmenter.flush()
+        #expect(Set(contextual.map(\.source)) == Set(MeetingAudioSource.allCases))
+        #expect(contextual.allSatisfy {
+            $0.endMilliseconds - $0.startMilliseconds
+                <= LivePreviewSegmenter.maximumCaptureMilliseconds
+        })
+
+        // A real service boundary proves weak input never invokes VoxType and
+        // every failed final speech span receives exactly one bounded retry.
+        let weakClient = AcceptanceReliabilityClient(failFinal: false)
+        let weakWriter = try MeetingAudioWriter(
+            meetingDirectory: fixture.root.appendingPathComponent("weak"),
+            origin: Date(timeIntervalSince1970: 100)
+        )
+        let microphoneSilence = acceptanceAudioBuffer(
+            source: .microphone,
+            hostTimestamp: 100,
+            duration: 1,
+            amplitude: 0
+        )
+        var systemImpulseSamples = [Float](
+            repeating: 0,
+            count: MeetingAudioWriter.sampleRate
+        )
+        systemImpulseSamples[0] = 1
+        let systemImpulse = MeetingAudioSampleBuffer(
+            source: .system,
+            sourceTimestamp: 300,
+            hostTimestamp: 100,
+            sampleRate: Double(MeetingAudioWriter.sampleRate),
+            channelCount: MeetingAudioWriter.channelCount,
+            interleavedSamples: systemImpulseSamples
+        )
+        _ = try weakWriter.append(microphoneSilence)
+        _ = try weakWriter.append(systemImpulse)
+        let weakService = try LiveTranscriptionService(
+            client: weakClient,
+            engine: .whisper,
+            attestedModel: "large-v3",
+            originHostTimestamp: 100,
+            wavDirectory: fixture.root.appendingPathComponent("weak-wav")
+        )
+        let weakController = LiveTranscriptController(service: weakService)
+        await weakController.append(microphoneSilence)
+        await weakController.append(systemImpulse)
+        await weakController.stop(capture: try weakWriter.finalize())
+        #expect(await weakClient.requests.isEmpty)
+        #expect(weakController.utterances.isEmpty)
+
+        let failingClient = AcceptanceReliabilityClient(failFinal: true)
+        let writer = try MeetingAudioWriter(
+            meetingDirectory: fixture.root.appendingPathComponent("dual"),
+            origin: Date(timeIntervalSince1970: 200)
+        )
+        let service = try LiveTranscriptionService(
+            client: failingClient,
+            engine: .whisper,
+            attestedModel: "large-v3",
+            originHostTimestamp: 200,
+            wavDirectory: fixture.root.appendingPathComponent("dual-wav")
+        )
+        let live = LiveTranscriptController(service: service)
+        for source in MeetingAudioSource.allCases {
+            let buffer = acceptanceAudioBuffer(
+                source: source,
+                hostTimestamp: 200,
+                duration: 1,
+                amplitude: 0.2
+            )
+            _ = try writer.append(buffer)
+            await live.append(buffer)
+        }
+        await live.stop(capture: try writer.finalize())
+        let finalRequests = await failingClient.requests.filter { $0.hasPrefix("final-") }
+        #expect(finalRequests.count == 4)
+        #expect(live.finalSpanOutcomes.count == 2)
+        #expect(live.finalSpanOutcomes.allSatisfy {
+            $0.requestCount == 2
+                && $0.failure != nil
+                && $0.attestedEngine == "whisper"
+                && $0.attestedModel == "large-v3"
+        })
+        #expect(live.utterances.allSatisfy { $0.transcriptionPhase == .preview })
+        let health = MeetingLiveViewModel(snapshot: MeetingLiveSnapshot(
+            meeting: completedMeeting(id: UUID(), title: "Health summary"),
+            lifecycleState: .completed,
+            utterances: live.utterances,
+            previewLag: live.previewLag,
+            transcriptFailures: live.errors,
+            controllerFailure: nil,
+            levels: [:],
+            now: Date(timeIntervalSince1970: 210)
+        )).transcriptHealth
+        #expect(health != nil)
+        #expect(health?.sources.count == 2)
+
+        let selection = SpeechEngineSelection(engine: .whisper, modelID: "large-v3")
+        let attestation = VoxTypeModelAttestation(
+            requestedSelection: selection,
+            effectiveSelection: selection,
+            verifiedAt: Date(timeIntervalSince1970: 300),
+            voxTypeVersion: VoxTypeVersion(major: 0, minor: 7, patch: 5, prerelease: nil)
+        )
+        let first = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 1_000,
+            text: "We chose orka. Thank you.",
+            baseSpeakerID: "you"
+        )
+        let sameTurn = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 8_999,
+            endMilliseconds: 9_500,
+            text: "Same turn.",
+            baseSpeakerID: "you"
+        )
+        let silenceBoundary = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 17_500,
+            endMilliseconds: 18_000,
+            text: "New turn at eight seconds.",
+            baseSpeakerID: "you"
+        )
+        let speakerBoundary = try MeetingUtterance(
+            source: .system,
+            startMilliseconds: 18_001,
+            endMilliseconds: 19_000,
+            text: "Remote answer.",
+            baseSpeakerID: "diarized-name"
+        )
+        let utterances = [first, sameTurn, silenceBoundary, speakerBoundary]
+        let assembled = MeetingTranscriptTurnAssembler.assemble(utterances: utterances)
+        #expect(assembled.map(\.utteranceIDs) == [
+            [first.id, sameTurn.id], [silenceBoundary.id], [speakerBoundary.id],
+        ])
+
+        var meeting = MeetingRecord(
+            title: "Reliable transcript",
+            startedAt: Date(timeIntervalSince1970: 300),
+            endedAt: Date(timeIntervalSince1970: 340),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "large-v3",
+            speechModelAttestation: attestation,
+            transcriptionState: .completed
+        )
+        let failedOutcome = RawTranscriptionSpanOutcome(
+            source: .microphone,
+            originalStartMilliseconds: 8_999,
+            originalEndMilliseconds: 9_500,
+            attemptedStartMilliseconds: 7_499,
+            attemptedEndMilliseconds: 11_000,
+            speechEvidence: gate.evaluate(sustained),
+            requestCount: 2,
+            text: nil,
+            failure: "Final transcription timed out after one retry.",
+            wasCancelled: false,
+            attestedEngine: "whisper",
+            attestedModel: "large-v3"
+        )
+        let attempt = MeetingTranscriptAttempt(
+            createdAt: Date(timeIntervalSince1970: 341),
+            modelAttestation: MeetingTranscriptModelAttestation(meeting: meeting),
+            spanOutcomes: [MeetingTranscriptSpanOutcome(failedOutcome)],
+            retainedPreviews: [sameTurn],
+            utterances: utterances,
+            failures: [MeetingTranscriptFailureDiagnostic(LiveTranscriptFailure(
+                source: .microphone,
+                phase: .final,
+                startMilliseconds: 8_999,
+                endMilliseconds: 9_500,
+                message: "Final transcription timed out after one retry."
+            ))],
+            isSuccessful: true
+        )
+        meeting.selectedRawTranscriptAttemptID = attempt.id
+        let artifactStore = MeetingTranscriptArtifactStore(rootURL: fixture.root)
+        let artifact = try artifactStore.append(
+            attempt,
+            meetingID: meeting.id,
+            selecting: true
+        )
+        let rawURL = fixture.root.appendingPathComponent(meeting.id.uuidString)
+            .appendingPathComponent(MeetingTranscriptArtifactStore.filename)
+        let rawBeforeProcessing = try Data(contentsOf: rawURL)
+        #expect(artifact.selectedAttempt?.retainedPreviews == [sameTurn])
+        #expect(artifact.selectedAttempt?.failures.count == 1)
+
+        let correctedTurns = assembled.map { turn in
+            MeetingProcessedTranscriptTurn(
+                id: turn.id,
+                utteranceIDs: turn.utteranceIDs,
+                startMilliseconds: turn.startMilliseconds,
+                endMilliseconds: turn.endMilliseconds,
+                speakerID: turn.speakerID,
+                speakerLabel: turn.speakerLabel,
+                text: turn.id == first.id
+                    ? "We chose Orca. Thank you. Same turn."
+                    : turn.text,
+                unclear: false
+            )
+        }
+        let processed = MeetingProcessedTranscript(
+            rawAttemptID: attempt.id,
+            terminologyHash: "orca-current",
+            turns: correctedTurns,
+            bullets: ["Orca was selected."],
+            corrections: [MeetingTranscriptCorrection(
+                id: UUID(),
+                utteranceIDs: [first.id],
+                kind: .terminology,
+                before: "orka",
+                after: "Orca",
+                reason: "Private terminology supplies the spelling.",
+                confidence: 1
+            )]
+        )
+        let analysis = MeetingAnalysis(
+            title: "Orca decision",
+            summary: "The current processed transcript records the Orca decision.",
+            topics: ["Orca"],
+            decisions: ["Use Orca"],
+            actionItems: [],
+            risks: [],
+            quotes: [.init(utteranceID: first.id, text: "Thank you")],
+            speakerSuggestions: []
+        )
+        let provider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(processed),
+            analysis: try JSONEncoder().encode(analysis)
+        )
+        let processedStore = MeetingProcessedTranscriptStore(rootURL: fixture.root)
+        let analysisService = MeetingAnalysisService(
+            provider: provider,
+            store: FileMeetingAnalysisStore(rootURL: fixture.root),
+            transcriptArtifactStore: artifactStore,
+            processedTranscriptStore: processedStore
+        )
+        let result = await analysisService.analyzeAfterFinalTranscription(
+            meeting: meeting,
+            utterances: utterances,
+            artifact: artifact,
+            terminology: ["Orca"],
+            terminologyHash: "orca-current"
+        )
+        #expect(result.failure == nil)
+        #expect(result.analysis?.summary.contains("Orca") == true)
+        #expect(await provider.analysisPrompts.first?.contains("We chose Orca. Thank you.") == true)
+        #expect(try Data(contentsOf: rawURL) == rawBeforeProcessing)
+        #expect(try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "orca-current"
+        ) == processed)
+
+        var invented = processed
+        invented = MeetingProcessedTranscript(
+            rawAttemptID: invented.rawAttemptID,
+            terminologyHash: "invented",
+            turns: invented.turns.enumerated().map { index, turn in
+                MeetingProcessedTranscriptTurn(
+                    id: turn.id,
+                    utteranceIDs: turn.utteranceIDs,
+                    startMilliseconds: turn.startMilliseconds,
+                    endMilliseconds: turn.endMilliseconds,
+                    speakerID: turn.speakerID,
+                    speakerLabel: turn.speakerLabel,
+                    text: index == 0 ? "Alice chose Orca. Thank you. Same turn." : turn.text,
+                    unclear: turn.unclear
+                )
+            },
+            bullets: [],
+            corrections: []
+        )
+        let inventedResult = await MeetingTranscriptProcessingService(
+            provider: AcceptancePipelineAI(
+                processing: try JSONEncoder().encode(invented),
+                analysis: try JSONEncoder().encode(analysis)
+            ),
+            store: processedStore
+        ).process(
+            meeting: meeting,
+            artifact: artifact,
+            terminology: ["Orca"],
+            terminologyHash: "invented"
+        )
+        #expect(inventedResult.failure == .schemaFailure)
+        #expect(try Data(contentsOf: rawURL) == rawBeforeProcessing)
+
+        let fallbackProvider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(processed),
+            analysis: try JSONEncoder().encode(analysis)
+        )
+        await fallbackProvider.setProcessingFailure(.timedOut)
+        let fallback = await MeetingAnalysisService(
+            provider: fallbackProvider,
+            store: FileMeetingAnalysisStore(
+                rootURL: fixture.root.appendingPathComponent("raw-fallback")
+            ),
+            processedTranscriptStore: MeetingProcessedTranscriptStore(
+                rootURL: fixture.root.appendingPathComponent("raw-fallback")
+            )
+        ).analyzeAfterFinalTranscription(
+            meeting: meeting,
+            utterances: utterances,
+            artifact: artifact,
+            terminology: ["Orca"],
+            terminologyHash: "fallback"
+        )
+        #expect(fallback.failure == nil)
+        #expect(await fallbackProvider.analysisPrompts.first?.contains("FINAL RAW TRANSCRIPT") == true)
+        let analysisSchema = String(decoding: MeetingAnalysisSchema.jsonSchema, as: UTF8.self)
+        #expect(!analysisSchema.localizedCaseInsensitiveContains("follow-up"))
+        #expect(!analysisSchema.localizedCaseInsensitiveContains("render"))
+        #expect(!analysisSchema.localizedCaseInsensitiveContains("export"))
+
+        // Local playback controls never own transcript durability. Explicit
+        // audio deletion unloads the fake engine while raw/processed text stays readable.
+        let meetingStore = MeetingStore(rootURL: fixture.root)
+        let meetingDirectory = meetingStore.directoryURL(for: meeting.id)
+        try FileManager.default.createDirectory(
+            at: meetingDirectory,
+            withIntermediateDirectories: true
+        )
+        let audioURL = meetingDirectory.appendingPathComponent(
+            AudioRetentionController.retainedFilename
+        )
+        try Data([1, 2, 3, 4]).write(to: audioURL)
+        meeting.retainedAudio = RetainedAudioMetadata(
+            filename: AudioRetentionController.retainedFilename,
+            format: AudioRetentionController.retainedFormat,
+            sizeBytes: 4,
+            durationMilliseconds: 20_000
+        )
+        meeting.audioRetentionState = .retained
+        try meetingStore.save(meeting, utterances: utterances)
+        let retention = AudioRetentionController(store: meetingStore)
+        let engine = AcceptancePlaybackEngine(durationMilliseconds: 20_000)
+        let playback = MeetingAudioPlaybackController(retention: retention, engine: engine)
+        playback.load(meetingID: meeting.id)
+        playback.play()
+        playback.seek(to: 8_999)
+        playback.pause()
+        playback.play()
+        #expect(engine.seeks == [8_999])
+        #expect(playback.state == .playing)
+        _ = try retention.deleteRecording(for: meeting.id, confirmed: true)
+        playback.release()
+        #expect(playback.state == .idle)
+        #expect(playback.meetingID == nil)
+        #expect(try artifactStore.load(meetingID: meeting.id)?.selectedAttempt?.utterances
+            == utterances)
+        #expect(try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "orca-current"
+        )?.turns.first?.text.contains("Thank you") == true)
+
+        let prompt = MeetingImprovementPrompt.make(
+            meeting: meeting,
+            attempt: attempt,
+            processedTranscript: processed
+        )
+        #expect(prompt.count <= MeetingImprovementPrompt.maximumCharacters)
+        #expect(prompt.contains("Failure diagnostics:"))
+        #expect(!prompt.contains(first.text))
+        let reviewSource = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/BrainMenu/Views/MeetingTranscriptReviewView.swift"),
+            encoding: .utf8
+        )
+        #expect(reviewSource.contains("Button(\"Create Improvement Prompt\""))
+        #expect(reviewSource.contains("Button(\"Copy\")"))
+        #expect(!reviewSource.contains(".task {"))
     }
 
     @Test
@@ -537,7 +1247,9 @@ struct VoiceMeetingAcceptanceTests {
 
     private func acceptanceAudioBuffer(
         source: MeetingAudioSource,
-        hostTimestamp: TimeInterval
+        hostTimestamp: TimeInterval,
+        duration: TimeInterval = 10,
+        amplitude: Float = 0.2
     ) -> MeetingAudioSampleBuffer {
         MeetingAudioSampleBuffer(
             source: source,
@@ -545,8 +1257,8 @@ struct VoiceMeetingAcceptanceTests {
             hostTimestamp: hostTimestamp,
             sampleRate: Double(MeetingAudioWriter.sampleRate),
             channelCount: MeetingAudioWriter.channelCount,
-            interleavedSamples: (0..<(10 * MeetingAudioWriter.sampleRate)).map {
-                $0.isMultiple(of: 2) ? 0.2 : -0.2
+            interleavedSamples: (0..<Int(duration * Double(MeetingAudioWriter.sampleRate))).map {
+                amplitude == 0 ? 0 : ($0.isMultiple(of: 2) ? amplitude : -amplitude)
             }
         )
     }
@@ -692,6 +1404,55 @@ private actor AcceptanceLiveClient: LiveTranscriptionClient {
     }
 }
 
+private actor AcceptanceReliabilityClient: LiveTranscriptionClient {
+    let failFinal: Bool
+    private(set) var requests: [String] = []
+
+    init(failFinal: Bool) {
+        self.failFinal = failFinal
+    }
+
+    func transcribe(wavURL: URL, engine: String) async throws -> String {
+        let name = wavURL.lastPathComponent
+        requests.append(name)
+        if failFinal, name.hasPrefix("final-") {
+            throw AIProviderError.timedOut
+        }
+        return name.contains("microphone") ? "preview microphone" : "preview system"
+    }
+}
+
+@MainActor
+private final class AcceptancePlaybackEngine: MeetingAudioPlaying {
+    let durationMilliseconds: Int64
+    var elapsedMilliseconds: Int64 = 0
+    var onProgress: (@MainActor (Int64) -> Void)?
+    var onCompletion: (@MainActor () -> Void)?
+    private(set) var seeks: [Int64] = []
+    private(set) var stopCount = 0
+
+    init(durationMilliseconds: Int64) {
+        self.durationMilliseconds = durationMilliseconds
+    }
+
+    func load(url: URL) throws {
+        elapsedMilliseconds = 0
+    }
+
+    func play() throws {}
+
+    func pause() {}
+
+    func stop() {
+        stopCount += 1
+    }
+
+    func seek(to milliseconds: Int64) throws {
+        seeks.append(milliseconds)
+        elapsedMilliseconds = milliseconds
+    }
+}
+
 private actor AcceptanceCLIRunner: CLIProcessRunning {
     static let providerSecret = "provider-credential-must-never-upload"
     let provider: AIProvider
@@ -747,6 +1508,48 @@ private struct AcceptanceFailingAI: AIProviding {
         throw AIProviderError.commandFailed(exitStatus: 7)
     }
     func testConnection() async -> AIConnectionState { .ready }
+}
+
+private actor AcceptancePipelineAI: AIProviding {
+    let processing: Data
+    let analysis: Data
+    let processingDelay: Duration
+    private var processingFailure: AIProviderError?
+    private var analysisFailure: AIProviderError?
+    private(set) var processingRunCount = 0
+    private(set) var analysisRunCount = 0
+    private(set) var analysisPrompts: [String] = []
+
+    init(processing: Data, analysis: Data, processingDelay: Duration = .zero) {
+        self.processing = processing
+        self.analysis = analysis
+        self.processingDelay = processingDelay
+    }
+
+    func setProcessingFailure(_ failure: AIProviderError?) {
+        processingFailure = failure
+    }
+
+    func setAnalysisFailure(_ failure: AIProviderError?) {
+        analysisFailure = failure
+    }
+
+    func testConnection() async -> AIConnectionState { .ready }
+
+    func run(prompt: String, jsonSchema: Data) async throws -> Data {
+        if jsonSchema == MeetingTranscriptProcessingSchema.jsonSchema {
+            processingRunCount += 1
+            if processingDelay != .zero {
+                try? await Task.sleep(for: processingDelay)
+            }
+            if let processingFailure { throw processingFailure }
+            return processing
+        }
+        analysisRunCount += 1
+        analysisPrompts.append(prompt)
+        if let analysisFailure { throw analysisFailure }
+        return analysis
+    }
 }
 
 private actor AcceptanceCaptureAPI: BrainCaptureAPI {

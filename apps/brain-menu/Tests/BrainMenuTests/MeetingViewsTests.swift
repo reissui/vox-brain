@@ -329,9 +329,11 @@ struct MeetingViewsTests {
         #expect(model.levels.map(\.level) == [1, 0])
         #expect(model.levels.allSatisfy { $0.accessibilityLabel.contains("percent") })
         #expect(model.previewMessage?.contains("2 system audio chunks") == true)
-        #expect(model.errorMessages == [
-            "Microphone preview: model unavailable",
-            "No voice signal detected on the selected microphone.",
+        #expect(model.transcriptHealth?.text
+            == "Transcript health — Microphone: 1 preview span skipped. Latest guidance: model unavailable")
+        #expect(model.transcriptHealth?.severity == .warning)
+        #expect(model.captureGuidance.map(\.text) == [
+            "Microphone: No voice signal detected on the selected microphone.",
         ])
         #expect(model.actions == [.pause, .stop])
 
@@ -409,6 +411,141 @@ struct MeetingViewsTests {
             return
         }
         #expect(message.contains("preserved for recovery"))
+    }
+
+    @Test
+    func liveAndCompletedTranscriptShareTurnAssembly() throws {
+        let id = UUID()
+        let first = try MeetingUtterance(
+            source: .system,
+            startMilliseconds: 0,
+            endMilliseconds: 1_000,
+            text: "First remote response",
+            baseSpeakerID: "untrusted-diarization"
+        )
+        let second = try MeetingUtterance(
+            source: .system,
+            startMilliseconds: 8_999,
+            endMilliseconds: 9_500,
+            text: "Second response",
+            baseSpeakerID: "another-diarized-speaker"
+        )
+        let third = try MeetingUtterance(
+            source: .system,
+            startMilliseconds: 17_500,
+            endMilliseconds: 18_000,
+            text: "New turn",
+            baseSpeakerID: "yet-another-speaker"
+        )
+        let utterances = [third, second, first]
+        let live = MeetingLiveViewModel(snapshot: MeetingLiveSnapshot(
+            meeting: meeting(id: id, title: "Shared turns", start: .now),
+            lifecycleState: .recording,
+            utterances: utterances,
+            previewLag: .current,
+            transcriptFailures: [],
+            controllerFailure: nil,
+            levels: [:],
+            now: .now
+        ))
+        let record = meeting(id: id, title: "Shared turns", start: .now)
+        let detail = MeetingDetailController(
+            meetingID: id,
+            store: MemoryMeetingViewStore(values: [id: StoredMeeting(meeting: record, utterances: utterances)]),
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: MeetingDetailAudioSpy(meeting: record),
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: MeetingClipboardSpy()
+        )
+        detail.load()
+
+        #expect(live.transcript.map(\.text) == ["First remote response Second response", "New turn"])
+        #expect(live.transcript.map(\.speaker) == ["Remote", "Remote"])
+        #expect(detail.viewModel.transcript.map(\.text) == live.transcript.map(\.text))
+        #expect(detail.viewModel.transcript.map(\.speakerName) == live.transcript.map(\.speaker))
+    }
+
+    @Test
+    func liveTranscriptHealthSummarizesRepeatedFailuresWithoutChangingTranscriptRows() throws {
+        let activeMeeting = meeting(
+            title: "Failure summary",
+            start: Date(timeIntervalSince1970: 100)
+        )
+        let transcript = try utterances()
+        let latestMessage = String(repeating: "Reconnect the transcription service promptly. ", count: 12)
+        var failures: [LiveTranscriptFailure] = []
+        for index in 0..<70 {
+            failures.append(LiveTranscriptFailure(
+                source: .microphone,
+                phase: .preview,
+                startMilliseconds: Int64(index * 1_000),
+                endMilliseconds: Int64(index * 1_000 + 500),
+                message: "Temporary preview failure"
+            ))
+        }
+        for index in 0..<20 {
+            failures.append(LiveTranscriptFailure(
+                source: .system,
+                phase: .preview,
+                startMilliseconds: Int64(index * 1_000),
+                endMilliseconds: Int64(index * 1_000 + 500),
+                message: "Temporary preview failure"
+            ))
+        }
+        for index in 0..<10 {
+            failures.append(LiveTranscriptFailure(
+                source: .microphone,
+                phase: .final,
+                startMilliseconds: Int64(index * 1_000),
+                endMilliseconds: Int64(index * 1_000 + 500),
+                message: latestMessage,
+                isSystemic: index == 9
+            ))
+        }
+
+        let baseline = MeetingLiveViewModel(snapshot: MeetingLiveSnapshot(
+            meeting: activeMeeting,
+            lifecycleState: .recording,
+            utterances: transcript,
+            previewLag: .current,
+            transcriptFailures: [],
+            controllerFailure: nil,
+            levels: [:],
+            now: activeMeeting.startedAt
+        ))
+        let model = MeetingLiveViewModel(snapshot: MeetingLiveSnapshot(
+            meeting: activeMeeting,
+            lifecycleState: .recording,
+            utterances: transcript,
+            previewLag: .current,
+            transcriptFailures: failures,
+            controllerFailure: nil,
+            levels: [:],
+            audioGuidance: [
+                .microphone: "Check the selected input.",
+                .system: "Check the selected input.",
+            ],
+            now: activeMeeting.startedAt
+        ))
+
+        let health = try #require(model.transcriptHealth)
+        #expect(model.transcript == baseline.transcript)
+        #expect(model.transcript.map(\.id) == baseline.transcript.map(\.id))
+        #expect(health.sources.count == 2)
+        #expect(health.sources.first { $0.source == .microphone }?.previewCount == 70)
+        #expect(health.sources.first { $0.source == .microphone }?.finalCount == 10)
+        #expect(health.sources.first { $0.source == .system }?.previewCount == 20)
+        #expect(health.severity == .error)
+        #expect(health.latestGuidance.count <= 240)
+        #expect(health.text.count < 500)
+        #expect(health.accessibilityLabel.contains("Microphone"))
+        #expect(health.accessibilityLabel.contains("70 preview spans skipped"))
+        #expect(health.accessibilityLabel.contains("10 final spans skipped"))
+        #expect(health.accessibilityLabel.contains(health.latestGuidance))
+        #expect(model.captureGuidance.count == 1)
+        #expect(model.captureGuidance.first?.sources == [.microphone, .system])
+        #expect((model.transcriptHealth == nil ? 0 : 1) + model.captureGuidance.count <= 3)
     }
 
     @Test
@@ -504,14 +641,7 @@ struct MeetingViewsTests {
         await controller.perform(.analyze)
         #expect(analysisActions.analysisCalls == 1)
 
-        await controller.perform(.copyDraft(.subject))
-        await controller.perform(.copyDraft(.body))
-        await controller.perform(.copyDraft(.all))
-        #expect(clipboard.values == [
-            "Follow up",
-            "Thanks for the review.",
-            "Subject: Follow up\n\nThanks for the review.",
-        ])
+        #expect(clipboard.values.isEmpty)
 
         await controller.perform(.revealAudio)
         await controller.perform(.exportAudio(URL(fileURLWithPath: "/tmp/export.caf")))
@@ -1077,7 +1207,7 @@ struct MeetingViewsTests {
     }
 
     @Test
-    func viewsExposeKeyboardVoiceOverAndCopyOnlyFollowUpWithoutDirectBoundaries() throws {
+    func viewsExposeKeyboardVoiceOverAndNoFollowUpOrDeliveryBoundaries() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -1095,17 +1225,27 @@ struct MeetingViewsTests {
             contentsOf: root.appendingPathComponent("MeetingDetailView.swift"),
             encoding: .utf8
         )
-        let combined = meetings + live + detail
+        let review = try String(
+            contentsOf: root.appendingPathComponent("MeetingTranscriptReviewView.swift"),
+            encoding: .utf8
+        )
+        let combined = meetings + live + detail + review
 
         #expect(combined.contains("keyboardShortcut"))
         #expect(combined.contains("accessibilityLabel"))
-        #expect(detail.contains("Copy Subject"))
-        #expect(detail.contains("Copy Body"))
-        #expect(detail.contains("Copy All"))
+        #expect(!detail.contains("Follow-up draft"))
+        #expect(!detail.contains("Copy Subject"))
+        #expect(!detail.contains("Copy Body"))
+        #expect(!detail.contains("Copy All"))
         #expect(!detail.contains("Send Email"))
         #expect(!detail.contains("mailto:"))
         #expect(!combined.contains("Process()"))
         #expect(!live.contains(".onDisappear"))
+        #expect(review.contains("Button(\"Select All\")"))
+        #expect(review.contains("Button(\"Copy\")"))
+        #expect(!review.contains("TextEditor"))
+        #expect(!review.contains("URLSession"))
+        #expect(!review.localizedCaseInsensitiveContains("follow-up"))
     }
 
     @Test
@@ -1218,11 +1358,7 @@ struct MeetingViewsTests {
             actionItems: [MeetingAnalysisActionItem(text: "Prepare release", owner: "the owner")],
             risks: [],
             quotes: [MeetingAnalysisQuote(utteranceID: utteranceID, text: "Launch timing")],
-            speakerSuggestions: [],
-            followUp: MeetingFollowUpDraft(
-                subject: "Follow up",
-                body: "Thanks for the review."
-            )
+            speakerSuggestions: []
         )
     }
 
@@ -1305,6 +1441,247 @@ struct MeetingViewsTests {
         #expect(controller.viewModel.hasTranscript)
         #expect(controller.viewModel.audioRetentionState == .deleted)
     }
+
+    @Test
+    func transcriptReviewDefaultsToCurrentProcessedKeepsRawSeekableAndUnloadsOnDelete() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "MeetingReview-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(rootURL: root)
+        let artifactStore = MeetingTranscriptArtifactStore(rootURL: root)
+        let processedStore = MeetingProcessedTranscriptStore(rootURL: root)
+        let terminology = MeetingTerminologyStore(
+            fileURL: root.appendingPathComponent("terminology.json")
+        )
+        let attemptID = UUID()
+        let firstID = UUID()
+        let secondID = UUID()
+        let thirdID = UUID()
+        let selection = SpeechEngineSelection(engine: .whisper, modelID: "large-v3")
+        let attestation = VoxTypeModelAttestation(
+            requestedSelection: selection,
+            effectiveSelection: selection,
+            verifiedAt: Date(timeIntervalSince1970: 10),
+            voxTypeVersion: VoxTypeVersion(major: 0, minor: 7, patch: 5, prerelease: nil)
+        )
+        var meeting = MeetingRecord(
+            title: "Transcript review",
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            endedAt: Date(timeIntervalSince1970: 1_040),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "large-v3",
+            speechModelAttestation: attestation,
+            selectedRawTranscriptAttemptID: attemptID,
+            retainedAudio: RetainedAudioMetadata(
+                filename: AudioRetentionController.retainedFilename,
+                format: AudioRetentionController.retainedFormat,
+                sizeBytes: 3,
+                durationMilliseconds: 40_000
+            )
+        )
+        meeting.transcriptionState = .completed
+        let utterances = [
+            try MeetingUtterance(
+                id: firstID,
+                source: .microphone,
+                startMilliseconds: 0,
+                endMilliseconds: 1_000,
+                text: "first raw",
+                baseSpeakerID: "you"
+            ),
+            try MeetingUtterance(
+                id: secondID,
+                source: .microphone,
+                startMilliseconds: 8_999,
+                endMilliseconds: 9_500,
+                text: "same eight-second turn",
+                baseSpeakerID: "you"
+            ),
+            try MeetingUtterance(
+                id: thirdID,
+                source: .microphone,
+                startMilliseconds: 17_500,
+                endMilliseconds: 18_000,
+                text: "new turn",
+                baseSpeakerID: "you"
+            ),
+        ]
+        try store.save(meeting, utterances: utterances)
+        let directory = store.directoryURL(for: meeting.id)
+        try Data([1, 2, 3]).write(
+            to: directory.appendingPathComponent(AudioRetentionController.retainedFilename)
+        )
+        let attempt = MeetingTranscriptAttempt(
+            id: attemptID,
+            createdAt: Date(timeIntervalSince1970: 2_000),
+            modelAttestation: MeetingTranscriptModelAttestation(meeting: meeting),
+            retainedPreviews: [utterances[0]],
+            utterances: utterances,
+            failures: [MeetingTranscriptFailureDiagnostic(LiveTranscriptFailure(
+                source: .microphone,
+                phase: .final,
+                startMilliseconds: 20_000,
+                endMilliseconds: 21_000,
+                message: "timeout"
+            ))],
+            isSuccessful: true
+        )
+        try artifactStore.save(MeetingTranscriptArtifact(
+            meetingID: meeting.id,
+            attempts: [attempt],
+            selectedAttemptID: attemptID
+        ))
+        try processedStore.replace(MeetingProcessedTranscript(
+            rawAttemptID: attemptID,
+            terminologyHash: terminology.contentHash,
+            turns: utterances.map { utterance in
+                MeetingProcessedTranscriptTurn(
+                    id: utterance.id,
+                    utteranceIDs: [utterance.id],
+                    startMilliseconds: utterance.startMilliseconds,
+                    endMilliseconds: utterance.endMilliseconds,
+                    speakerID: "you",
+                    speakerLabel: "You",
+                    text: "processed \(utterance.text)",
+                    unclear: false
+                )
+            },
+            bullets: (1...10).map { "Bullet \($0)" },
+            corrections: [MeetingTranscriptCorrection(
+                id: UUID(),
+                utteranceIDs: [firstID],
+                kind: .punctuation,
+                before: "first raw",
+                after: "First raw.",
+                reason: "sentence boundary",
+                confidence: 1
+            )]
+        ), meetingID: meeting.id)
+
+        let playbackEngine = MeetingReviewPlaybackEngine(duration: 40_000)
+        let playback = MeetingAudioPlaybackController(
+            retention: AudioRetentionController(store: store),
+            engine: playbackEngine
+        )
+        let controller = MeetingDetailController(
+            meetingID: meeting.id,
+            store: store,
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: AudioRetentionController(store: store),
+            audioChecker: FileMeetingLocalAudioChecker(rootURL: root),
+            clipboard: MeetingClipboardSpy(),
+            transcriptArtifactStore: artifactStore,
+            processedTranscriptStore: processedStore,
+            transcriptProcessingController: nil,
+            terminologyStore: terminology,
+            audioPlayback: playback
+        )
+
+        controller.load()
+        let review = try #require(controller.viewModel.transcriptReview)
+        #expect(review.mode == .processed)
+        #expect(review.processedIsCurrent)
+        #expect(review.bullets.count == 8)
+        #expect(review.rawRows.count == 2)
+        #expect(review.processedRows.count == 2)
+        #expect(review.quality == MeetingTranscriptQualityViewModel(
+            rawUtteranceCount: 3,
+            retainedPreviewCount: 1,
+            skippedFinalCount: 1,
+            correctionCount: 1
+        ))
+        #expect(review.model.isVerified)
+
+        await controller.perform(.selectTranscriptReviewMode(.raw))
+        #expect(controller.viewModel.transcriptReview?.mode == .raw)
+        await controller.perform(.seekAudio(17_500))
+        #expect(playbackEngine.seeks == [17_500])
+
+        await controller.perform(.requestAudioDeletion)
+        await controller.perform(.confirmAudioDeletion)
+        #expect(playback.meetingID == nil)
+        #expect(playbackEngine.stopCount >= 2)
+    }
+
+    @Test
+    func staleProcessedTranscriptFallsBackToRawAndFailedRetryDoesNotHideIt() async throws {
+        let id = UUID()
+        let attemptID = UUID()
+        let utterance = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 3_000,
+            endMilliseconds: 4_000,
+            text: "immutable raw evidence",
+            baseSpeakerID: "you"
+        )
+        var meeting = meeting(id: id, title: "Stale", start: .now)
+        meeting.selectedRawTranscriptAttemptID = attemptID
+        meeting.requestedSpeechSelection = SpeechEngineSelection(
+            engine: .whisper,
+            modelID: "large-v3"
+        )
+        meeting.effectiveSpeechSelection = SpeechEngineSelection(
+            engine: .parakeet,
+            modelID: "parakeet-tdt-0.6b-v3"
+        )
+        meeting.speechVerificationState = .verified
+        let attempt = MeetingTranscriptAttempt(
+            id: attemptID,
+            modelAttestation: MeetingTranscriptModelAttestation(meeting: meeting),
+            utterances: [utterance],
+            isSuccessful: true
+        )
+        let artifact = MeetingTranscriptArtifact(
+            meetingID: id,
+            attempts: [attempt],
+            selectedAttemptID: attemptID
+        )
+        let processing = MeetingTranscriptProcessingSpy(result: MeetingTranscriptProcessingRunResult(
+            rawAttemptID: attemptID,
+            transcript: nil,
+            failure: .schemaFailure
+        ))
+        let controller = MeetingDetailController(
+            meetingID: id,
+            store: MemoryMeetingViewStore(values: [
+                id: StoredMeeting(meeting: meeting, utterances: [utterance]),
+            ]),
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: MeetingDetailAudioSpy(meeting: meeting),
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: MeetingClipboardSpy(),
+            transcriptArtifactStore: MemoryMeetingTranscriptArtifactLoader(artifact: artifact),
+            processedTranscriptStore: MemoryProcessedTranscriptStore(),
+            transcriptProcessingController: processing,
+            terminologyStore: MeetingTerminologyStore(
+                fileURL: FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "MissingTerminology-\(UUID().uuidString).json"
+                )
+            )
+        )
+
+        controller.load()
+        #expect(controller.viewModel.transcriptReview?.mode == .raw)
+        #expect(controller.viewModel.transcriptReview?.rawRows.map(\.text)
+            == ["immutable raw evidence"])
+        #expect(controller.viewModel.transcriptReview?.model.isVerified == false)
+        #expect(controller.viewModel.transcriptReview?.model.verificationLabel
+            == "Unverified model mismatch")
+
+        await controller.perform(.selectTranscriptReviewMode(.processed))
+        #expect(controller.viewModel.transcriptReview?.processedIsCurrent == false)
+        await controller.perform(.retryTranscriptProcessing)
+        #expect(processing.calls == 1)
+        #expect(controller.viewModel.transcriptReview?.mode == .raw)
+        #expect(controller.viewModel.transcriptReview?.rawRows.map(\.text)
+            == ["immutable raw evidence"])
+        #expect(controller.viewModel.transcriptReview?.processingMessage?.contains("evidence checks") == true)
+    }
 }
 
 private enum TestMeetingViewError: Error, LocalizedError {
@@ -1372,6 +1749,48 @@ private final class MemoryMeetingViewAnalysisStore: MeetingAnalysisStoring, @unc
     func load(meetingID: UUID) throws -> StoredMeetingAnalysis? { values[meetingID] }
     func replace(_ value: StoredMeetingAnalysis, meetingID: UUID) throws {
         values[meetingID] = value
+    }
+}
+
+private struct MemoryMeetingTranscriptArtifactLoader: MeetingTranscriptArtifactLoading {
+    let artifact: MeetingTranscriptArtifact
+    func load(
+        meeting: MeetingRecord,
+        legacyTranscript: [MeetingUtterance]
+    ) throws -> MeetingTranscriptArtifact { artifact }
+}
+
+private final class MemoryProcessedTranscriptStore: MeetingProcessedTranscriptStoring, @unchecked Sendable {
+    private var value: MeetingProcessedTranscript?
+    init(value: MeetingProcessedTranscript? = nil) { self.value = value }
+    func load(
+        meetingID: UUID,
+        rawAttemptID: UUID,
+        terminologyHash: String
+    ) throws -> MeetingProcessedTranscript? {
+        guard value?.rawAttemptID == rawAttemptID,
+              value?.terminologyHash == terminologyHash else { return nil }
+        return value
+    }
+    func replace(_ transcript: MeetingProcessedTranscript, meetingID: UUID) throws {
+        value = transcript
+    }
+}
+
+private final class MeetingTranscriptProcessingSpy: MeetingTranscriptProcessingControlling, @unchecked Sendable {
+    let result: MeetingTranscriptProcessingRunResult
+    private(set) var calls = 0
+    init(result: MeetingTranscriptProcessingRunResult) { self.result = result }
+    func process(
+        meeting: MeetingRecord,
+        artifact: MeetingTranscriptArtifact,
+        speakerState: SpeakerEditingState,
+        notes: String,
+        terminology: [String],
+        terminologyHash: String
+    ) async -> MeetingTranscriptProcessingRunResult {
+        calls += 1
+        return result
     }
 }
 
@@ -1515,6 +1934,26 @@ private final class MeetingDetailTranscriptionSpy: MeetingTranscriptionRetrying 
 private struct FixedAudioChecker: MeetingLocalAudioChecking {
     let value: Bool
     func hasLocalAudio(for meeting: MeetingRecord) -> Bool { value }
+}
+
+@MainActor
+private final class MeetingReviewPlaybackEngine: MeetingAudioPlaying {
+    let durationMilliseconds: Int64
+    var elapsedMilliseconds: Int64 = 0
+    var onProgress: (@MainActor (Int64) -> Void)?
+    var onCompletion: (@MainActor () -> Void)?
+    private(set) var seeks: [Int64] = []
+    private(set) var stopCount = 0
+
+    init(duration: Int64) { durationMilliseconds = duration }
+    func load(url: URL) throws { elapsedMilliseconds = 0 }
+    func play() throws {}
+    func pause() {}
+    func stop() { stopCount += 1 }
+    func seek(to milliseconds: Int64) throws {
+        seeks.append(milliseconds)
+        elapsedMilliseconds = milliseconds
+    }
 }
 
 @MainActor

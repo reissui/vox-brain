@@ -514,6 +514,46 @@ struct MeetingControllerTests {
         #expect(presentationChanges == 1)
     }
 
+    @Test
+    func meetingStartBlocksWithoutCurrentModelAttestation() async {
+        let fixture = MeetingControllerFixture(
+            modelAttester: VirtualModelAttester(result: .failure(.unavailable(.daemonNotRunning)))
+        )
+
+        await fixture.controller.startRecording(application: nil)
+
+        #expect(fixture.controller.state == .failed)
+        guard case .speechModelUnavailable(let guidance) = fixture.controller.failure else {
+            Issue.record("Expected model verification failure")
+            return
+        }
+        #expect(guidance.contains("Start VoxType"))
+        #expect(fixture.recorder.actions.isEmpty)
+    }
+
+    @Test
+    func meetingPersistsSameRequestedAndEffectiveVerifiedModel() async throws {
+        let selection = SpeechEngineSelection(engine: .whisper, modelID: "large-v3")
+        let attestation = VoxTypeModelAttestation(
+            requestedSelection: selection,
+            effectiveSelection: selection,
+            verifiedAt: Date(timeIntervalSince1970: 9_999),
+            voxTypeVersion: .init(major: 0, minor: 7, patch: 5, prerelease: nil)
+        )
+        let fixture = MeetingControllerFixture(
+            modelAttester: VirtualModelAttester(result: .success(attestation))
+        )
+
+        await fixture.controller.startRecording(application: nil)
+
+        let meeting = try #require(fixture.controller.currentMeeting)
+        #expect(meeting.requestedSpeechSelection == selection)
+        #expect(meeting.effectiveSpeechSelection == selection)
+        #expect(meeting.speechVerificationState == .verified)
+        #expect(meeting.speechVerifiedAt == attestation.verifiedAt)
+        #expect(meeting.voxTypeVersion == attestation.voxTypeVersion)
+    }
+
     private func makeFixture() -> MeetingControllerFixture {
         MeetingControllerFixture()
     }
@@ -533,14 +573,28 @@ private final class MeetingControllerFixture {
     let recorder = VirtualMeetingRecorder()
     let controller: MeetingController
 
-    init() {
+    init(modelAttester: (any VoxTypeModelAttesting)? = nil) {
         controller = MeetingController(
             detector: detector,
             recorder: recorder,
             clock: clock,
             speechEngine: "parakeet",
-            speechModel: "tdt-v3"
+            speechModel: "tdt-v3",
+            modelAttester: modelAttester
         )
+    }
+}
+
+@MainActor
+private final class VirtualModelAttester: VoxTypeModelAttesting {
+    let result: Result<VoxTypeModelAttestation, VoxTypeModelAttestationError>
+
+    init(result: Result<VoxTypeModelAttestation, VoxTypeModelAttestationError>) {
+        self.result = result
+    }
+
+    func attestCurrentSelection() async throws -> VoxTypeModelAttestation {
+        try result.get()
     }
 }
 
