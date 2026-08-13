@@ -619,11 +619,25 @@ final class BrainAppControllerGraph {
         }
 
         automaticMeetingAnalysisTask = Task { @MainActor [weak self] in
-            let result = await analysisController.analyzeAfterFinalTranscription(
-                meeting: runningMeeting,
-                utterances: stored.utterances,
-                speakerState: SpeakerEditingState()
-            )
+            let result: MeetingAnalysisRunResult
+            if let processingAnalysis = analysisController as? MeetingAnalysisService,
+               let self {
+                let terminology = self.speechSettings.meetingTerminology
+                result = await processingAnalysis.analyzeAfterFinalTranscription(
+                    meeting: runningMeeting,
+                    utterances: stored.utterances,
+                    artifact: stored.rawTranscriptArtifacts,
+                    speakerState: SpeakerEditingState(),
+                    terminology: terminology.terms,
+                    terminologyHash: terminology.contentHash
+                )
+            } else {
+                result = await analysisController.analyzeAfterFinalTranscription(
+                    meeting: runningMeeting,
+                    utterances: stored.utterances,
+                    speakerState: SpeakerEditingState()
+                )
+            }
             guard !Task.isCancelled, let self else { return }
             guard let merged = try? self.meetings.mergeAnalysisResult(result) else { return }
             self.meeting.replaceCompletedMeeting(merged)

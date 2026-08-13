@@ -52,6 +52,34 @@ struct MeetingAnalysisServiceTests {
         #expect(prompt.contains("empty collection instead of fabricated data"))
         #expect(!prompt.contains("follow-up"))
         #expect(!prompt.contains("follow up"))
+
+        let processed = MeetingProcessedTranscript(
+            rawAttemptID: UUID(),
+            terminologyHash: "current",
+            turns: [MeetingProcessedTranscriptTurn(
+                id: fixtures[0].id,
+                utteranceIDs: [fixtures[0].id, fixtures[1].id],
+                startMilliseconds: 0,
+                endMilliseconds: 2_000,
+                speakerID: "you",
+                speakerLabel: "Owner",
+                text: "Corrected readable release wording.",
+                unclear: false
+            )],
+            bullets: [],
+            corrections: []
+        )
+        let processedPrompt = MeetingAnalysisPrompt.make(
+            contextChoice: .plain,
+            utterances: fixtures,
+            speakerState: editor.state,
+            processedTranscript: processed
+        )
+        #expect(processedPrompt.contains("Corrected readable release wording."))
+        #expect(processedPrompt.contains(fixtures[0].id.uuidString))
+        #expect(processedPrompt.contains("We should ship Friday."))
+        #expect(processedPrompt.contains("immutable raw quote evidence"))
+        #expect(processedPrompt.contains("schema version 2"))
     }
 
     @Test
@@ -267,6 +295,82 @@ struct MeetingAnalysisServiceTests {
             store: InMemoryMeetingAnalysisStore()
         ).analyzeAfterFinalTranscription(meeting: meeting, utterances: utterances)
         #expect(providerSchemaFailure.failure == .schemaFailure)
+    }
+
+    @Test
+    func currentProcessedTranscriptIsPreferredAndReusedWhileQuotesValidateAgainstRaw() async throws {
+        let utterances = try utteranceFixtures()
+        var meeting = meetingRecord()
+        let attempt = MeetingTranscriptAttempt(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000111")!,
+            createdAt: meeting.endedAt ?? meeting.startedAt,
+            modelAttestation: MeetingTranscriptModelAttestation.legacy(meeting: meeting),
+            utterances: utterances,
+            isSuccessful: true
+        )
+        meeting.selectedRawTranscriptAttemptID = attempt.id
+        let artifact = MeetingTranscriptArtifact(
+            meetingID: meeting.id,
+            attempts: [attempt],
+            selectedAttemptID: attempt.id
+        )
+        let processed = MeetingProcessedTranscript(
+            rawAttemptID: attempt.id,
+            terminologyHash: "current",
+            turns: [MeetingProcessedTranscriptTurn(
+                id: utterances[0].id,
+                utteranceIDs: [utterances[0].id, utterances[1].id],
+                startMilliseconds: 0,
+                endMilliseconds: 2_000,
+                speakerID: "you",
+                speakerLabel: "Owner",
+                text: "Corrected readable content drives the summary.",
+                unclear: false
+            )],
+            bullets: [],
+            corrections: []
+        )
+        let processedStore = InMemoryMeetingProcessedTranscriptStore()
+        try processedStore.replace(processed, meetingID: meeting.id)
+        let payload = try JSONEncoder().encode(analysis(
+            quote: MeetingAnalysisQuote(
+                utteranceID: utterances[0].id,
+                text: "ship Friday"
+            )
+        ))
+        let provider = FakeMeetingAnalysisProvider(readiness: .ready, output: payload)
+        let service = MeetingAnalysisService(
+            provider: provider,
+            store: InMemoryMeetingAnalysisStore(),
+            processedTranscriptStore: processedStore
+        )
+
+        let automatic = await service.analyzeAfterFinalTranscription(
+            meeting: meeting,
+            utterances: utterances,
+            artifact: artifact,
+            terminology: [],
+            terminologyHash: "current"
+        )
+        let manual = await service.reanalyze(
+            meeting: automatic.meeting,
+            utterances: utterances,
+            artifact: artifact,
+            speakerState: automatic.speakerState,
+            terminology: [],
+            terminologyHash: "current"
+        )
+
+        #expect(automatic.failure == nil)
+        #expect(manual.failure == nil)
+        #expect(manual.analysis?.quotes.first?.text == "ship Friday")
+        #expect(processedStore.replacementCount == 1)
+        #expect(provider.runCount == 2)
+        #expect(provider.prompts.allSatisfy {
+            $0.contains("Corrected readable content drives the summary.")
+                && $0.contains("We should ship Friday.")
+                && $0.contains(utterances[0].id.uuidString)
+        })
     }
 
     @Test
@@ -677,6 +781,7 @@ private final class FakeMeetingAnalysisProvider: AIProviding, @unchecked Sendabl
     private var storedOutput: Data
     private var storedTestConnectionCount = 0
     private var storedRunCount = 0
+    private var storedPrompts: [String] = []
 
     init(readiness: AIConnectionState, output: Data) {
         self.readiness = readiness
@@ -697,6 +802,7 @@ private final class FakeMeetingAnalysisProvider: AIProviding, @unchecked Sendabl
 
     var testConnectionCount: Int { lock.withLock { storedTestConnectionCount } }
     var runCount: Int { lock.withLock { storedRunCount } }
+    var prompts: [String] { lock.withLock { storedPrompts } }
 
     func testConnection() async -> AIConnectionState {
         lock.withLock { storedTestConnectionCount += 1 }
@@ -706,10 +812,40 @@ private final class FakeMeetingAnalysisProvider: AIProviding, @unchecked Sendabl
     func run(prompt: String, jsonSchema: Data) async throws -> Data {
         let snapshot: (Data, AIProviderError?) = lock.withLock {
             storedRunCount += 1
+            storedPrompts.append(prompt)
             return (storedOutput, self.error)
         }
         if let error = snapshot.1 { throw error }
         return snapshot.0
+    }
+}
+
+private final class InMemoryMeetingProcessedTranscriptStore:
+    MeetingProcessedTranscriptStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [UUID: MeetingProcessedTranscript] = [:]
+    private var storedReplacementCount = 0
+
+    var replacementCount: Int { lock.withLock { storedReplacementCount } }
+
+    func load(
+        meetingID: UUID,
+        rawAttemptID: UUID,
+        terminologyHash: String
+    ) throws -> MeetingProcessedTranscript? {
+        lock.withLock {
+            guard let value = values[meetingID],
+                  value.rawAttemptID == rawAttemptID,
+                  value.terminologyHash == terminologyHash else { return nil }
+            return value
+        }
+    }
+
+    func replace(_ transcript: MeetingProcessedTranscript, meetingID: UUID) throws {
+        lock.withLock {
+            values[meetingID] = transcript
+            storedReplacementCount += 1
+        }
     }
 }
 
