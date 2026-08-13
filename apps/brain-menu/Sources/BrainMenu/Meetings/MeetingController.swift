@@ -30,6 +30,25 @@ struct MeetingRecordingRequest: Equatable, Sendable {
     let startedAt: Date
     let title: String
     let titleSource: MeetingTitleSource
+    let speechModelAttestation: VoxTypeModelAttestation?
+
+    init(
+        meetingID: UUID,
+        recordingKind: MeetingRecordingKind,
+        application: MeetingDetectedApplication?,
+        startedAt: Date,
+        title: String,
+        titleSource: MeetingTitleSource,
+        speechModelAttestation: VoxTypeModelAttestation? = nil
+    ) {
+        self.meetingID = meetingID
+        self.recordingKind = recordingKind
+        self.application = application
+        self.startedAt = startedAt
+        self.title = title
+        self.titleSource = titleSource
+        self.speechModelAttestation = speechModelAttestation
+    }
 
     /// Meetings capture both sides of a call. A Voice Note is intentionally a
     /// single-person microphone recording and must not depend on screen or
@@ -208,6 +227,7 @@ final class SystemMeetingClock: MeetingControllingClock {
 }
 
 enum MeetingControllerFailure: Error, Equatable, Sendable {
+    case speechModelUnavailable(String)
     case startFailed(String)
     case microphoneSelectionRequired(String)
     case pauseFailed(String)
@@ -226,6 +246,7 @@ final class MeetingController {
     private let clock: any MeetingControllingClock
     private let speechEngine: String
     private let speechModel: String
+    private let modelAttester: (any VoxTypeModelAttesting)?
     let audioMonitor: MeetingAudioMonitor
 
     private(set) var state: MeetingLifecycleState = .idle
@@ -244,6 +265,7 @@ final class MeetingController {
         clock: any MeetingControllingClock = SystemMeetingClock(),
         speechEngine: String,
         speechModel: String,
+        modelAttester: (any VoxTypeModelAttesting)? = nil,
         audioMonitor: MeetingAudioMonitor = MeetingAudioMonitor()
     ) {
         self.detector = detector
@@ -251,6 +273,7 @@ final class MeetingController {
         self.clock = clock
         self.speechEngine = speechEngine
         self.speechModel = speechModel
+        self.modelAttester = modelAttester
         self.audioMonitor = audioMonitor
     }
 
@@ -352,6 +375,18 @@ final class MeetingController {
     ) async {
         guard state == .idle || state == .startSuggested else { return }
 
+        let attestation: VoxTypeModelAttestation?
+        do {
+            attestation = try await modelAttester?.attestCurrentSelection()
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription
+                ?? "VoxType's active speech model could not be verified. Open Speech Settings and try again."
+            failure = .speechModelUnavailable(message)
+            startSuggestion = nil
+            transition(to: .failed)
+            return
+        }
+
         let date = clock.now
         let meeting = MeetingRecord(
             title: title,
@@ -360,8 +395,9 @@ final class MeetingController {
             detectedApplication: application?.displayName,
             startedAt: date,
             lifecycleState: .starting,
-            speechEngine: speechEngine,
-            speechModel: speechModel
+            speechEngine: attestation?.effectiveSelection.engine.rawValue ?? speechEngine,
+            speechModel: attestation?.effectiveSelection.modelID ?? speechModel,
+            speechModelAttestation: attestation
         )
         currentMeeting = meeting
         audioMonitor.reset()
@@ -384,7 +420,8 @@ final class MeetingController {
                 application: application,
                 startedAt: date,
                 title: title,
-                titleSource: titleSource
+                titleSource: titleSource,
+                speechModelAttestation: attestation
             ))
             detector.beginTracking(application)
             if stopRequestedWhileStarting {

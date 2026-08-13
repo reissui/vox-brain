@@ -40,7 +40,7 @@ enum VoxTypeStatus: Equatable, Sendable {
     }
 }
 
-struct VoxTypeVersion: Equatable, Comparable, CustomStringConvertible, Sendable {
+struct VoxTypeVersion: Equatable, Comparable, Codable, CustomStringConvertible, Sendable {
     let major: Int
     let minor: Int
     let patch: Int

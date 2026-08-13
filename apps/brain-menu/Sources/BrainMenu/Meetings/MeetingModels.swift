@@ -57,6 +57,11 @@ enum MeetingAudioRetentionState: String, Codable, CaseIterable, Sendable {
     case unresolvedLegacy
 }
 
+enum MeetingSpeechVerificationState: String, Codable, Equatable, Sendable {
+    case verified
+    case unverifiedLegacy
+}
+
 struct RetainedAudioMetadata: Codable, Equatable, Sendable {
     var filename: String
     var format: String
@@ -91,6 +96,11 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     var lifecycleState: MeetingLifecycleState
     var speechEngine: String
     var speechModel: String
+    var requestedSpeechSelection: SpeechEngineSelection
+    var effectiveSpeechSelection: SpeechEngineSelection
+    var speechVerificationState: MeetingSpeechVerificationState
+    var speechVerifiedAt: Date?
+    var voxTypeVersion: VoxTypeVersion?
     var transcriptionState: MeetingTranscriptionState
     var transcriptionAttemptCount: Int
     var transcriptionErrorMessage: String?
@@ -123,6 +133,7 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         lifecycleState: MeetingLifecycleState,
         speechEngine: String,
         speechModel: String,
+        speechModelAttestation: VoxTypeModelAttestation? = nil,
         transcriptionState: MeetingTranscriptionState? = nil,
         transcriptionAttemptCount: Int = 0,
         transcriptionErrorMessage: String? = nil,
@@ -143,6 +154,15 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         self.lifecycleState = lifecycleState
         self.speechEngine = speechEngine
         self.speechModel = speechModel
+        let legacySelection = SpeechEngineSelection(
+            engine: SpeechEngineID(rawValue: speechEngine) ?? .whisper,
+            modelID: speechModel
+        )
+        requestedSpeechSelection = speechModelAttestation?.requestedSelection ?? legacySelection
+        effectiveSpeechSelection = speechModelAttestation?.effectiveSelection ?? legacySelection
+        speechVerificationState = speechModelAttestation == nil ? .unverifiedLegacy : .verified
+        speechVerifiedAt = speechModelAttestation?.verifiedAt
+        voxTypeVersion = speechModelAttestation?.voxTypeVersion
         self.transcriptionState = transcriptionState
             ?? (lifecycleState == .completed ? .completed : .pending)
         self.transcriptionAttemptCount = max(0, transcriptionAttemptCount)
@@ -167,6 +187,11 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         case lifecycleState
         case speechEngine
         case speechModel
+        case requestedSpeechSelection
+        case effectiveSpeechSelection
+        case speechVerificationState
+        case speechVerifiedAt
+        case voxTypeVersion
         case transcriptionState
         case transcriptionAttemptCount
         case transcriptionErrorMessage
@@ -215,6 +240,8 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
             titleSource: titleSource,
             detectedApplication: detectedApplication
         )
+        let legacyEngine = try container.decode(String.self, forKey: .speechEngine)
+        let legacyModel = try container.decode(String.self, forKey: .speechModel)
         self.init(
             id: try container.decode(UUID.self, forKey: .id),
             title: title,
@@ -228,8 +255,8 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
             startedAt: try container.decode(Date.self, forKey: .startedAt),
             endedAt: try container.decodeIfPresent(Date.self, forKey: .endedAt),
             lifecycleState: lifecycleState,
-            speechEngine: try container.decode(String.self, forKey: .speechEngine),
-            speechModel: try container.decode(String.self, forKey: .speechModel),
+            speechEngine: legacyEngine,
+            speechModel: legacyModel,
             transcriptionState: transcriptionState,
             transcriptionAttemptCount: try container.decodeIfPresent(
                 Int.self,
@@ -247,6 +274,23 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
             // already seen. Only newly completed recordings receive the New state.
             isUnread: try container.decodeIfPresent(Bool.self, forKey: .isUnread) ?? false
         )
+        requestedSpeechSelection = try container.decodeIfPresent(
+            SpeechEngineSelection.self,
+            forKey: .requestedSpeechSelection
+        ) ?? SpeechEngineSelection(
+            engine: SpeechEngineID(rawValue: legacyEngine) ?? .whisper,
+            modelID: legacyModel
+        )
+        effectiveSpeechSelection = try container.decodeIfPresent(
+            SpeechEngineSelection.self,
+            forKey: .effectiveSpeechSelection
+        ) ?? requestedSpeechSelection
+        speechVerificationState = try container.decodeIfPresent(
+            MeetingSpeechVerificationState.self,
+            forKey: .speechVerificationState
+        ) ?? .unverifiedLegacy
+        speechVerifiedAt = try container.decodeIfPresent(Date.self, forKey: .speechVerifiedAt)
+        voxTypeVersion = try container.decodeIfPresent(VoxTypeVersion.self, forKey: .voxTypeVersion)
     }
 
     private static func inferredTitleSource(for title: String) -> MeetingTitleSource {
