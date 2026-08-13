@@ -25,12 +25,6 @@ enum MeetingAudioControl: String, CaseIterable, Equatable, Sendable {
     case delete
 }
 
-enum MeetingDraftCopyAction: String, CaseIterable, Equatable, Sendable {
-    case subject
-    case body
-    case all
-}
-
 struct MeetingDetailTranscriptRowModel: Equatable, Identifiable, Sendable {
     let id: UUID
     let utteranceIDs: [UUID]
@@ -99,12 +93,6 @@ struct MeetingDetailSpeakerModel: Equatable, Identifiable, Sendable {
     let displayName: String
 }
 
-struct MeetingFollowUpViewModel: Equatable, Sendable {
-    let subject: String
-    let body: String
-    let actions: [MeetingDraftCopyAction] = MeetingDraftCopyAction.allCases
-}
-
 struct MeetingDetailViewModel: Equatable, Sendable {
     let state: MeetingDetailLoadState
     let meetingID: UUID?
@@ -120,7 +108,6 @@ struct MeetingDetailViewModel: Equatable, Sendable {
     let speakers: [MeetingDetailSpeakerModel]
     let talkTime: [SpeakerTalkTime]
     let analysis: MeetingAnalysis?
-    let followUp: MeetingFollowUpViewModel?
     let audioControls: [MeetingAudioControl]
     let audioRetentionState: MeetingAudioRetentionState?
     let transcriptionState: MeetingTranscriptionState?
@@ -254,7 +241,6 @@ enum MeetingDetailAction: Equatable, Sendable {
     case analyze
     case reanalyze
     case copyFullTranscript
-    case copyDraft(MeetingDraftCopyAction)
     case revealAudio
     case exportAudio(URL?)
     case requestAudioDeletion
@@ -395,12 +381,6 @@ final class MeetingDetailController {
             speakers: speakerModels,
             talkTime: TalkTimeCalculator().calculate(for: editor).data,
             analysis: analysis,
-            followUp: analysis.map {
-                MeetingFollowUpViewModel(
-                    subject: $0.followUp.subject,
-                    body: $0.followUp.body
-                )
-            },
             audioControls: audioControls,
             audioRetentionState: meeting?.audioRetentionState,
             transcriptionState: effectiveTranscriptionState,
@@ -536,8 +516,6 @@ final class MeetingDetailController {
             await runAnalysis(isReanalysis: true)
         case .copyFullTranscript:
             copyFullTranscript()
-        case .copyDraft(let copyAction):
-            copyDraft(copyAction)
         case .revealAudio:
             revealAudio()
         case .exportAudio(let destination):
@@ -712,23 +690,6 @@ final class MeetingDetailController {
             return
         }
         errorMessage = result.failure.map(Self.analysisFailureMessage)
-    }
-
-    private func copyDraft(_ action: MeetingDraftCopyAction) {
-        guard let draft = analysis?.followUp else { return }
-        let value: String
-        switch action {
-        case .subject:
-            value = draft.subjectForCopy
-            copiedMessage = "Subject copied"
-        case .body:
-            value = draft.bodyForCopy
-            copiedMessage = "Body copied"
-        case .all:
-            value = "Subject: \(draft.subjectForCopy)\n\n\(draft.bodyForCopy)"
-            copiedMessage = "Follow-up draft copied"
-        }
-        clipboard.write(value)
     }
 
     private func copyFullTranscript() {
@@ -1144,28 +1105,10 @@ struct MeetingDetailView: View {
                             .textSelection(.enabled)
                     }
                 }
-                if let draft = model.followUp {
-                    Divider()
-                    Text("Follow-up draft").font(.headline)
-                    LabeledContent("Subject") { Text(draft.subject).textSelection(.enabled) }
-                    Text(draft.body).textSelection(.enabled)
-                    HStack {
-                        Button("Copy Subject") {
-                            Task { await controller.perform(.copyDraft(.subject)) }
-                        }
-                        Button("Copy Body") {
-                            Task { await controller.perform(.copyDraft(.body)) }
-                        }
-                        Button("Copy All") {
-                            Task { await controller.perform(.copyDraft(.all)) }
-                        }
-                        .keyboardShortcut("c", modifiers: [.command, .shift])
-                    }
-                }
             } else if model.analysisState == .running {
                 MeetingWorkPlaceholder(
                     title: "Analyzing transcript",
-                    detail: "Brain is creating the summary, topics, decisions, and follow-up draft."
+                    detail: "Brain is creating the summary, topics, decisions, and action items."
                 )
             } else {
                 Text("No local analysis yet. The final transcript remains available and can be saved to the vault.")

@@ -10,6 +10,27 @@ struct MeetingAnalysisActionItem: Codable, Equatable, Sendable {
         self.owner = owner
         self.due = due
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case text
+        case owner
+        case due
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(text, forKey: .text)
+        if let owner {
+            try container.encode(owner, forKey: .owner)
+        } else {
+            try container.encodeNil(forKey: .owner)
+        }
+        if let due {
+            try container.encode(due, forKey: .due)
+        } else {
+            try container.encodeNil(forKey: .due)
+        }
+    }
 }
 
 struct MeetingAnalysisQuote: Codable, Equatable, Sendable {
@@ -22,16 +43,6 @@ struct MeetingSpeakerSuggestion: Codable, Equatable, Sendable {
     let suggestedName: String
 }
 
-/// A draft value only. Callers may copy either field, but this type deliberately
-/// has no delivery, URL, account, or recipient API.
-struct MeetingFollowUpDraft: Codable, Equatable, Sendable {
-    let subject: String
-    let body: String
-
-    var subjectForCopy: String { subject }
-    var bodyForCopy: String { body }
-}
-
 struct MeetingAnalysis: Codable, Equatable, Sendable {
     let version: Int
     let title: String
@@ -42,7 +53,6 @@ struct MeetingAnalysis: Codable, Equatable, Sendable {
     let risks: [String]
     let quotes: [MeetingAnalysisQuote]
     let speakerSuggestions: [MeetingSpeakerSuggestion]
-    let followUp: MeetingFollowUpDraft
 
     init(
         version: Int = MeetingAnalysisSchema.currentVersion,
@@ -53,8 +63,7 @@ struct MeetingAnalysis: Codable, Equatable, Sendable {
         actionItems: [MeetingAnalysisActionItem],
         risks: [String],
         quotes: [MeetingAnalysisQuote],
-        speakerSuggestions: [MeetingSpeakerSuggestion],
-        followUp: MeetingFollowUpDraft
+        speakerSuggestions: [MeetingSpeakerSuggestion]
     ) {
         self.version = version
         self.title = title
@@ -65,7 +74,6 @@ struct MeetingAnalysis: Codable, Equatable, Sendable {
         self.risks = risks
         self.quotes = quotes
         self.speakerSuggestions = speakerSuggestions
-        self.followUp = followUp
     }
 }
 
@@ -79,7 +87,7 @@ enum MeetingAnalysisSchemaError: Error, Equatable, Sendable {
 }
 
 enum MeetingAnalysisSchema {
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     /// Kept as a checked-in literal so every provider receives exactly the same
     /// versioned contract. All objects are closed and every collection is
@@ -89,7 +97,7 @@ enum MeetingAnalysisSchema {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "properties": {
-        "version": { "type": "integer", "const": 1 },
+        "version": { "type": "integer", "const": 2 },
         "title": { "type": "string" },
         "summary": { "type": "string" },
         "topics": { "type": "array", "items": { "type": "string" } },
@@ -131,20 +139,11 @@ enum MeetingAnalysisSchema {
             "required": ["utteranceID", "suggestedName"],
             "additionalProperties": false
           }
-        },
-        "followUp": {
-          "type": "object",
-          "properties": {
-            "subject": { "type": "string" },
-            "body": { "type": "string" }
-          },
-          "required": ["subject", "body"],
-          "additionalProperties": false
         }
       },
       "required": [
         "version", "title", "summary", "topics", "decisions", "actionItems",
-        "risks", "quotes", "speakerSuggestions", "followUp"
+        "risks", "quotes", "speakerSuggestions"
       ],
       "additionalProperties": false
     }
@@ -178,7 +177,17 @@ enum MeetingAnalysisSchema {
         } catch {
             throw MeetingAnalysisSchemaError.invalidJSON
         }
-        guard let root = object as? [String: Any], validateShape(root) else {
+        guard let root = object as? [String: Any] else {
+            throw MeetingAnalysisSchemaError.schemaMismatch
+        }
+
+        guard let version = integerVersion(root["version"]) else {
+            throw MeetingAnalysisSchemaError.schemaMismatch
+        }
+        guard version == currentVersion else {
+            throw MeetingAnalysisSchemaError.unsupportedVersion(version)
+        }
+        guard validateCurrentShape(root) else {
             throw MeetingAnalysisSchemaError.schemaMismatch
         }
 
@@ -188,10 +197,46 @@ enum MeetingAnalysisSchema {
         } catch {
             throw MeetingAnalysisSchemaError.schemaMismatch
         }
-        guard analysis.version == currentVersion else {
-            throw MeetingAnalysisSchemaError.unsupportedVersion(analysis.version)
-        }
         return analysis
+    }
+
+    /// Decodes the durable analysis portion of `analysis.json`. Version 1 was
+    /// shipped with a closed follow-up draft object; that field is deliberately
+    /// discarded and the returned value is normalized to the current version.
+    /// This function does not write the migrated representation back to disk.
+    static func decodeStored(_ data: Data) throws -> MeetingAnalysis {
+        let object: Any
+        do {
+            object = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw MeetingAnalysisSchemaError.invalidJSON
+        }
+        guard var root = object as? [String: Any],
+              let version = integerVersion(root["version"]) else {
+            throw MeetingAnalysisSchemaError.schemaMismatch
+        }
+
+        switch version {
+        case currentVersion:
+            guard validateCurrentShape(root) else {
+                throw MeetingAnalysisSchemaError.schemaMismatch
+            }
+        case 1:
+            guard validateLegacyV1Shape(root) else {
+                throw MeetingAnalysisSchemaError.schemaMismatch
+            }
+            root.removeValue(forKey: "followUp")
+            root["version"] = currentVersion
+        default:
+            throw MeetingAnalysisSchemaError.unsupportedVersion(version)
+        }
+
+        do {
+            let normalized = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+            return try JSONDecoder().decode(MeetingAnalysis.self, from: normalized)
+        } catch {
+            throw MeetingAnalysisSchemaError.schemaMismatch
+        }
     }
 
     static func decode(_ data: Data, utterances: [MeetingUtterance]) throws -> MeetingAnalysis {
@@ -208,13 +253,59 @@ enum MeetingAnalysisSchema {
         return analysis
     }
 
-    private static func validateShape(_ root: [String: Any]) -> Bool {
+    private static func validateCurrentShape(_ root: [String: Any]) -> Bool {
+        let topLevelKeys: Set<String> = [
+            "version", "title", "summary", "topics", "decisions", "actionItems",
+            "risks", "quotes", "speakerSuggestions",
+        ]
+        guard Set(root.keys) == topLevelKeys,
+              integerVersion(root["version"]) == currentVersion,
+              root["title"] is String,
+              root["summary"] is String,
+              isStringArray(root["topics"]),
+              isStringArray(root["decisions"]),
+              isStringArray(root["risks"]),
+              let actionItems = root["actionItems"] as? [[String: Any]],
+              let quotes = root["quotes"] as? [[String: Any]],
+              let suggestions = root["speakerSuggestions"] as? [[String: Any]] else {
+            return false
+        }
+
+        guard actionItems.allSatisfy({ item in
+            guard Set(item.keys) == ["text", "owner", "due"],
+                  item["text"] is String else { return false }
+            if let owner = item["owner"], !(owner is String), !(owner is NSNull) {
+                return false
+            }
+            if let due = item["due"], !(due is String), !(due is NSNull) {
+                return false
+            }
+            return true
+        }) else { return false }
+
+        guard quotes.allSatisfy({ item in
+            Set(item.keys) == ["utteranceID", "text"]
+                && item["utteranceID"] is String
+                && item["text"] is String
+        }) else { return false }
+
+        return suggestions.allSatisfy { item in
+            guard Set(item.keys) == ["utteranceID", "suggestedName"],
+                  item["utteranceID"] is String,
+                  let suggestedName = item["suggestedName"] as? String else {
+                return false
+            }
+            return !suggestedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    private static func validateLegacyV1Shape(_ root: [String: Any]) -> Bool {
         let topLevelKeys: Set<String> = [
             "version", "title", "summary", "topics", "decisions", "actionItems",
             "risks", "quotes", "speakerSuggestions", "followUp",
         ]
         guard Set(root.keys) == topLevelKeys,
-              root["version"] is NSNumber,
+              integerVersion(root["version"]) == 1,
               root["title"] is String,
               root["summary"] is String,
               isStringArray(root["topics"]),
@@ -258,6 +349,14 @@ enum MeetingAnalysisSchema {
             }
             return !suggestedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
+    }
+
+    private static func integerVersion(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let integer = number.intValue
+        guard number.doubleValue == Double(integer) else { return nil }
+        return integer
     }
 
     private static func isStringArray(_ value: Any?) -> Bool {

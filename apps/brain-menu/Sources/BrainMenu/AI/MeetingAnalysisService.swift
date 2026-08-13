@@ -47,9 +47,28 @@ final class FileMeetingAnalysisStore: MeetingAnalysisStoring, @unchecked Sendabl
             guard fileManager.fileExists(atPath: url.path) else { return nil }
             guard isRegularFile(url) else { throw MeetingAnalysisStoreError.unsafePath }
             do {
-                return try JSONDecoder().decode(
-                    StoredMeetingAnalysis.self,
-                    from: Data(contentsOf: url)
+                let data = try Data(contentsOf: url)
+                guard let root = try JSONSerialization.jsonObject(with: data)
+                    as? [String: Any],
+                      Set(root.keys) == ["analysis", "speakerState"],
+                      let analysisObject = root["analysis"] as? [String: Any],
+                      let speakerStateObject = root["speakerState"] as? [String: Any] else {
+                    throw MeetingAnalysisStoreError.corruptAnalysis
+                }
+                let analysisData = try JSONSerialization.data(
+                    withJSONObject: analysisObject,
+                    options: [.sortedKeys]
+                )
+                let speakerStateData = try JSONSerialization.data(
+                    withJSONObject: speakerStateObject,
+                    options: [.sortedKeys]
+                )
+                return StoredMeetingAnalysis(
+                    analysis: try MeetingAnalysisSchema.decodeStored(analysisData),
+                    speakerState: try JSONDecoder().decode(
+                        SpeakerEditingState.self,
+                        from: speakerStateData
+                    )
                 )
             } catch {
                 throw MeetingAnalysisStoreError.corruptAnalysis

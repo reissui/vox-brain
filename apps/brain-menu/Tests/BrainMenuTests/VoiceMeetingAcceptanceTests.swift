@@ -295,7 +295,7 @@ struct VoiceMeetingAcceptanceTests {
     }
 
     @Test
-    func authenticatedCodexAndClaudeProduceStructuredCopyOnlyAnalysisAndFailureUploadsRaw() async throws {
+    func authenticatedCodexAndClaudeProduceStructuredV2AnalysisAndFailureUploadsRaw() async throws {
         let fixture = try AcceptanceDirectory(prefix: "VoiceMeeting-AI")
         defer { fixture.remove() }
         let utterance = try MeetingUtterance(
@@ -318,8 +318,7 @@ struct VoiceMeetingAcceptanceTests {
             actionItems: [.init(text: "Send plan", owner: "Jamie", due: "Friday")],
             risks: [],
             quotes: [.init(utteranceID: utterance.id, text: "send the launch plan")],
-            speakerSuggestions: [.init(utteranceID: utterance.id, suggestedName: "Jamie")],
-            followUp: .init(subject: "Launch follow-up", body: "Jamie, please send the plan.")
+            speakerSuggestions: [.init(utteranceID: utterance.id, suggestedName: "Jamie")]
         )
         let encodedAnalysis = try JSONEncoder().encode(analysis)
         let directlyDecoded = try MeetingAnalysisSchema.decode(
@@ -363,8 +362,6 @@ struct VoiceMeetingAcceptanceTests {
             #expect(result.failure == nil)
             #expect(result.analysis == analysis)
             #expect(result.analysis?.speakerSuggestions.first?.utteranceID == utterance.id)
-            #expect(result.analysis?.followUp.subjectForCopy == "Launch follow-up")
-            #expect(result.analysis?.followUp.bodyForCopy == "Jamie, please send the plan.")
             var editor = SpeakerEditor(utterances: [utterance])
             #expect(try service.acceptSpeakerSuggestion(
                 meetingID: meeting.id,

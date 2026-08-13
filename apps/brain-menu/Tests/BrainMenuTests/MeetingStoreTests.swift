@@ -658,8 +658,7 @@ struct MeetingStoreTests {
                 actionItems: [],
                 risks: [],
                 quotes: [],
-                speakerSuggestions: [],
-                followUp: MeetingFollowUpDraft(subject: "Follow up", body: "Body")
+                speakerSuggestions: []
             ),
             speakerState: SpeakerEditingState()
         )

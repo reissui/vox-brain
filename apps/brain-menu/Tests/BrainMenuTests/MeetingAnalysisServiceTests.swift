@@ -50,7 +50,8 @@ struct MeetingAnalysisServiceTests {
         #expect(prompt.contains("manual speaker names are authoritative"))
         #expect(prompt.contains("do not invent facts"))
         #expect(prompt.contains("empty collection instead of fabricated data"))
-        #expect(prompt.contains("copy-only draft"))
+        #expect(!prompt.contains("follow-up"))
+        #expect(!prompt.contains("follow up"))
     }
 
     @Test
@@ -84,7 +85,9 @@ struct MeetingAnalysisServiceTests {
         #expect(schema["additionalProperties"] as? Bool == false)
         #expect((schema["required"] as? [String])?.contains("version") == true)
         let properties = try #require(schema["properties"] as? [String: Any])
-        #expect((properties["version"] as? [String: Any])?["const"] as? Int == 1)
+        #expect((properties["version"] as? [String: Any])?["const"] as? Int == 2)
+        #expect(properties["followUp"] == nil)
+        #expect((schema["required"] as? [String])?.contains("followUp") == false)
 
         var extra = try object(from: validData)
         extra["invented"] = true
@@ -99,16 +102,34 @@ struct MeetingAnalysisServiceTests {
         }
 
         var nestedExtra = try object(from: validData)
-        var followUp = try #require(nestedExtra["followUp"] as? [String: Any])
-        followUp["recipient"] = "someone@example.invalid"
-        nestedExtra["followUp"] = followUp
+        var items = try #require(nestedExtra["actionItems"] as? [[String: Any]])
+        items[0]["invented"] = true
+        nestedExtra["actionItems"] = items
         #expect(throws: MeetingAnalysisSchemaError.schemaMismatch) {
             try MeetingAnalysisSchema.decode(try data(from: nestedExtra), utterances: utterances)
         }
 
+        var removedField = try object(from: validData)
+        var incompleteItems = try #require(removedField["actionItems"] as? [[String: Any]])
+        incompleteItems[0].removeValue(forKey: "due")
+        removedField["actionItems"] = incompleteItems
+        #expect(throws: MeetingAnalysisSchemaError.schemaMismatch) {
+            try MeetingAnalysisSchema.decode(try data(from: removedField), utterances: utterances)
+        }
+
+        var legacyProviderOutput = try object(from: validData)
+        legacyProviderOutput["version"] = 1
+        legacyProviderOutput["followUp"] = ["subject": "Old", "body": "Old"]
+        #expect(throws: MeetingAnalysisSchemaError.unsupportedVersion(1)) {
+            try MeetingAnalysisSchema.decode(
+                try data(from: legacyProviderOutput),
+                utterances: utterances
+            )
+        }
+
         var wrongVersion = try object(from: validData)
-        wrongVersion["version"] = 2
-        #expect(throws: MeetingAnalysisSchemaError.unsupportedVersion(2)) {
+        wrongVersion["version"] = 3
+        #expect(throws: MeetingAnalysisSchemaError.unsupportedVersion(3)) {
             try MeetingAnalysisSchema.decode(try data(from: wrongVersion), utterances: utterances)
         }
 
@@ -160,7 +181,7 @@ struct MeetingAnalysisServiceTests {
         let utterances = try utteranceFixtures()
         let json = Data("""
         {
-          "version": 1,
+          "version": 2,
           "title": "Release planning",
           "summary": "",
           "topics": [],
@@ -168,8 +189,7 @@ struct MeetingAnalysisServiceTests {
           "actionItems": [{"text":"Prepare release","owner":null,"due":null}],
           "risks": [],
           "quotes": [],
-          "speakerSuggestions": [],
-          "followUp": {"subject":"","body":""}
+          "speakerSuggestions": []
         }
         """.utf8)
         let decoded = try MeetingAnalysisSchema.decode(json, utterances: utterances)
@@ -448,7 +468,92 @@ struct MeetingAnalysisServiceTests {
     }
 
     @Test
-    func followUpIsCopyOnlyAndServiceHasNoEmailOrGeneralNetworkPath() async throws {
+    func fileStoreLoadsExactV1WithoutRewritingAndReplacementWritesV2() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "MeetingAnalysisV1Tests-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meetingID = UUID()
+        let directory = root.appendingPathComponent(meetingID.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent(FileMeetingAnalysisStore.filename)
+        let expected = analysis(title: "Saved legacy analysis")
+        var legacyAnalysis = try object(from: JSONEncoder().encode(expected))
+        legacyAnalysis["version"] = 1
+        legacyAnalysis["followUp"] = [
+            "subject": "Discard this subject",
+            "body": "Discard this body",
+        ]
+        var legacyItems = try #require(legacyAnalysis["actionItems"] as? [[String: Any]])
+        legacyItems[0].removeValue(forKey: "due")
+        legacyAnalysis["actionItems"] = legacyItems
+        let speakerState = SpeakerEditingState()
+        let speakerObject = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(speakerState))
+                as? [String: Any]
+        )
+        let legacyBytes = try JSONSerialization.data(withJSONObject: [
+            "analysis": legacyAnalysis,
+            "speakerState": speakerObject,
+        ], options: [.prettyPrinted, .sortedKeys])
+        try legacyBytes.write(to: destination)
+
+        let store = FileMeetingAnalysisStore(rootURL: root)
+        let loaded = try #require(try store.load(meetingID: meetingID))
+        #expect(loaded.analysis == expected)
+        #expect(loaded.analysis.version == 2)
+        #expect(loaded.analysis.summary == expected.summary)
+        #expect(loaded.analysis.decisions == expected.decisions)
+        #expect(loaded.analysis.actionItems == expected.actionItems)
+        #expect(try Data(contentsOf: destination) == legacyBytes)
+
+        try store.replace(loaded, meetingID: meetingID)
+        let rewritten = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: destination))
+                as? [String: Any]
+        )
+        let rewrittenAnalysis = try #require(rewritten["analysis"] as? [String: Any])
+        #expect(rewrittenAnalysis["version"] as? Int == 2)
+        #expect(rewrittenAnalysis["followUp"] == nil)
+
+        var invalidLegacy = legacyAnalysis
+        var invalidFollowUp = try #require(invalidLegacy["followUp"] as? [String: Any])
+        invalidFollowUp["recipient"] = "nobody@example.invalid"
+        invalidLegacy["followUp"] = invalidFollowUp
+        let nestedExtraBytes = try JSONSerialization.data(withJSONObject: [
+            "analysis": invalidLegacy,
+            "speakerState": speakerObject,
+        ])
+        try nestedExtraBytes.write(to: destination)
+        #expect(throws: MeetingAnalysisStoreError.corruptAnalysis) {
+            try store.load(meetingID: meetingID)
+        }
+
+        invalidLegacy = legacyAnalysis
+        invalidLegacy["unexpected"] = true
+        let topLevelExtraBytes = try JSONSerialization.data(withJSONObject: [
+            "analysis": invalidLegacy,
+            "speakerState": speakerObject,
+        ])
+        try topLevelExtraBytes.write(to: destination)
+        #expect(throws: MeetingAnalysisStoreError.corruptAnalysis) {
+            try store.load(meetingID: meetingID)
+        }
+
+        let envelopeExtraBytes = try JSONSerialization.data(withJSONObject: [
+            "analysis": legacyAnalysis,
+            "speakerState": speakerObject,
+            "unexpected": true,
+        ])
+        try envelopeExtraBytes.write(to: destination)
+        #expect(throws: MeetingAnalysisStoreError.corruptAnalysis) {
+            try store.load(meetingID: meetingID)
+        }
+    }
+
+    @Test
+    func providerModelAndServiceHaveNoFollowUpOrDeliveryPath() async throws {
         let utterances = try utteranceFixtures()
         let value = analysis(title: "Copy boundary")
         let provider = FakeMeetingAnalysisProvider(
@@ -462,8 +567,8 @@ struct MeetingAnalysisServiceTests {
                 utterances: utterances
             )
 
-        #expect(result.analysis?.followUp.subjectForCopy == "Release follow-up")
-        #expect(result.analysis?.followUp.bodyForCopy == "Thanks — here are the next steps.")
+        #expect(result.analysis == value)
+        #expect(try object(from: JSONEncoder().encode(value))["followUp"] == nil)
         #expect(provider.testConnectionCount == 1)
         #expect(provider.runCount == 1)
         #expect(store.replacementCount == 1)
@@ -544,11 +649,7 @@ struct MeetingAnalysisServiceTests {
             )],
             risks: [],
             quotes: quote.map { [$0] } ?? [],
-            speakerSuggestions: suggestions,
-            followUp: MeetingFollowUpDraft(
-                subject: "Release follow-up",
-                body: "Thanks — here are the next steps."
-            )
+            speakerSuggestions: suggestions
         )
     }
 
