@@ -641,14 +641,7 @@ struct MeetingViewsTests {
         await controller.perform(.analyze)
         #expect(analysisActions.analysisCalls == 1)
 
-        await controller.perform(.copyDraft(.subject))
-        await controller.perform(.copyDraft(.body))
-        await controller.perform(.copyDraft(.all))
-        #expect(clipboard.values == [
-            "Follow up",
-            "Thanks for the review.",
-            "Subject: Follow up\n\nThanks for the review.",
-        ])
+        #expect(clipboard.values.isEmpty)
 
         await controller.perform(.revealAudio)
         await controller.perform(.exportAudio(URL(fileURLWithPath: "/tmp/export.caf")))
@@ -1214,7 +1207,7 @@ struct MeetingViewsTests {
     }
 
     @Test
-    func viewsExposeKeyboardVoiceOverAndCopyOnlyFollowUpWithoutDirectBoundaries() throws {
+    func viewsExposeKeyboardVoiceOverAndNoFollowUpOrDeliveryBoundaries() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -1236,9 +1229,10 @@ struct MeetingViewsTests {
 
         #expect(combined.contains("keyboardShortcut"))
         #expect(combined.contains("accessibilityLabel"))
-        #expect(detail.contains("Copy Subject"))
-        #expect(detail.contains("Copy Body"))
-        #expect(detail.contains("Copy All"))
+        #expect(!detail.contains("Follow-up draft"))
+        #expect(!detail.contains("Copy Subject"))
+        #expect(!detail.contains("Copy Body"))
+        #expect(!detail.contains("Copy All"))
         #expect(!detail.contains("Send Email"))
         #expect(!detail.contains("mailto:"))
         #expect(!combined.contains("Process()"))
@@ -1355,11 +1349,7 @@ struct MeetingViewsTests {
             actionItems: [MeetingAnalysisActionItem(text: "Prepare release", owner: "the owner")],
             risks: [],
             quotes: [MeetingAnalysisQuote(utteranceID: utteranceID, text: "Launch timing")],
-            speakerSuggestions: [],
-            followUp: MeetingFollowUpDraft(
-                subject: "Follow up",
-                body: "Thanks for the review."
-            )
+            speakerSuggestions: []
         )
     }
 

@@ -47,7 +47,7 @@ struct MeetingUploadControllerTests {
         #expect(full.contains("## Decisions\n\n- Ship Friday"))
         #expect(full.contains("## Action items\n\n- [ ] Prepare notes — Owner: Alice — Due: Friday"))
         #expect(full.contains("## Risks\n\n- Capacity"))
-        #expect(full.contains("## Follow-up\n\n**Subject:** Next steps"))
+        #expect(!full.contains("Follow-up"))
         #expect(full.contains("### [00:00:01.250–00:00:02.500] You\n\nHello exactly."))
         #expect(full.contains("### [00:01:05.000–00:01:07.125] Alice\n\nReply café."))
 
@@ -135,8 +135,7 @@ struct MeetingUploadControllerTests {
             actionItems: [],
             risks: [],
             quotes: [],
-            speakerSuggestions: [],
-            followUp: MeetingFollowUpDraft(subject: "Subject #1", body: "Body\n---")
+            speakerSuggestions: []
         )
 
         let markdown = MeetingMarkdownRenderer().render(
@@ -150,7 +149,7 @@ struct MeetingUploadControllerTests {
         #expect(markdown.contains("### [00:00:00.000–00:00:01.000] Alice<br>\\# forged speaker"))
         #expect(markdown.contains("verbatim first line\n\\## not a document heading\nlast line"))
         #expect(markdown.contains("Keep this\n\\# summary text"))
-        #expect(markdown.contains("Body\n\\---"))
+        #expect(!markdown.contains("Subject #1"))
         let filename = MeetingMarkdownRenderer.filenameSafeTitle(meeting.title)
         #expect(filename == "Roadmap-# forged-title.md")
         #expect(!filename.contains("/"))
@@ -571,8 +570,7 @@ private func sampleAnalysis(quoteID: UUID) -> MeetingAnalysis {
         actionItems: [MeetingAnalysisActionItem(text: "Prepare notes", owner: "Alice", due: "Friday")],
         risks: ["Capacity"],
         quotes: [MeetingAnalysisQuote(utteranceID: quoteID, text: "Hello")],
-        speakerSuggestions: [],
-        followUp: MeetingFollowUpDraft(subject: "Next steps", body: "Thanks for the discussion.")
+        speakerSuggestions: []
     )
 }
 
