@@ -10,6 +10,8 @@ final class LiveTranscriptController {
     private(set) var isFinalizing = false
     private(set) var isFinalized = false
     private(set) var finalEngine: String?
+    private(set) var finalSpanOutcomes: [RawTranscriptionSpanOutcome] = []
+    private(set) var utteranceProvenance: [UUID: LiveTranscriptionPhase] = [:]
 
     @ObservationIgnored private let service: LiveTranscriptionService
     @ObservationIgnored private var isConnected = false
@@ -54,6 +56,7 @@ final class LiveTranscriptController {
         isFinalizing = true
         let finalization = await service.stop(capture: capture)
         finalEngine = finalization.effectiveEngine
+        finalSpanOutcomes = finalization.spanOutcomes
         guard !finalization.wasCancelled else {
             isFinalizing = false
             return
@@ -63,8 +66,13 @@ final class LiveTranscriptController {
         let preservedPreviews = utterances.filter { preview in
             !finalUtterances.contains { Self.overlaps(preview, $0) }
         }
-        utterances = (preservedPreviews + finalUtterances)
-            .sorted(by: MeetingUtterance.chronologicallyPrecedes)
+        utteranceProvenance = Dictionary(uniqueKeysWithValues:
+            preservedPreviews.map { ($0.id, LiveTranscriptionPhase.preview) }
+                + finalUtterances.map { ($0.id, LiveTranscriptionPhase.final) }
+        )
+        utterances = EchoDuplicateSuppressor().suppressDuplicates(
+            in: preservedPreviews + finalUtterances
+        ).utterances.sorted(by: MeetingUtterance.chronologicallyPrecedes)
         utteranceCheckpointHandler?(utterances)
         let preservedPreviewErrors = errors.filter {
             $0.phase == .preview && !Self.failure($0, overlapsAny: finalUtterances)
@@ -86,6 +94,10 @@ final class LiveTranscriptController {
         isFinalizing = false
     }
 
+    func provenance(for utteranceID: UUID) -> LiveTranscriptionPhase? {
+        utteranceProvenance[utteranceID]
+    }
+
     private func connectIfNeeded() async {
         guard !isConnected else { return }
         isConnected = true
@@ -101,6 +113,7 @@ final class LiveTranscriptController {
             utterances.removeAll { $0.id == utterance.id }
             utterances.append(utterance)
             utterances.sort(by: MeetingUtterance.chronologicallyPrecedes)
+            utteranceProvenance[utterance.id] = .preview
             utteranceCheckpointHandler?(utterances)
         case .failure(let failure):
             errors = Self.deduplicated(errors + [failure])
@@ -117,7 +130,8 @@ final class LiveTranscriptController {
             endMilliseconds: segment.endMilliseconds,
             text: segment.text,
             baseSpeakerID: segment.source == .microphone ? "you" : "remote",
-            humanName: segment.sourceLabel
+            humanName: segment.sourceLabel,
+            transcriptionPhase: segment.phase
         )
     }
 

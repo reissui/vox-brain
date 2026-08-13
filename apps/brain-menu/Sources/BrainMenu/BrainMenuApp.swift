@@ -947,6 +947,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         let transcript = LiveTranscriptController(service: try LiveTranscriptionService(
             client: transcriptionClient,
             engine: engine,
+            attestedModel: request.speechModelAttestation?.effectiveSelection.modelID,
             originHostTimestamp: ProcessInfo.processInfo.systemUptime,
             wavDirectory: store.directoryURL(for: request.meetingID)
                 .appendingPathComponent(".transcription", isDirectory: true)

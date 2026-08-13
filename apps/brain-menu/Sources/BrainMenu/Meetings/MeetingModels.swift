@@ -396,6 +396,7 @@ struct MeetingUtterance: Codable, Equatable, Identifiable, Sendable {
     var baseSpeakerID: String
     var humanName: String?
     var suppressed: Bool
+    var transcriptionPhase: LiveTranscriptionPhase?
 
     var isSuppressed: Bool {
         get { suppressed }
@@ -410,7 +411,8 @@ struct MeetingUtterance: Codable, Equatable, Identifiable, Sendable {
         text: String,
         baseSpeakerID: String,
         humanName: String? = nil,
-        suppressed: Bool = false
+        suppressed: Bool = false,
+        transcriptionPhase: LiveTranscriptionPhase? = nil
     ) throws {
         guard startMilliseconds >= 0, endMilliseconds >= startMilliseconds else {
             throw MeetingModelError.invalidUtteranceTime(
@@ -428,6 +430,7 @@ struct MeetingUtterance: Codable, Equatable, Identifiable, Sendable {
         self.baseSpeakerID = baseSpeakerID
         self.humanName = humanName
         self.suppressed = suppressed
+        self.transcriptionPhase = transcriptionPhase
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -439,6 +442,7 @@ struct MeetingUtterance: Codable, Equatable, Identifiable, Sendable {
         case baseSpeakerID
         case humanName
         case suppressed
+        case transcriptionPhase
     }
 
     init(from decoder: Decoder) throws {
@@ -451,7 +455,11 @@ struct MeetingUtterance: Codable, Equatable, Identifiable, Sendable {
             text: container.decode(String.self, forKey: .text),
             baseSpeakerID: container.decode(String.self, forKey: .baseSpeakerID),
             humanName: container.decodeIfPresent(String.self, forKey: .humanName),
-            suppressed: container.decode(Bool.self, forKey: .suppressed)
+            suppressed: container.decode(Bool.self, forKey: .suppressed),
+            transcriptionPhase: container.decodeIfPresent(
+                LiveTranscriptionPhase.self,
+                forKey: .transcriptionPhase
+            )
         )
     }
 }
