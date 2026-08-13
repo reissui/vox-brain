@@ -68,7 +68,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             guard let client = try VoxTypeClient.discover() else {
                 throw MeetingTranscriptionCoordinatorError.voxTypeUnavailable
             }
-            return FallbackLiveTranscriptionClient(client: client)
+            return client
         }
     ) {
         self.store = store
@@ -227,12 +227,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             return currentRecord(for: meeting.id, fallback: meeting)
         }
 
-        var resolvedMeeting = meeting
-        if let finalEngine = transcript.finalEngine,
-           finalEngine != meeting.speechEngine {
-            resolvedMeeting.speechEngine = finalEngine
-            resolvedMeeting.speechModel = "VoxType configured \(finalEngine) model"
-        }
+        let resolvedMeeting = meeting
         let utterances = transcript.utterances
         let failures = transcript.errors.filter { $0.phase == .final }
         let outcome = await Task.detached(priority: .utility) { [store, retention] in

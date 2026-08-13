@@ -6,14 +6,14 @@ import Testing
 @MainActor
 struct FeatureSettingsViewTests {
     @Test
-    func freshSpeechSettingsUseABundledCompatibleWhisperDefaultForBothWorkflows() throws {
+    func freshSpeechSettingsUseLargeV3AsTheOneDefaultForAllSpeech() throws {
         let controller = speechController(snapshot: readySnapshot())
         let expected = SpeechEngineSelection(
             engine: .whisper,
-            modelID: "small.en"
+            modelID: "large-v3"
         )
 
-        #expect(SpeechEngineCatalog.englishDefaultModelID == "small.en")
+        #expect(SpeechEngineCatalog.englishDefaultModelID == "large-v3")
         #expect(controller.selection(for: .dictation) == expected)
         #expect(controller.selection(for: .meetings) == expected)
         #expect(OnboardingController.defaultDictationModelID == expected.modelID)
@@ -27,7 +27,8 @@ struct FeatureSettingsViewTests {
         )
         #expect(recommended.recommendation?.title == "Recommended")
         #expect(recommended.engine == .whisper)
-        #expect(recommended.recommendation?.detail.contains("bundled") == true)
+        #expect(recommended.recommendation?.detail.contains("dictation") == true)
+        #expect(recommended.recommendation?.detail.contains("meeting") == true)
         #expect(multilingual.recommendation?.title == "Multilingual fallback")
         #expect(SpeechEngineCatalog.modelGuideURL.absoluteString
             == "https://voxtype.io/docs/MODEL_SELECTION_GUIDE")

@@ -273,6 +273,7 @@ struct MeetingLiveViewModel: Equatable, Sendable {
 
     private static func failureMessage(_ failure: MeetingControllerFailure) -> String {
         switch failure {
+        case .speechModelUnavailable(let message): message
         case .startFailed(let message): "Start failed: \(message)"
         case .microphoneSelectionRequired(let message): message
         case .pauseFailed(let message): "Pause failed: \(message)"
