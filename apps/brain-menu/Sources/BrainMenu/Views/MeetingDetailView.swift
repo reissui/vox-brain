@@ -33,6 +33,7 @@ enum MeetingDraftCopyAction: String, CaseIterable, Equatable, Sendable {
 
 struct MeetingDetailTranscriptRowModel: Equatable, Identifiable, Sendable {
     let id: UUID
+    let utteranceIDs: [UUID]
     let timestamp: String
     let speakerID: String
     let speakerName: String
@@ -335,24 +336,22 @@ final class MeetingDetailController {
         let meeting = meeting
         let assignments = editor.assignments
         let speakers = editor.speakers
-        let rows = editor.utterances
-            .filter { !$0.suppressed }
-            .sorted(by: Self.transcriptOrder)
-            .map { utterance -> MeetingDetailTranscriptRowModel in
-                let assignment = assignments[utterance.id]
-                    ?? SpeakerAssignment(
-                        speakerID: utterance.baseSpeakerID,
-                        provenance: .sourceDefault
-                    )
+        let rows = MeetingTranscriptTurnAssembler.assemble(
+            utterances: editor.utterances,
+            assignments: assignments,
+            speakers: speakers
+        )
+            .map { turn -> MeetingDetailTranscriptRowModel in
                 return MeetingDetailTranscriptRowModel(
-                    id: utterance.id,
-                    timestamp: Self.timestamp(utterance.startMilliseconds),
-                    speakerID: assignment.speakerID,
-                    speakerName: speakers[assignment.speakerID]?.displayName
-                        ?? SpeakerEditor.defaultDisplayName(for: assignment.speakerID),
-                    provenance: assignment.provenance,
-                    text: utterance.text,
-                    isSelected: selectedUtteranceIDs.contains(utterance.id)
+                    id: turn.id,
+                    utteranceIDs: turn.utteranceIDs,
+                    timestamp: Self.timestamp(turn.startMilliseconds),
+                    speakerID: turn.speakerID,
+                    speakerName: turn.speakerLabel,
+                    provenance: turn.provenance,
+                    text: turn.text,
+                    isSelected: !turn.utteranceIDs.isEmpty
+                        && turn.utteranceIDs.allSatisfy(selectedUtteranceIDs.contains)
                 )
             }
         let speakerModels = speakers.values
@@ -499,11 +498,11 @@ final class MeetingDetailController {
         reloadMeetingAfterTypedAction()
     }
 
-    func toggleSelection(_ utteranceID: UUID) {
-        if selectedUtteranceIDs.contains(utteranceID) {
-            selectedUtteranceIDs.remove(utteranceID)
+    func toggleSelection(_ utteranceIDs: [UUID]) {
+        if utteranceIDs.allSatisfy(selectedUtteranceIDs.contains) {
+            selectedUtteranceIDs.subtract(utteranceIDs)
         } else {
-            selectedUtteranceIDs.insert(utteranceID)
+            selectedUtteranceIDs.formUnion(utteranceIDs)
         }
     }
 
@@ -856,19 +855,6 @@ final class MeetingDetailController {
         formatter.timeStyle = .short
         return formatter
     }()
-
-    private static func transcriptOrder(
-        _ lhs: MeetingUtterance,
-        _ rhs: MeetingUtterance
-    ) -> Bool {
-        if lhs.startMilliseconds != rhs.startMilliseconds {
-            return lhs.startMilliseconds < rhs.startMilliseconds
-        }
-        if lhs.endMilliseconds != rhs.endMilliseconds {
-            return lhs.endMilliseconds < rhs.endMilliseconds
-        }
-        return lhs.id.uuidString < rhs.id.uuidString
-    }
 
     private static func timestamp(_ milliseconds: Int64) -> String {
         let totalSeconds = max(0, milliseconds / 1_000)
@@ -1430,7 +1416,7 @@ struct MeetingDetailView: View {
             .padding()
             Divider()
             List(model.transcript) { row in
-                Button { controller.toggleSelection(row.id) } label: {
+                Button { controller.toggleSelection(row.utteranceIDs) } label: {
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: row.isSelected ? "checkmark.circle.fill" : "circle")
                             .accessibilityHidden(true)
