@@ -414,6 +414,59 @@ struct MeetingViewsTests {
     }
 
     @Test
+    func liveAndCompletedTranscriptShareTurnAssembly() throws {
+        let id = UUID()
+        let first = try MeetingUtterance(
+            source: .system,
+            startMilliseconds: 0,
+            endMilliseconds: 1_000,
+            text: "First remote response",
+            baseSpeakerID: "untrusted-diarization"
+        )
+        let second = try MeetingUtterance(
+            source: .system,
+            startMilliseconds: 8_999,
+            endMilliseconds: 9_500,
+            text: "Second response",
+            baseSpeakerID: "another-diarized-speaker"
+        )
+        let third = try MeetingUtterance(
+            source: .system,
+            startMilliseconds: 17_500,
+            endMilliseconds: 18_000,
+            text: "New turn",
+            baseSpeakerID: "yet-another-speaker"
+        )
+        let utterances = [third, second, first]
+        let live = MeetingLiveViewModel(snapshot: MeetingLiveSnapshot(
+            meeting: meeting(id: id, title: "Shared turns", start: .now),
+            lifecycleState: .recording,
+            utterances: utterances,
+            previewLag: .current,
+            transcriptFailures: [],
+            controllerFailure: nil,
+            levels: [:],
+            now: .now
+        ))
+        let record = meeting(id: id, title: "Shared turns", start: .now)
+        let detail = MeetingDetailController(
+            meetingID: id,
+            store: MemoryMeetingViewStore(values: [id: StoredMeeting(meeting: record, utterances: utterances)]),
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: MeetingDetailAudioSpy(meeting: record),
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: MeetingClipboardSpy()
+        )
+        detail.load()
+
+        #expect(live.transcript.map(\.text) == ["First remote response Second response", "New turn"])
+        #expect(live.transcript.map(\.speaker) == ["Remote", "Remote"])
+        #expect(detail.viewModel.transcript.map(\.text) == live.transcript.map(\.text))
+        #expect(detail.viewModel.transcript.map(\.speakerName) == live.transcript.map(\.speaker))
+    }
+
+    @Test
     func liveTranscriptHealthSummarizesRepeatedFailuresWithoutChangingTranscriptRows() throws {
         let activeMeeting = meeting(
             title: "Failure summary",

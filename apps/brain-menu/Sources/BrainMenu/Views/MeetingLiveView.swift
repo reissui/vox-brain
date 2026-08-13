@@ -197,26 +197,16 @@ struct MeetingLiveViewModel: Equatable, Sendable {
         levels = MeetingAudioSource.allCases.map {
             MeetingSourceLevelModel(source: $0, level: snapshot.levels[$0] ?? 0)
         }
-        transcript = snapshot.utterances
-            .filter { !$0.suppressed }
-            .sorted(by: Self.transcriptOrder)
-            .reduce(into: []) { rows, utterance in
-                if let last = rows.indices.last,
-                   rows[last].source == utterance.source,
-                   rows[last].endMilliseconds == utterance.startMilliseconds {
-                    rows[last].text += " " + utterance.text
-                    rows[last].endMilliseconds = utterance.endMilliseconds
-                } else {
-                    rows.append(MeetingLiveTranscriptRowModel(
-                        id: utterance.id,
-                        timestamp: Self.timestamp(utterance.startMilliseconds),
-                        speaker: utterance.humanName
-                            ?? SpeakerEditor.defaultDisplayName(for: utterance.baseSpeakerID),
-                        text: utterance.text,
-                        source: utterance.source,
-                        endMilliseconds: utterance.endMilliseconds
-                    ))
-                }
+        transcript = MeetingTranscriptTurnAssembler.assemble(utterances: snapshot.utterances)
+            .map { turn in
+                MeetingLiveTranscriptRowModel(
+                    id: turn.id,
+                    timestamp: Self.timestamp(turn.startMilliseconds),
+                    speaker: turn.speakerLabel,
+                    text: turn.text,
+                    source: turn.source,
+                    endMilliseconds: turn.endMilliseconds
+                )
             }
         previewMessage = Self.previewMessage(snapshot.previewLag)
         transcriptHealth = Self.transcriptHealth(snapshot.transcriptFailures)
@@ -360,19 +350,6 @@ struct MeetingLiveViewModel: Equatable, Sendable {
         let normalized = message.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         guard normalized.count > 240 else { return normalized }
         return String(normalized.prefix(237)) + "…"
-    }
-
-    private static func transcriptOrder(
-        _ lhs: MeetingUtterance,
-        _ rhs: MeetingUtterance
-    ) -> Bool {
-        if lhs.startMilliseconds != rhs.startMilliseconds {
-            return lhs.startMilliseconds < rhs.startMilliseconds
-        }
-        if lhs.endMilliseconds != rhs.endMilliseconds {
-            return lhs.endMilliseconds < rhs.endMilliseconds
-        }
-        return lhs.id.uuidString < rhs.id.uuidString
     }
 
     private static func timestamp(_ milliseconds: Int64) -> String {
