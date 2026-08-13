@@ -190,21 +190,52 @@ struct MeetingAnalysisRunResult: Equatable, Sendable {
     var isRetryable: Bool { failure != nil }
 }
 
+struct MeetingAnalysisTerminologySnapshot: Equatable, Sendable {
+    let terms: [String]
+    let hash: String
+}
+
+private struct MeetingAnalysisTranscriptEvidence: Sendable {
+    let rawUtterances: [MeetingUtterance]
+    let processedTranscript: MeetingProcessedTranscript?
+}
+
 /// Provider-neutral orchestration for completed local meetings. The only
 /// process/network-capable dependency is the explicitly selected AI provider.
 final class MeetingAnalysisService: Sendable {
     private let provider: any AIProviding
     private let contextChoice: AIContextChoice
     private let store: any MeetingAnalysisStoring
+    private let transcriptArtifactStore: MeetingTranscriptArtifactStore
+    private let transcriptProcessingService: MeetingTranscriptProcessingService
+    private let terminologyProvider:
+        @MainActor @Sendable () -> MeetingAnalysisTerminologySnapshot
 
     init(
         provider: any AIProviding,
         contextChoice: AIContextChoice = .rich,
-        store: any MeetingAnalysisStoring = FileMeetingAnalysisStore()
+        store: any MeetingAnalysisStoring = FileMeetingAnalysisStore(),
+        transcriptArtifactStore: MeetingTranscriptArtifactStore = MeetingTranscriptArtifactStore(),
+        processedTranscriptStore: any MeetingProcessedTranscriptStoring = MeetingProcessedTranscriptStore(),
+        transcriptProcessingService: MeetingTranscriptProcessingService? = nil,
+        terminologyProvider: @escaping @MainActor @Sendable () -> MeetingAnalysisTerminologySnapshot = {
+            let terminology = MeetingTerminologyStore()
+            return MeetingAnalysisTerminologySnapshot(
+                terms: terminology.terms,
+                hash: terminology.contentHash
+            )
+        }
     ) {
         self.provider = provider
         self.contextChoice = contextChoice
         self.store = store
+        self.transcriptArtifactStore = transcriptArtifactStore
+        self.transcriptProcessingService = transcriptProcessingService
+            ?? MeetingTranscriptProcessingService(
+                provider: provider,
+                store: processedTranscriptStore
+            )
+        self.terminologyProvider = terminologyProvider
     }
 
     func analyzeAfterFinalTranscription(
@@ -215,7 +246,29 @@ final class MeetingAnalysisService: Sendable {
         await analyze(
             meeting: meeting,
             utterances: utterances,
-            speakerState: speakerState
+            speakerState: speakerState,
+            artifactOverride: nil,
+            terminologyOverride: nil
+        )
+    }
+
+    func analyzeAfterFinalTranscription(
+        meeting: MeetingRecord,
+        utterances: [MeetingUtterance],
+        artifact: MeetingTranscriptArtifact?,
+        speakerState: SpeakerEditingState = SpeakerEditingState(),
+        terminology: [String],
+        terminologyHash: String
+    ) async -> MeetingAnalysisRunResult {
+        await analyze(
+            meeting: meeting,
+            utterances: utterances,
+            speakerState: speakerState,
+            artifactOverride: artifact,
+            terminologyOverride: MeetingAnalysisTerminologySnapshot(
+                terms: terminology,
+                hash: terminologyHash
+            )
         )
     }
 
@@ -227,7 +280,29 @@ final class MeetingAnalysisService: Sendable {
         await analyze(
             meeting: meeting,
             utterances: utterances,
-            speakerState: speakerState
+            speakerState: speakerState,
+            artifactOverride: nil,
+            terminologyOverride: nil
+        )
+    }
+
+    func reanalyze(
+        meeting: MeetingRecord,
+        utterances: [MeetingUtterance],
+        artifact: MeetingTranscriptArtifact?,
+        speakerState: SpeakerEditingState,
+        terminology: [String],
+        terminologyHash: String
+    ) async -> MeetingAnalysisRunResult {
+        await analyze(
+            meeting: meeting,
+            utterances: utterances,
+            speakerState: speakerState,
+            artifactOverride: artifact,
+            terminologyOverride: MeetingAnalysisTerminologySnapshot(
+                terms: terminology,
+                hash: terminologyHash
+            )
         )
     }
 
@@ -267,7 +342,9 @@ final class MeetingAnalysisService: Sendable {
     private func analyze(
         meeting: MeetingRecord,
         utterances: [MeetingUtterance],
-        speakerState: SpeakerEditingState
+        speakerState: SpeakerEditingState,
+        artifactOverride: MeetingTranscriptArtifact?,
+        terminologyOverride: MeetingAnalysisTerminologySnapshot?
     ) async -> MeetingAnalysisRunResult {
         let reconciledSpeakerState = SpeakerEditor(
             utterances: utterances,
@@ -286,6 +363,14 @@ final class MeetingAnalysisService: Sendable {
             )
         }
 
+        let transcriptEvidence = await transcriptEvidence(
+            meeting: meeting,
+            fallbackUtterances: utterances,
+            artifactOverride: artifactOverride,
+            speakerState: reconciledSpeakerState,
+            terminologyOverride: terminologyOverride
+        )
+
         let readiness = await provider.testConnection()
         guard readiness == .ready else {
             return failedResult(
@@ -299,15 +384,19 @@ final class MeetingAnalysisService: Sendable {
 
         let prompt = MeetingAnalysisPrompt.make(
             contextChoice: contextChoice,
-            utterances: utterances,
-            speakerState: reconciledSpeakerState
+            utterances: transcriptEvidence.rawUtterances,
+            speakerState: reconciledSpeakerState,
+            processedTranscript: transcriptEvidence.processedTranscript
         )
         do {
             let data = try await provider.run(
                 prompt: prompt,
                 jsonSchema: MeetingAnalysisSchema.jsonSchema
             )
-            let analysis = try MeetingAnalysisSchema.decode(data, utterances: utterances)
+            let analysis = try MeetingAnalysisSchema.decode(
+                data,
+                utterances: transcriptEvidence.rawUtterances
+            )
             let value = StoredMeetingAnalysis(
                 analysis: analysis,
                 speakerState: reconciledSpeakerState
@@ -370,6 +459,58 @@ final class MeetingAnalysisService: Sendable {
                 failure: .schemaFailure
             )
         }
+    }
+
+    private func transcriptEvidence(
+        meeting: MeetingRecord,
+        fallbackUtterances: [MeetingUtterance],
+        artifactOverride: MeetingTranscriptArtifact?,
+        speakerState: SpeakerEditingState,
+        terminologyOverride: MeetingAnalysisTerminologySnapshot?
+    ) async -> MeetingAnalysisTranscriptEvidence {
+        let artifact: MeetingTranscriptArtifact?
+        if let artifactOverride {
+            artifact = artifactOverride
+        } else {
+            artifact = try? transcriptArtifactStore.load(meetingID: meeting.id)
+        }
+        guard let artifact,
+              artifact.meetingID == meeting.id,
+              let selectedID = artifact.selectedAttemptID,
+              selectedID == meeting.selectedRawTranscriptAttemptID,
+              let selectedAttempt = artifact.attempts.first(where: {
+                  $0.id == selectedID && $0.isSuccessful
+              }) else {
+            return MeetingAnalysisTranscriptEvidence(
+                rawUtterances: fallbackUtterances,
+                processedTranscript: nil
+            )
+        }
+        let terminology = if let terminologyOverride {
+            terminologyOverride
+        } else {
+            await terminologyProvider()
+        }
+        let result = await transcriptProcessingService.process(
+            meeting: meeting,
+            artifact: artifact,
+            speakerState: speakerState,
+            terminology: terminology.terms,
+            terminologyHash: terminology.hash
+        )
+        guard result.failure == nil,
+              result.rawAttemptID == selectedID,
+              result.transcript?.rawAttemptID == selectedID,
+              result.transcript?.terminologyHash == terminology.hash else {
+            return MeetingAnalysisTranscriptEvidence(
+                rawUtterances: selectedAttempt.utterances,
+                processedTranscript: nil
+            )
+        }
+        return MeetingAnalysisTranscriptEvidence(
+            rawUtterances: selectedAttempt.utterances,
+            processedTranscript: result.transcript
+        )
     }
 
     private func failedResult(

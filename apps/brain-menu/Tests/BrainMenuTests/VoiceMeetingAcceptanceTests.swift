@@ -411,6 +411,298 @@ struct VoiceMeetingAcceptanceTests {
     }
 
     @Test
+    func processedFirstPipelineRegeneratesDeduplicatesFallsBackAndPersistsIndependently() async throws {
+        let fixture = try AcceptanceDirectory(prefix: "VoiceMeeting-ProcessedPipeline")
+        defer { fixture.remove() }
+        let utterance = try MeetingUtterance(
+            id: UUID(),
+            source: .system,
+            startMilliseconds: 0,
+            endMilliseconds: 2_000,
+            text: "We discussed vox brane and will ship Friday.",
+            baseSpeakerID: "remote"
+        )
+        var meeting = completedMeeting(id: UUID(), title: "Pipeline acceptance")
+        let attempt = MeetingTranscriptAttempt(
+            id: UUID(),
+            createdAt: meeting.endedAt ?? meeting.startedAt,
+            modelAttestation: MeetingTranscriptModelAttestation.legacy(meeting: meeting),
+            utterances: [utterance],
+            isSuccessful: true
+        )
+        meeting.selectedRawTranscriptAttemptID = attempt.id
+        let artifact = MeetingTranscriptArtifact(
+            meetingID: meeting.id,
+            attempts: [attempt],
+            selectedAttemptID: attempt.id
+        )
+        let processed = MeetingProcessedTranscript(
+            rawAttemptID: attempt.id,
+            terminologyHash: "current",
+            turns: [MeetingProcessedTranscriptTurn(
+                id: utterance.id,
+                utteranceIDs: [utterance.id],
+                startMilliseconds: 0,
+                endMilliseconds: 2_000,
+                speakerID: "remote",
+                speakerLabel: "Remote",
+                text: "We discussed Vox Brain and will ship Friday.",
+                unclear: false
+            )],
+            bullets: [],
+            corrections: [MeetingTranscriptCorrection(
+                id: UUID(),
+                utteranceIDs: [utterance.id],
+                kind: .terminology,
+                before: "vox brane",
+                after: "Vox Brain",
+                reason: "Glossary spelling.",
+                confidence: 1
+            )]
+        )
+        let analysis = MeetingAnalysis(
+            title: "Vox Brain ship plan",
+            summary: "The corrected project name is used for the readable summary.",
+            topics: ["Vox Brain"],
+            decisions: ["Ship Friday"],
+            actionItems: [],
+            risks: [],
+            quotes: [.init(utteranceID: utterance.id, text: "vox brane")],
+            speakerSuggestions: []
+        )
+        let provider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(processed),
+            analysis: try JSONEncoder().encode(analysis),
+            processingDelay: .milliseconds(80)
+        )
+        let processedStore = MeetingProcessedTranscriptStore(rootURL: fixture.root)
+        let analysisStore = FileMeetingAnalysisStore(rootURL: fixture.root)
+        let stale = MeetingProcessedTranscript(
+            rawAttemptID: attempt.id,
+            terminologyHash: "stale",
+            turns: processed.turns,
+            bullets: [],
+            corrections: []
+        )
+        try processedStore.replace(stale, meetingID: meeting.id)
+        let serviceA = MeetingAnalysisService(
+            provider: provider,
+            store: analysisStore,
+            processedTranscriptStore: processedStore
+        )
+        let serviceB = MeetingAnalysisService(
+            provider: provider,
+            store: analysisStore,
+            processedTranscriptStore: processedStore
+        )
+        let automaticMeeting = meeting
+        let manualMeeting = meeting
+
+        async let automatic = serviceA.analyzeAfterFinalTranscription(
+            meeting: automaticMeeting,
+            utterances: [utterance],
+            artifact: artifact,
+            terminology: ["Vox Brain"],
+            terminologyHash: "current"
+        )
+        async let manual = serviceB.reanalyze(
+            meeting: manualMeeting,
+            utterances: [utterance],
+            artifact: artifact,
+            speakerState: SpeakerEditingState(),
+            terminology: ["Vox Brain"],
+            terminologyHash: "current"
+        )
+        let (automaticResult, manualResult) = await (automatic, manual)
+
+        #expect(automaticResult.failure == nil)
+        #expect(manualResult.failure == nil)
+        #expect(automaticResult.analysis?.quotes.first?.text == "vox brane")
+        #expect(await provider.processingRunCount == 1)
+        #expect(await provider.analysisRunCount == 2)
+        #expect(await provider.analysisPrompts.allSatisfy {
+            $0.contains("Vox Brain")
+                && $0.contains("vox brane")
+                && $0.contains(utterance.id.uuidString)
+        })
+        #expect(try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "current"
+        ) == processed)
+
+        let supersededProcessed = MeetingProcessedTranscript(
+            rawAttemptID: attempt.id,
+            terminologyHash: "superseded",
+            turns: processed.turns,
+            bullets: [],
+            corrections: processed.corrections
+        )
+        let newestProcessed = MeetingProcessedTranscript(
+            rawAttemptID: attempt.id,
+            terminologyHash: "newest",
+            turns: processed.turns,
+            bullets: [],
+            corrections: processed.corrections
+        )
+        let slowOldProvider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(supersededProcessed),
+            analysis: try JSONEncoder().encode(analysis),
+            processingDelay: .milliseconds(160)
+        )
+        let fastNewProvider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(newestProcessed),
+            analysis: try JSONEncoder().encode(analysis)
+        )
+        let slowOldService = MeetingAnalysisService(
+            provider: slowOldProvider,
+            store: analysisStore,
+            processedTranscriptStore: processedStore
+        )
+        let fastNewService = MeetingAnalysisService(
+            provider: fastNewProvider,
+            store: analysisStore,
+            processedTranscriptStore: processedStore
+        )
+        let supersededTask = Task {
+            await slowOldService.reanalyze(
+                meeting: meeting,
+                utterances: [utterance],
+                artifact: artifact,
+                speakerState: SpeakerEditingState(),
+                terminology: ["Vox Brain"],
+                terminologyHash: "superseded"
+            )
+        }
+        while await slowOldProvider.processingRunCount == 0 {
+            await Task.yield()
+        }
+        let newestResult = await fastNewService.reanalyze(
+            meeting: meeting,
+            utterances: [utterance],
+            artifact: artifact,
+            speakerState: SpeakerEditingState(),
+            terminology: ["Vox Brain"],
+            terminologyHash: "newest"
+        )
+        let supersededResult = await supersededTask.value
+        #expect(newestResult.failure == nil)
+        #expect(supersededResult.failure == nil)
+        #expect(try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "newest"
+        ) == newestProcessed)
+        #expect(try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "superseded"
+        ) == nil)
+
+        await provider.setProcessingFailure(.commandFailed(exitStatus: 9))
+        await provider.setAnalysisFailure(.timedOut)
+        let loadedPrior = try analysisStore.load(meetingID: meeting.id)
+        let prior = try #require(loadedPrior)
+        let changedHash = await serviceA.reanalyze(
+            meeting: meeting,
+            utterances: [utterance],
+            artifact: artifact,
+            speakerState: SpeakerEditingState(),
+            terminology: ["Vox Brain", "Codex"],
+            terminologyHash: "changed"
+        )
+        #expect(changedHash.failure == .providerFailure(.timedOut))
+        #expect(changedHash.analysis == prior.analysis)
+        #expect(changedHash.meeting.transcriptionState == .completed)
+        #expect(try analysisStore.load(meetingID: meeting.id) == prior)
+        #expect(try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "newest"
+        ) == newestProcessed)
+
+        let fallbackProvider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(processed),
+            analysis: try JSONEncoder().encode(analysis),
+            processingDelay: .milliseconds(80)
+        )
+        await fallbackProvider.setProcessingFailure(.commandFailed(exitStatus: 4))
+        let fallbackService = MeetingAnalysisService(
+            provider: fallbackProvider,
+            store: FileMeetingAnalysisStore(rootURL: fixture.root.appendingPathComponent("fallback")),
+            processedTranscriptStore: MeetingProcessedTranscriptStore(
+                rootURL: fixture.root.appendingPathComponent("fallback")
+            )
+        )
+        let fallback = await fallbackService.analyzeAfterFinalTranscription(
+            meeting: meeting,
+            utterances: [utterance],
+            artifact: artifact,
+            terminology: [],
+            terminologyHash: "fallback"
+        )
+        #expect(fallback.failure == nil)
+        #expect(fallback.meeting.transcriptionState == .completed)
+        #expect(await fallbackProvider.analysisPrompts.first?.contains("FINAL RAW TRANSCRIPT") == true)
+
+        let cancellationProvider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(processed),
+            analysis: try JSONEncoder().encode(analysis),
+            processingDelay: .milliseconds(120)
+        )
+        let cancellationService = MeetingAnalysisService(
+            provider: cancellationProvider,
+            store: FileMeetingAnalysisStore(rootURL: fixture.root.appendingPathComponent("cancel")),
+            processedTranscriptStore: MeetingProcessedTranscriptStore(
+                rootURL: fixture.root.appendingPathComponent("cancel")
+            )
+        )
+        let cancellationTask = Task {
+            await cancellationService.analyzeAfterFinalTranscription(
+                meeting: meeting,
+                utterances: [utterance],
+                artifact: artifact,
+                terminology: [],
+                terminologyHash: "cancel"
+            )
+        }
+        while await cancellationProvider.processingRunCount == 0 {
+            await Task.yield()
+        }
+        cancellationTask.cancel()
+        let cancelledProcessing = await cancellationTask.value
+        #expect(cancelledProcessing.failure == nil)
+        #expect(cancelledProcessing.meeting.transcriptionState == .completed)
+        #expect(await cancellationProvider.analysisPrompts.first?.contains("FINAL RAW TRANSCRIPT") == true)
+
+        let survivingProcessedProvider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(processed),
+            analysis: try JSONEncoder().encode(analysis)
+        )
+        await survivingProcessedProvider.setAnalysisFailure(.timedOut)
+        let survivingRoot = fixture.root.appendingPathComponent("analysis-fails")
+        let survivingProcessedStore = MeetingProcessedTranscriptStore(rootURL: survivingRoot)
+        let survivingService = MeetingAnalysisService(
+            provider: survivingProcessedProvider,
+            store: FileMeetingAnalysisStore(rootURL: survivingRoot),
+            processedTranscriptStore: survivingProcessedStore
+        )
+        let analysisFailure = await survivingService.analyzeAfterFinalTranscription(
+            meeting: meeting,
+            utterances: [utterance],
+            artifact: artifact,
+            terminology: ["Vox Brain"],
+            terminologyHash: "current"
+        )
+        #expect(analysisFailure.failure == .providerFailure(.timedOut))
+        #expect(try survivingProcessedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "current"
+        ) == processed)
+    }
+
+    @Test
     func quickCaptureUsesAdaptiveShortcutExplicitClipboardPickerAndDeliveredStatus() async throws {
         let defaults = try acceptanceDefaults("quick-hotkey")
         let panel = AcceptanceQuickPanel()
@@ -752,6 +1044,48 @@ private struct AcceptanceFailingAI: AIProviding {
         throw AIProviderError.commandFailed(exitStatus: 7)
     }
     func testConnection() async -> AIConnectionState { .ready }
+}
+
+private actor AcceptancePipelineAI: AIProviding {
+    let processing: Data
+    let analysis: Data
+    let processingDelay: Duration
+    private var processingFailure: AIProviderError?
+    private var analysisFailure: AIProviderError?
+    private(set) var processingRunCount = 0
+    private(set) var analysisRunCount = 0
+    private(set) var analysisPrompts: [String] = []
+
+    init(processing: Data, analysis: Data, processingDelay: Duration = .zero) {
+        self.processing = processing
+        self.analysis = analysis
+        self.processingDelay = processingDelay
+    }
+
+    func setProcessingFailure(_ failure: AIProviderError?) {
+        processingFailure = failure
+    }
+
+    func setAnalysisFailure(_ failure: AIProviderError?) {
+        analysisFailure = failure
+    }
+
+    func testConnection() async -> AIConnectionState { .ready }
+
+    func run(prompt: String, jsonSchema: Data) async throws -> Data {
+        if jsonSchema == MeetingTranscriptProcessingSchema.jsonSchema {
+            processingRunCount += 1
+            if processingDelay != .zero {
+                try? await Task.sleep(for: processingDelay)
+            }
+            if let processingFailure { throw processingFailure }
+            return processing
+        }
+        analysisRunCount += 1
+        analysisPrompts.append(prompt)
+        if let analysisFailure { throw analysisFailure }
+        return analysis
+    }
 }
 
 private actor AcceptanceCaptureAPI: BrainCaptureAPI {
