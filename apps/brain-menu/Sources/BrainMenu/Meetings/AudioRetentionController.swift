@@ -202,12 +202,25 @@ final class AudioRetentionController: @unchecked Sendable {
         } catch {
             throw AudioRetentionControllerError.retainedAudioUnavailable
         }
-        let source = try retainedAudioURL(for: stored.meeting)
+        let source = try playableRecordingURL(for: stored.meeting)
         do {
             try revealer.revealFile(source)
         } catch {
             throw AudioRetentionControllerError.revealFailed
         }
+    }
+
+    /// Returns an audio URL only after rechecking the retained local file.  This
+    /// deliberately does not trust metadata alone: deletion, replacement, and
+    /// symlinks must all fail closed before a player can open the file.
+    func playableRecordingURL(for meetingID: UUID) throws -> URL {
+        let stored: StoredMeeting
+        do {
+            stored = try store.load(meetingID)
+        } catch {
+            throw AudioRetentionControllerError.retainedAudioUnavailable
+        }
+        return try playableRecordingURL(for: stored.meeting)
     }
 
     /// A nil destination represents a cancelled system save panel and performs
@@ -222,7 +235,7 @@ final class AudioRetentionController: @unchecked Sendable {
         } catch {
             throw AudioRetentionControllerError.retainedAudioUnavailable
         }
-        let source = try retainedAudioURL(for: stored.meeting)
+        let source = try playableRecordingURL(for: stored.meeting)
         let resolvedDestination = destination.standardizedFileURL
         guard resolvedDestination != source,
               !fileSystem.fileExists(at: resolvedDestination) else {
@@ -520,15 +533,16 @@ final class AudioRetentionController: @unchecked Sendable {
         )
     }
 
-    private func retainedAudioURL(for meeting: MeetingRecord) throws -> URL {
+    private func playableRecordingURL(for meeting: MeetingRecord) throws -> URL {
         guard let metadata = meeting.retainedAudio,
               Self.supports(metadata) else {
             throw AudioRetentionControllerError.retainedAudioUnavailable
         }
         let directory = store.directoryURL(for: meeting.id).standardizedFileURL
         let url = directory.appendingPathComponent(metadata.filename).standardizedFileURL
-        guard url.deletingLastPathComponent() == directory,
-              try regularFileSize(at: url) == metadata.sizeBytes else {
+        guard directory.lastPathComponent == meeting.id.uuidString,
+              url.deletingLastPathComponent() == directory,
+              (try? regularFileSize(at: url)) == metadata.sizeBytes else {
             throw AudioRetentionControllerError.retainedAudioUnavailable
         }
         return url
