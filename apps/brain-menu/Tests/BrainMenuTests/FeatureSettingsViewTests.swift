@@ -525,6 +525,21 @@ struct FeatureSettingsViewTests {
         #expect(ai.contains(".accessibilityValue(canTestConnection ? \"Enabled\" : \"Disabled\")"))
     }
 
+    @Test
+    func speechSettingsExposeLocalProcessedTranscriptTerminologyOnly() throws {
+        let speech = try String(
+            contentsOf: sourceRoot.appendingPathComponent("Views/SpeechSettingsView.swift"),
+            encoding: .utf8
+        )
+
+        #expect(speech.contains("Section(\"Meeting terminology\")"))
+        #expect(speech.contains("processed meeting transcripts"))
+        #expect(speech.contains("never sent to VoxType or any service"))
+        #expect(speech.contains("controller.meetingTerminology.add"))
+        #expect(speech.contains("controller.meetingTerminology.replace"))
+        #expect(speech.contains("controller.meetingTerminology.remove"))
+    }
+
     private func speechController(
         snapshot: ModelInventorySnapshot,
         actions: any SpeechSettingsActionHandling = UnavailableSpeechSettingsActions()
