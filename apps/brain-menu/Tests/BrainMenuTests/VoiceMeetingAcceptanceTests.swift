@@ -205,6 +205,12 @@ struct VoiceMeetingAcceptanceTests {
         ))
         for source in MeetingAudioSource.allCases {
             await live.append(acceptanceAudioBuffer(source: source, hostTimestamp: 100))
+            await live.append(acceptanceAudioBuffer(
+                source: source,
+                hostTimestamp: 110,
+                duration: 1.3,
+                amplitude: 0
+            ))
         }
         await live.waitForPendingPreview()
         #expect(live.utterances.count == 2)
@@ -537,7 +543,9 @@ struct VoiceMeetingAcceptanceTests {
 
     private func acceptanceAudioBuffer(
         source: MeetingAudioSource,
-        hostTimestamp: TimeInterval
+        hostTimestamp: TimeInterval,
+        duration: TimeInterval = 10,
+        amplitude: Float = 0.2
     ) -> MeetingAudioSampleBuffer {
         MeetingAudioSampleBuffer(
             source: source,
@@ -545,8 +553,8 @@ struct VoiceMeetingAcceptanceTests {
             hostTimestamp: hostTimestamp,
             sampleRate: Double(MeetingAudioWriter.sampleRate),
             channelCount: MeetingAudioWriter.channelCount,
-            interleavedSamples: (0..<(10 * MeetingAudioWriter.sampleRate)).map {
-                $0.isMultiple(of: 2) ? 0.2 : -0.2
+            interleavedSamples: (0..<Int(duration * Double(MeetingAudioWriter.sampleRate))).map {
+                amplitude == 0 ? 0 : ($0.isMultiple(of: 2) ? amplitude : -amplitude)
             }
         )
     }

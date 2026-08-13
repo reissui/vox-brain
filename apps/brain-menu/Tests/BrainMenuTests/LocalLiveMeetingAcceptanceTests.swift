@@ -324,6 +324,13 @@ private final class LocalLiveMeetingRecorder: MeetingRecording {
         _ = try writer.append(buffer)
         guard request.recordingKind == .meeting else { return }
         await transcript.append(buffer)
+        let pause = LocalLiveMeetingRecorder.audioBuffer(
+            hostTimestamp: 110,
+            duration: 1.3,
+            amplitude: 0
+        )
+        _ = try writer.append(pause)
+        await transcript.append(pause)
         await transcript.waitForPendingPreview()
     }
 
@@ -355,15 +362,19 @@ private final class LocalLiveMeetingRecorder: MeetingRecording {
 
     func preserveForRecovery(at date: Date, reason: MeetingRecoveryReason) async {}
 
-    private static func audioBuffer() -> MeetingAudioSampleBuffer {
+    private static func audioBuffer(
+        hostTimestamp: TimeInterval = 100,
+        duration: TimeInterval = 10,
+        amplitude: Float = 0.2
+    ) -> MeetingAudioSampleBuffer {
         MeetingAudioSampleBuffer(
             source: .microphone,
-            sourceTimestamp: 700,
-            hostTimestamp: 100,
+            sourceTimestamp: hostTimestamp * 7,
+            hostTimestamp: hostTimestamp,
             sampleRate: Double(MeetingAudioWriter.sampleRate),
             channelCount: MeetingAudioWriter.channelCount,
-            interleavedSamples: (0..<(10 * MeetingAudioWriter.sampleRate)).map {
-                $0.isMultiple(of: 2) ? 0.2 : -0.2
+            interleavedSamples: (0..<Int(duration * Double(MeetingAudioWriter.sampleRate))).map {
+                amplitude == 0 ? 0 : ($0.isMultiple(of: 2) ? amplitude : -amplitude)
             }
         )
     }
