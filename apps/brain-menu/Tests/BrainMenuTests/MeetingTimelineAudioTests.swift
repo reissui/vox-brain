@@ -61,6 +61,29 @@ struct MeetingTimelineAudioTests {
     }
 
     @Test
+    func doesNotMergeSpeechAcrossExactOnePointTwoSecondBoundary() throws {
+        let fixture = try MeetingTimelineAudioFixture()
+        let samples = voicedSamples(
+            durationMilliseconds: 4_000,
+            rangesMilliseconds: [300..<900, 2_100..<2_700]
+        )
+        let capture = try fixture.capture(tracks: [TrackFixture(
+            source: .microphone,
+            samples: samples,
+            chunks: [ChunkFixture(
+                timestampMilliseconds: 0,
+                frameOffset: 0,
+                frameCount: samples.count
+            )]
+        )])
+
+        let spans = try MeetingTimelineAudio(capture: capture).speechSpans()
+
+        #expect(spans.count == 2)
+        #expect(spans.allSatisfy { $0.endMilliseconds - $0.startMilliseconds <= 30_000 })
+    }
+
+    @Test
     func preservesGenuineOverlapAcrossSources() throws {
         let fixture = try MeetingTimelineAudioFixture()
         let microphone = voicedSamples(
@@ -143,12 +166,12 @@ struct MeetingTimelineAudioTests {
 
         let spans = try MeetingTimelineAudio(capture: capture).speechSpans()
 
-        #expect(spans.map(\.source) == [.system, .microphone, .system])
-        #expect(spans.map(\.startMilliseconds) == [0, 430, 700])
+        #expect(spans.map(\.source) == [.system, .system])
+        #expect(spans.map(\.startMilliseconds) == [0, 700])
     }
 
     @Test
-    func preservesQuietShortAcknowledgements() throws {
+    func sharedSpeechGateRejectsQuietShortAcknowledgements() throws {
         let fixture = try MeetingTimelineAudioFixture()
         var samples = [Float](repeating: 0, count: 2_000 * MeetingAudioWriter.sampleRate / 1_000)
         let start = 900 * MeetingAudioWriter.sampleRate / 1_000
@@ -165,15 +188,11 @@ struct MeetingTimelineAudioTests {
 
         let spans = try MeetingTimelineAudio(capture: capture).speechSpans()
 
-        #expect(spans == [MeetingTimelineSpeechSpan(
-            source: .microphone,
-            startMilliseconds: 700,
-            endMilliseconds: 1_220
-        )])
+        #expect(spans.isEmpty)
     }
 
     @Test
-    func preservesSparseAcknowledgementsAdmittedByLivePreview() throws {
+    func sharedSpeechGateRejectsSparsePeakOnlyAcknowledgements() throws {
         let fixture = try MeetingTimelineAudioFixture()
         var samples = [Float](repeating: 0, count: 2_000 * MeetingAudioWriter.sampleRate / 1_000)
         let start = 900 * MeetingAudioWriter.sampleRate / 1_000
@@ -189,11 +208,7 @@ struct MeetingTimelineAudioTests {
 
         let spans = try MeetingTimelineAudio(capture: capture).speechSpans()
 
-        #expect(spans == [MeetingTimelineSpeechSpan(
-            source: .microphone,
-            startMilliseconds: 700,
-            endMilliseconds: 1_250
-        )])
+        #expect(spans.isEmpty)
     }
 
     @Test

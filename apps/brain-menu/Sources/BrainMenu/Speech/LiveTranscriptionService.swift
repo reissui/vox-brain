@@ -15,7 +15,7 @@ extension LiveTranscriptionClient {
 
 extension VoxTypeClient: LiveTranscriptionClient {}
 
-enum LiveTranscriptionPhase: String, Equatable, Sendable {
+enum LiveTranscriptionPhase: String, Codable, Equatable, Sendable {
     case preview
     case final
 }
@@ -118,9 +118,34 @@ enum LiveTranscriptionEvent: Equatable, Sendable {
 struct LiveTranscriptionFinalization: Equatable, Sendable {
     let segments: [LiveTranscriptSegment]
     let failures: [LiveTranscriptFailure]
+    let spanOutcomes: [RawTranscriptionSpanOutcome]
     let previewLag: LiveTranscriptPreviewLagState
     let wasCancelled: Bool
     let effectiveEngine: String
+
+    var outcomes: [RawTranscriptionSpanOutcome] { spanOutcomes }
+}
+
+/// Auditable result for one speech-bearing span planned from retained audio.
+/// Text is present only after an actual successful engine response; failures
+/// and cancellation never create transcript placeholder text.
+struct RawTranscriptionSpanOutcome: Equatable, Sendable {
+    let source: MeetingAudioSource
+    let originalStartMilliseconds: Int64
+    let originalEndMilliseconds: Int64
+    let attemptedStartMilliseconds: Int64
+    let attemptedEndMilliseconds: Int64
+    let speechEvidence: SpeechActivityGate.Result
+    let requestCount: Int
+    let text: String?
+    let failure: String?
+    let wasCancelled: Bool
+    let attestedEngine: String
+    let attestedModel: String?
+
+    var failureMessage: String? { failure }
+    var engine: String { attestedEngine }
+    var model: String? { attestedModel }
 }
 
 struct LiveTranscriptionServiceSnapshot: Equatable, Sendable {
@@ -161,6 +186,7 @@ actor LiveTranscriptionService {
     static let defaultVoiceThreshold: Float = 0.01
 
     let engine: SpeechEngineID
+    let attestedModel: String?
     let originHostTimestamp: TimeInterval
     private let client: any LiveTranscriptionClient
     private let wavDirectory: URL
@@ -181,6 +207,7 @@ actor LiveTranscriptionService {
     init(
         client: any LiveTranscriptionClient,
         engine: SpeechEngineID,
+        attestedModel: String? = nil,
         originHostTimestamp: TimeInterval,
         wavDirectory: URL,
         fileManager: FileManager = .default
@@ -191,6 +218,7 @@ actor LiveTranscriptionService {
 
         self.client = client
         self.engine = engine
+        self.attestedModel = attestedModel
         self.originHostTimestamp = originHostTimestamp
         self.wavDirectory = wavDirectory.standardizedFileURL
         self.fileManager = fileManager
@@ -260,6 +288,7 @@ actor LiveTranscriptionService {
             return LiveTranscriptionFinalization(
                 segments: [],
                 failures: [],
+                spanOutcomes: [],
                 previewLag: previewLagState,
                 wasCancelled: wasCancelled,
                 effectiveEngine: engine.rawValue
@@ -284,6 +313,7 @@ actor LiveTranscriptionService {
             return LiveTranscriptionFinalization(
                 segments: [],
                 failures: [],
+                spanOutcomes: [],
                 previewLag: previewLagState,
                 wasCancelled: true,
                 effectiveEngine: await client.effectiveEngine(for: engine.rawValue)
@@ -294,9 +324,12 @@ actor LiveTranscriptionService {
         do {
             let timeline = try MeetingTimelineAudio(capture: capture)
             let spans = try timeline.speechSpans()
+            let plannedSpans = try spans.map {
+                PlannedFinalSpan(span: $0, speechEvidence: try timeline.speechEvidence(for: $0))
+            }
             let task = Task { [client, engine, wavDirectory] in
                 await Self.transcribeFinalSpans(
-                    spans,
+                    plannedSpans,
                     timeline: timeline,
                     client: client,
                     engine: engine,
@@ -309,19 +342,25 @@ actor LiveTranscriptionService {
         } catch {
             final = FinalSpanBatch(
                 segments: [],
-                failures: Self.timelineFailures(capture: capture, error: error)
+                failures: Self.timelineFailures(capture: capture, error: error),
+                spanOutcomes: []
             )
         }
 
+        let effectiveEngine = await client.effectiveEngine(for: engine.rawValue)
+        let attestedOutcomes = final.spanOutcomes.map {
+            $0.attesting(engine: effectiveEngine, model: attestedModel)
+        }
         if wasCancelled || Task.isCancelled {
             isStopping = false
             isStopped = true
             return LiveTranscriptionFinalization(
                 segments: [],
-                failures: [],
+                failures: final.failures.sorted(by: Self.failuresAreOrdered),
+                spanOutcomes: attestedOutcomes.sorted(by: Self.outcomesAreOrdered),
                 previewLag: previewLagState,
                 wasCancelled: true,
-                effectiveEngine: await client.effectiveEngine(for: engine.rawValue)
+                effectiveEngine: effectiveEngine
             )
         }
 
@@ -330,9 +369,10 @@ actor LiveTranscriptionService {
         return LiveTranscriptionFinalization(
             segments: final.segments.sorted(by: Self.segmentsAreOrdered),
             failures: final.failures.sorted(by: Self.failuresAreOrdered),
+            spanOutcomes: attestedOutcomes.sorted(by: Self.outcomesAreOrdered),
             previewLag: previewLagState,
             wasCancelled: false,
-            effectiveEngine: await client.effectiveEngine(for: engine.rawValue)
+            effectiveEngine: effectiveEngine
         )
     }
 
@@ -457,7 +497,7 @@ actor LiveTranscriptionService {
     }
 
     private static func transcribeFinalSpans(
-        _ spans: [MeetingTimelineSpeechSpan],
+        _ spans: [PlannedFinalSpan],
         timeline: MeetingTimelineAudio,
         client: any LiveTranscriptionClient,
         engine: SpeechEngineID,
@@ -465,29 +505,30 @@ actor LiveTranscriptionService {
     ) async -> FinalSpanBatch {
         await withTaskGroup(of: FinalSpanBatch.self) { group in
             for source in MeetingAudioSource.allCases {
-                let sourceSpans = spans.filter { $0.source == source }
+                let sourceSpans = spans.filter { $0.span.source == source }
                 guard !sourceSpans.isEmpty else { continue }
                 group.addTask {
                     var batch = FinalSpanBatch()
-                    var consecutiveFailures = 0
-                    sourceLoop: for span in sourceSpans {
-                        guard !Task.isCancelled else { break }
+                    for plannedSpan in sourceSpans {
+                        if Task.isCancelled {
+                            let cancellation = Self.cancelledFinalSpan(plannedSpan, engine: engine)
+                            batch.failures.append(cancellation.failure)
+                            batch.spanOutcomes.append(cancellation.outcome)
+                            continue
+                        }
                         switch await Self.transcribeFinalSpan(
-                            span,
+                            plannedSpan,
                             timeline: timeline,
                             client: client,
                             engine: engine,
                             wavDirectory: wavDirectory
                         ) {
-                        case .segment(let segment):
+                        case .segment(let segment, let outcome):
                             batch.segments.append(segment)
-                            consecutiveFailures = 0
-                        case .failure(let failure, let shouldStopSource):
+                            batch.spanOutcomes.append(outcome)
+                        case .failure(let failure, let outcome):
                             batch.failures.append(failure)
-                            consecutiveFailures += 1
-                            if shouldStopSource || consecutiveFailures >= 3 {
-                                break sourceLoop
-                            }
+                            batch.spanOutcomes.append(outcome)
                         }
                     }
                     return batch
@@ -498,79 +539,176 @@ actor LiveTranscriptionService {
             for await batch in group {
                 combined.segments.append(contentsOf: batch.segments)
                 combined.failures.append(contentsOf: batch.failures)
+                combined.spanOutcomes.append(contentsOf: batch.spanOutcomes)
             }
             return combined
         }
     }
 
     private static func transcribeFinalSpan(
-        _ span: MeetingTimelineSpeechSpan,
+        _ plannedSpan: PlannedFinalSpan,
         timeline: MeetingTimelineAudio,
         client: any LiveTranscriptionClient,
         engine: SpeechEngineID,
         wavDirectory: URL
     ) async -> FinalSpanOutcome {
-        let wavURL: URL
-        do {
-            wavURL = try timeline.writeWAV(for: span, to: wavDirectory)
-        } catch {
-            return .failure(finalFailure(span: span, error: error), stopSource: false)
-        }
-        defer { try? FileManager.default.removeItem(at: wavURL) }
+        let original = plannedSpan.span
+        var requestCount = 0
+        var isSystemic = false
 
-        var finalMessage = "VoxType returned no text for a detected speech span."
-        for attempt in 0..<2 {
+        func attempt(_ attemptedSpan: MeetingTimelineSpeechSpan) async -> SpanRequestResult {
+            guard !Task.isCancelled else { return .cancelled(madeRequest: false) }
+            let wavURL: URL
+            do {
+                wavURL = try timeline.writeWAV(for: attemptedSpan, to: wavDirectory)
+            } catch {
+                return .failure(Self.boundedMessage(error), isSystemic: false, madeRequest: false)
+            }
+            defer { try? FileManager.default.removeItem(at: wavURL) }
+            guard !Task.isCancelled else { return .cancelled(madeRequest: false) }
             do {
                 let text = try await client.transcribe(
                     wavURL: wavURL,
                     engine: engine.rawValue
                 ).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else {
-                    if attempt == 0 { continue }
-                    break
+                    return .failure(
+                        "VoxType returned no text for a detected speech span.",
+                        isSystemic: false,
+                        madeRequest: true
+                    )
                 }
-                return .segment(LiveTranscriptSegment(
-                    source: span.source,
-                    startMilliseconds: span.startMilliseconds,
-                    endMilliseconds: span.endMilliseconds,
-                    text: text,
-                    phase: .final
-                ))
+                return .text(text, madeRequest: true)
             } catch is CancellationError {
-                finalMessage = CancellationError().localizedDescription
-                break
+                return .cancelled(madeRequest: true)
             } catch {
-                if let error = error as? VoxTypeClientError,
-                   error == .invalidTranscript {
-                    return .failure(
-                        finalFailure(span: span, error: error, isSystemic: false),
-                        stopSource: false
-                    )
-                }
-                if isSystemicFinalFailure(error) {
-                    return .failure(
-                        finalFailure(span: span, error: error, isSystemic: true),
-                        stopSource: true
-                    )
-                }
-                finalMessage = boundedMessage(error)
+                return .failure(
+                    boundedMessage(error),
+                    isSystemic: isSystemicFinalFailure(error),
+                    madeRequest: true
+                )
             }
         }
-        return .failure(
-            LiveTranscriptFailure(
-                source: span.source,
-                phase: .final,
-                startMilliseconds: span.startMilliseconds,
-                endMilliseconds: span.endMilliseconds,
-                message: String(finalMessage.prefix(240))
-            ),
-            stopSource: false
+
+        let exactResult = await attempt(original)
+        requestCount += exactResult.madeRequest ? 1 : 0
+        switch exactResult {
+        case .text(let text, _):
+            return .segment(
+                finalSegment(for: original, text: text),
+                rawOutcome(
+                    plannedSpan,
+                    attemptedSpan: original,
+                    requestCount: requestCount,
+                    text: text,
+                    failure: nil,
+                    wasCancelled: false,
+                    engine: engine
+                )
+            )
+        case .cancelled:
+            let cancellation = cancelledFinalSpan(
+                plannedSpan,
+                attemptedSpan: original,
+                requestCount: requestCount,
+                engine: engine
+            )
+            return .failure(cancellation.failure, cancellation.outcome)
+        case .failure(let message, let systemic, let madeRequest):
+            isSystemic = systemic
+            guard madeRequest else {
+                let failure = finalFailure(span: original, message: message)
+                return .failure(
+                    failure,
+                    rawOutcome(
+                        plannedSpan,
+                        attemptedSpan: original,
+                        requestCount: requestCount,
+                        text: nil,
+                        failure: message,
+                        wasCancelled: false,
+                        engine: engine
+                    )
+                )
+            }
+        }
+
+        let retrySpan: MeetingTimelineSpeechSpan
+        do {
+            retrySpan = try timeline.retrySpan(for: original)
+        } catch {
+            let message = boundedMessage(error)
+            return .failure(
+                finalFailure(span: original, message: message, isSystemic: isSystemic),
+                rawOutcome(
+                    plannedSpan,
+                    attemptedSpan: original,
+                    requestCount: requestCount,
+                    text: nil,
+                    failure: message,
+                    wasCancelled: false,
+                    engine: engine
+                )
+            )
+        }
+
+        let retryResult = await attempt(retrySpan)
+        requestCount += retryResult.madeRequest ? 1 : 0
+        switch retryResult {
+        case .text(let text, _):
+            return .segment(
+                finalSegment(for: original, text: text),
+                rawOutcome(
+                    plannedSpan,
+                    attemptedSpan: retrySpan,
+                    requestCount: requestCount,
+                    text: text,
+                    failure: nil,
+                    wasCancelled: false,
+                    engine: engine
+                )
+            )
+        case .cancelled:
+            let cancellation = cancelledFinalSpan(
+                plannedSpan,
+                attemptedSpan: retrySpan,
+                requestCount: requestCount,
+                engine: engine
+            )
+            return .failure(cancellation.failure, cancellation.outcome)
+        case .failure(let message, let systemic, _):
+            let systemicFailure = isSystemic || systemic
+            return .failure(
+                finalFailure(span: original, message: message, isSystemic: systemicFailure),
+                rawOutcome(
+                    plannedSpan,
+                    attemptedSpan: retrySpan,
+                    requestCount: requestCount,
+                    text: nil,
+                    failure: message,
+                    wasCancelled: false,
+                    engine: engine
+                )
+            )
+        }
+    }
+
+    private static func finalSegment(
+        for span: MeetingTimelineSpeechSpan,
+        text: String
+    ) -> LiveTranscriptSegment {
+        LiveTranscriptSegment(
+            source: span.source,
+            startMilliseconds: span.startMilliseconds,
+            endMilliseconds: span.endMilliseconds,
+            text: text,
+            phase: .final
         )
     }
 
     private static func finalFailure(
         span: MeetingTimelineSpeechSpan,
-        error: Error,
+        message: String,
         isSystemic: Bool = false
     ) -> LiveTranscriptFailure {
         LiveTranscriptFailure(
@@ -578,8 +716,55 @@ actor LiveTranscriptionService {
             phase: .final,
             startMilliseconds: span.startMilliseconds,
             endMilliseconds: span.endMilliseconds,
-            message: boundedMessage(error),
+            message: String(message.prefix(240)),
             isSystemic: isSystemic
+        )
+    }
+
+    private static func rawOutcome(
+        _ plannedSpan: PlannedFinalSpan,
+        attemptedSpan: MeetingTimelineSpeechSpan,
+        requestCount: Int,
+        text: String?,
+        failure: String?,
+        wasCancelled: Bool,
+        engine: SpeechEngineID
+    ) -> RawTranscriptionSpanOutcome {
+        RawTranscriptionSpanOutcome(
+            source: plannedSpan.span.source,
+            originalStartMilliseconds: plannedSpan.span.startMilliseconds,
+            originalEndMilliseconds: plannedSpan.span.endMilliseconds,
+            attemptedStartMilliseconds: attemptedSpan.startMilliseconds,
+            attemptedEndMilliseconds: attemptedSpan.endMilliseconds,
+            speechEvidence: plannedSpan.speechEvidence,
+            requestCount: requestCount,
+            text: text,
+            failure: failure.map { String($0.prefix(240)) },
+            wasCancelled: wasCancelled,
+            attestedEngine: engine.rawValue,
+            attestedModel: nil
+        )
+    }
+
+    private static func cancelledFinalSpan(
+        _ plannedSpan: PlannedFinalSpan,
+        attemptedSpan: MeetingTimelineSpeechSpan? = nil,
+        requestCount: Int = 0,
+        engine: SpeechEngineID
+    ) -> (failure: LiveTranscriptFailure, outcome: RawTranscriptionSpanOutcome) {
+        let message = "Transcription cancelled."
+        let attempted = attemptedSpan ?? plannedSpan.span
+        return (
+            finalFailure(span: plannedSpan.span, message: message),
+            rawOutcome(
+                plannedSpan,
+                attemptedSpan: attempted,
+                requestCount: requestCount,
+                text: nil,
+                failure: message,
+                wasCancelled: true,
+                engine: engine
+            )
         )
     }
 
@@ -628,6 +813,19 @@ actor LiveTranscriptionService {
         if lhs.source != rhs.source { return lhs.source.rawValue < rhs.source.rawValue }
         if lhs.phase != rhs.phase { return lhs.phase.rawValue < rhs.phase.rawValue }
         return lhs.message < rhs.message
+    }
+
+    private static func outcomesAreOrdered(
+        _ lhs: RawTranscriptionSpanOutcome,
+        _ rhs: RawTranscriptionSpanOutcome
+    ) -> Bool {
+        if lhs.originalStartMilliseconds != rhs.originalStartMilliseconds {
+            return lhs.originalStartMilliseconds < rhs.originalStartMilliseconds
+        }
+        if lhs.originalEndMilliseconds != rhs.originalEndMilliseconds {
+            return lhs.originalEndMilliseconds < rhs.originalEndMilliseconds
+        }
+        return lhs.source.rawValue < rhs.source.rawValue
     }
 
     private static func timelineFailures(
@@ -758,11 +956,51 @@ enum MeetingTranscriptionAudioCleanup {
 private struct FinalSpanBatch: Sendable {
     var segments: [LiveTranscriptSegment] = []
     var failures: [LiveTranscriptFailure] = []
+    var spanOutcomes: [RawTranscriptionSpanOutcome] = []
 }
 
 private enum FinalSpanOutcome: Sendable {
-    case segment(LiveTranscriptSegment)
-    case failure(LiveTranscriptFailure, stopSource: Bool)
+    case segment(LiveTranscriptSegment, RawTranscriptionSpanOutcome)
+    case failure(LiveTranscriptFailure, RawTranscriptionSpanOutcome)
+}
+
+private struct PlannedFinalSpan: Sendable {
+    let span: MeetingTimelineSpeechSpan
+    let speechEvidence: SpeechActivityGate.Result
+}
+
+private enum SpanRequestResult: Sendable {
+    case text(String, madeRequest: Bool)
+    case failure(String, isSystemic: Bool, madeRequest: Bool)
+    case cancelled(madeRequest: Bool)
+
+    var madeRequest: Bool {
+        switch self {
+        case .text(_, let madeRequest),
+             .failure(_, _, let madeRequest),
+             .cancelled(let madeRequest):
+            madeRequest
+        }
+    }
+}
+
+private extension RawTranscriptionSpanOutcome {
+    func attesting(engine: String, model: String?) -> Self {
+        Self(
+            source: source,
+            originalStartMilliseconds: originalStartMilliseconds,
+            originalEndMilliseconds: originalEndMilliseconds,
+            attemptedStartMilliseconds: attemptedStartMilliseconds,
+            attemptedEndMilliseconds: attemptedEndMilliseconds,
+            speechEvidence: speechEvidence,
+            requestCount: requestCount,
+            text: text,
+            failure: failure,
+            wasCancelled: wasCancelled,
+            attestedEngine: engine,
+            attestedModel: model
+        )
+    }
 }
 
 private struct PendingSamples: Sendable {

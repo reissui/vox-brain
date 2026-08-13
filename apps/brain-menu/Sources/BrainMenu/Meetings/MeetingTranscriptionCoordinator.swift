@@ -327,6 +327,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 let service = try LiveTranscriptionService(
                     client: client,
                     engine: requestedEngine,
+                    attestedModel: processing.speechModel,
                     originHostTimestamp: capture.originHostTimestamp,
                     wavDirectory: store.directoryURL(for: meetingID)
                         .appendingPathComponent(".transcription", isDirectory: true)

@@ -67,6 +67,7 @@ struct MeetingTimelineAudio: Sendable {
     private static let maximumMergeSilenceFrames = 1_200 * sampleRate / 1_000
     private static let paddingFrames = 200 * sampleRate / 1_000
     private static let maximumSpanFrames = 30 * sampleRate
+    private static let maximumRetryContextFrames = 3 * sampleRate
     private static let minimumPreferredSplitFrames = 3 * sampleRate
     private static let maximumRoundingOverlapFrames = 2 * sampleRate / 1_000
     private static let voiceRMSThreshold: Float = 0.005
@@ -234,15 +235,60 @@ struct MeetingTimelineAudio: Sendable {
             for group in groups {
                 let start = max(Int64(0), group.startFrame - Int64(Self.paddingFrames))
                 let end = group.endFrame + Int64(Self.paddingFrames)
-                result.append(contentsOf: Self.split(
+                let candidates = Self.split(
                     source: source,
                     startFrame: start,
                     endFrame: end,
                     voiceRuns: group.runs
-                ))
+                )
+                for candidate in candidates {
+                    let evidence = try speechEvidence(for: candidate)
+                    if evidence.isSpeechBearing { result.append(candidate) }
+                }
             }
         }
         return result.sorted(by: Self.spansAreOrdered)
+    }
+
+    /// Returns the shared, deterministic speech evidence used to admit a
+    /// planned final span. A span is bounded to 30 seconds, so this never loads
+    /// an entire meeting into memory.
+    func speechEvidence(
+        for span: MeetingTimelineSpeechSpan
+    ) throws -> SpeechActivityGate.Result {
+        SpeechActivityGate().evaluate(try samples(for: span, maximumExtraFrames: 0))
+    }
+
+    /// Expands a failed final span with adjacent retained audio. Context is
+    /// clipped to the first and last frames actually retained for that source;
+    /// it never manufactures silence beyond the capture as retry input.
+    func retrySpan(
+        for span: MeetingTimelineSpeechSpan,
+        adjacentMilliseconds: Int64 = 1_500
+    ) throws -> MeetingTimelineSpeechSpan {
+        guard adjacentMilliseconds >= 0,
+              let chunks = chunksBySource[span.source],
+              let retainedStartFrame = chunks.map(\.timelineStartFrame).min(),
+              let retainedEndFrame = chunks.map(\.timelineEndFrame).max()
+        else { throw MeetingTimelineAudioError.unknownSpan }
+
+        let originalStartFrame = try Self.timelineFrame(milliseconds: span.startMilliseconds)
+        let originalEndFrame = try Self.timelineFrame(milliseconds: span.endMilliseconds)
+        let contextFrames = adjacentMilliseconds.multipliedReportingOverflow(
+            by: Int64(Self.sampleRate / 1_000)
+        )
+        guard !contextFrames.overflow else { throw MeetingTimelineAudioError.unknownSpan }
+        let expandedStart = max(retainedStartFrame, originalStartFrame - contextFrames.partialValue)
+        let (candidateEnd, endOverflow) = originalEndFrame.addingReportingOverflow(
+            contextFrames.partialValue
+        )
+        let expandedEnd = min(retainedEndFrame, endOverflow ? .max : candidateEnd)
+        guard expandedEnd > expandedStart else { throw MeetingTimelineAudioError.unknownSpan }
+        return Self.span(
+            source: span.source,
+            startFrame: expandedStart,
+            endFrame: expandedEnd
+        )
     }
 
     /// Creates a unique owner-only WAV. The caller owns and must remove the returned file.
@@ -250,9 +296,8 @@ struct MeetingTimelineAudio: Sendable {
         for span: MeetingTimelineSpeechSpan,
         to directory: URL
     ) throws -> URL {
-        guard let track = tracks[span.source],
-              let chunks = chunksBySource[span.source],
-              let sourceTimelineEnd = chunks.map(\.timelineEndFrame).max() else {
+        guard tracks[span.source] != nil,
+              chunksBySource[span.source] != nil else {
             throw MeetingTimelineAudioError.unknownSpan
         }
         let safeDirectory = try Self.validatedOutputDirectory(directory)
@@ -268,18 +313,10 @@ struct MeetingTimelineAudio: Sendable {
             throw MeetingTimelineAudioError.unsafeOutputDirectory
         }
 
-        let startFrame = try Self.timelineFrame(milliseconds: span.startMilliseconds)
-        let endFrame = try Self.timelineFrame(milliseconds: span.endMilliseconds)
-        let (maximumPaddedEnd, paddedEndOverflow) = sourceTimelineEnd.addingReportingOverflow(
-            Int64(Self.paddingFrames)
+        let samples = try samples(
+            for: span,
+            maximumExtraFrames: Self.maximumRetryContextFrames
         )
-        guard endFrame > startFrame,
-              endFrame - startFrame <= Int64(Self.maximumSpanFrames),
-              startFrame <= sourceTimelineEnd,
-              endFrame <= (paddedEndOverflow ? Int64.max : maximumPaddedEnd),
-              endFrame - startFrame <= Int64(UInt32.max) / Int64(Self.bytesPerSample) else {
-            throw MeetingTimelineAudioError.unknownSpan
-        }
 
         let fileDescriptor = destination.withUnsafeFileSystemRepresentation { path -> Int32 in
             guard let path else { return -1 }
@@ -300,18 +337,16 @@ struct MeetingTimelineAudio: Sendable {
             guard Darwin.fchmod(fileDescriptor, S_IRUSR | S_IWUSR) == 0 else {
                 throw MeetingTimelineAudioError.wavWriteFailed
             }
-            let frameCount = endFrame - startFrame
+            let frameCount = Int64(samples.count)
             try output.write(contentsOf: Self.wavHeader(
                 dataByteCount: UInt32(frameCount * Int64(Self.bytesPerSample))
             ))
 
-            var reader = try TimelineSourceReader(track: track, chunks: chunks)
-            var cursor = startFrame
-            while cursor < endFrame {
-                let count = Int(min(Int64(Self.ioFrames), endFrame - cursor))
-                let samples = try reader.read(timelineStartFrame: cursor, frameCount: count)
-                try output.write(contentsOf: Self.littleEndianData(samples))
-                cursor += Int64(count)
+            var cursor = 0
+            while cursor < samples.count {
+                let end = min(cursor + Self.ioFrames, samples.count)
+                try output.write(contentsOf: Self.littleEndianData(Array(samples[cursor..<end])))
+                cursor = end
             }
             try output.synchronize()
             try output.close()
@@ -333,6 +368,35 @@ struct MeetingTimelineAudio: Sendable {
             try? output.close()
             throw MeetingTimelineAudioError.wavWriteFailed
         }
+    }
+
+    private func samples(
+        for span: MeetingTimelineSpeechSpan,
+        maximumExtraFrames: Int
+    ) throws -> [Float] {
+        guard let track = tracks[span.source],
+              let chunks = chunksBySource[span.source],
+              let sourceTimelineEnd = chunks.map(\.timelineEndFrame).max() else {
+            throw MeetingTimelineAudioError.unknownSpan
+        }
+        let startFrame = try Self.timelineFrame(milliseconds: span.startMilliseconds)
+        let endFrame = try Self.timelineFrame(milliseconds: span.endMilliseconds)
+        let (maximumPaddedEnd, paddedEndOverflow) = sourceTimelineEnd.addingReportingOverflow(
+            Int64(Self.paddingFrames)
+        )
+        let maximumFrames = Self.maximumSpanFrames + maximumExtraFrames
+        guard endFrame > startFrame,
+              endFrame - startFrame <= Int64(maximumFrames),
+              startFrame <= sourceTimelineEnd,
+              endFrame <= (paddedEndOverflow ? Int64.max : maximumPaddedEnd),
+              endFrame - startFrame <= Int64(UInt32.max) / Int64(Self.bytesPerSample) else {
+            throw MeetingTimelineAudioError.unknownSpan
+        }
+        var reader = try TimelineSourceReader(track: track, chunks: chunks)
+        return try reader.read(
+            timelineStartFrame: startFrame,
+            frameCount: Int(endFrame - startFrame)
+        )
     }
 
     private static func detectVoiceRuns(
@@ -409,7 +473,7 @@ struct MeetingTimelineAudio: Sendable {
                 interruptionIndex += 1
             }
 
-            if silenceEnd - silenceStart <= Int64(maximumMergeSilenceFrames),
+            if silenceEnd - silenceStart < Int64(maximumMergeSilenceFrames),
                !isInterrupted {
                 groups[lastIndex].endFrame = run.endFrame
                 groups[lastIndex].voicedFrameCount += run.frameCount
