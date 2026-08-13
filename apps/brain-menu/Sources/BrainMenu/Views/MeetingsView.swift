@@ -534,6 +534,7 @@ struct MeetingsView: View {
                 Button { openMeeting(id) } label: { meetingRow(row) }
                     .buttonStyle(.plain)
                     .keyboardShortcut(.return, modifiers: [])
+                    .accessibilityHint("Opens the transcript review workspace.")
             } else {
                 meetingRow(row)
             }
