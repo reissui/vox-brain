@@ -298,6 +298,7 @@ final class SpeechSettingsController {
     @ObservationIgnored private let modelSource: VoxTypeModelSourceOfTruth?
     @ObservationIgnored private let microphoneService: (any MeetingMicrophoneSettingsServing)?
     @ObservationIgnored private let microphoneSelectionStore: MeetingMicrophoneSelectionStore
+    let meetingTerminology: MeetingTerminologyStore
     @ObservationIgnored private var modelApplicationTask: Task<Void, Never>?
     @ObservationIgnored private var modelApplicationRevision: UInt64 = 0
     @ObservationIgnored private var transientSelections: [SpeechWorkflow: SpeechEngineSelection] = [:]
@@ -311,6 +312,7 @@ final class SpeechSettingsController {
         actions: any SpeechSettingsActionHandling = UnavailableSpeechSettingsActions(),
         microphoneService: (any MeetingMicrophoneSettingsServing)? = nil,
         microphoneSelectionStore: MeetingMicrophoneSelectionStore = MeetingMicrophoneSelectionStore(),
+        meetingTerminology: MeetingTerminologyStore = MeetingTerminologyStore(),
         initialSnapshot: ModelInventorySnapshot = .unknown
     ) {
         self.voxType = voxType
@@ -321,6 +323,7 @@ final class SpeechSettingsController {
         self.actions = actions
         self.microphoneService = microphoneService
         self.microphoneSelectionStore = microphoneSelectionStore
+        self.meetingTerminology = meetingTerminology
         microphoneSelection = microphoneSelectionStore.selection
         inventorySnapshot = initialSnapshot
         installationState = voxType == nil ? .missing : .checking
@@ -736,6 +739,8 @@ struct SpeechSettingsView: View {
 
             workflowSection(.dictation)
 
+            terminologySection
+
             Section("Audio Tests") {
                 Picker("Microphone", selection: Binding(
                     get: { controller.microphoneSelection },
@@ -856,6 +861,45 @@ struct SpeechSettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var terminologySection: some View {
+        Section("Meeting terminology") {
+            Text("Private terminology is stored only on this Mac and is used only to correct processed meeting transcripts. It is never sent to VoxType or any service.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ForEach(controller.meetingTerminology.terms, id: \.self) { term in
+                HStack {
+                    TextField("Terminology", text: Binding(
+                        get: { term },
+                        set: { controller.meetingTerminology.replace(term, with: $0) }
+                    ))
+                    Button("Remove", role: .destructive) {
+                        controller.meetingTerminology.remove(term)
+                    }
+                }
+            }
+
+            HStack {
+                TextField("Add terminology", text: $newTerminology)
+                    .onSubmit { addTerminology() }
+                Button("Add", action: addTerminology)
+                    .disabled(newTerminology.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if let terminologyError = controller.meetingTerminology.errorMessage {
+                Label(terminologyError, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("Meeting terminology error: \(terminologyError)")
+            }
+        }
+    }
+
+    @State private var newTerminology = ""
+
+    private func addTerminology() {
+        controller.meetingTerminology.add(newTerminology)
+        if controller.meetingTerminology.errorMessage == nil { newTerminology = "" }
     }
 
     private func statusRow(
