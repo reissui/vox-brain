@@ -329,9 +329,11 @@ struct MeetingViewsTests {
         #expect(model.levels.map(\.level) == [1, 0])
         #expect(model.levels.allSatisfy { $0.accessibilityLabel.contains("percent") })
         #expect(model.previewMessage?.contains("2 system audio chunks") == true)
-        #expect(model.errorMessages == [
-            "Microphone preview: model unavailable",
-            "No voice signal detected on the selected microphone.",
+        #expect(model.transcriptHealth?.text
+            == "Transcript health — Microphone: 1 preview span skipped. Latest guidance: model unavailable")
+        #expect(model.transcriptHealth?.severity == .warning)
+        #expect(model.captureGuidance.map(\.text) == [
+            "Microphone: No voice signal detected on the selected microphone.",
         ])
         #expect(model.actions == [.pause, .stop])
 
@@ -409,6 +411,88 @@ struct MeetingViewsTests {
             return
         }
         #expect(message.contains("preserved for recovery"))
+    }
+
+    @Test
+    func liveTranscriptHealthSummarizesRepeatedFailuresWithoutChangingTranscriptRows() throws {
+        let activeMeeting = meeting(
+            title: "Failure summary",
+            start: Date(timeIntervalSince1970: 100)
+        )
+        let transcript = try utterances()
+        let latestMessage = String(repeating: "Reconnect the transcription service promptly. ", count: 12)
+        var failures: [LiveTranscriptFailure] = []
+        for index in 0..<70 {
+            failures.append(LiveTranscriptFailure(
+                source: .microphone,
+                phase: .preview,
+                startMilliseconds: Int64(index * 1_000),
+                endMilliseconds: Int64(index * 1_000 + 500),
+                message: "Temporary preview failure"
+            ))
+        }
+        for index in 0..<20 {
+            failures.append(LiveTranscriptFailure(
+                source: .system,
+                phase: .preview,
+                startMilliseconds: Int64(index * 1_000),
+                endMilliseconds: Int64(index * 1_000 + 500),
+                message: "Temporary preview failure"
+            ))
+        }
+        for index in 0..<10 {
+            failures.append(LiveTranscriptFailure(
+                source: .microphone,
+                phase: .final,
+                startMilliseconds: Int64(index * 1_000),
+                endMilliseconds: Int64(index * 1_000 + 500),
+                message: latestMessage,
+                isSystemic: index == 9
+            ))
+        }
+
+        let baseline = MeetingLiveViewModel(snapshot: MeetingLiveSnapshot(
+            meeting: activeMeeting,
+            lifecycleState: .recording,
+            utterances: transcript,
+            previewLag: .current,
+            transcriptFailures: [],
+            controllerFailure: nil,
+            levels: [:],
+            now: activeMeeting.startedAt
+        ))
+        let model = MeetingLiveViewModel(snapshot: MeetingLiveSnapshot(
+            meeting: activeMeeting,
+            lifecycleState: .recording,
+            utterances: transcript,
+            previewLag: .current,
+            transcriptFailures: failures,
+            controllerFailure: nil,
+            levels: [:],
+            audioGuidance: [
+                .microphone: "Check the selected input.",
+                .system: "Check the selected input.",
+            ],
+            now: activeMeeting.startedAt
+        ))
+
+        let health = try #require(model.transcriptHealth)
+        #expect(model.transcript == baseline.transcript)
+        #expect(model.transcript.map(\.id) == baseline.transcript.map(\.id))
+        #expect(health.sources.count == 2)
+        #expect(health.sources.first { $0.source == .microphone }?.previewCount == 70)
+        #expect(health.sources.first { $0.source == .microphone }?.finalCount == 10)
+        #expect(health.sources.first { $0.source == .system }?.previewCount == 20)
+        #expect(health.severity == .error)
+        #expect(health.latestGuidance.count <= 240)
+        #expect(health.text.count < 500)
+        #expect(health.accessibilityLabel.contains("Microphone"))
+        #expect(health.accessibilityLabel.contains("70 preview spans skipped"))
+        #expect(health.accessibilityLabel.contains("10 final spans skipped"))
+        #expect(health.accessibilityLabel.contains(health.latestGuidance))
+        #expect(model.captureGuidance.count == 1)
+        #expect(model.captureGuidance.first?.sources == [.microphone, .system])
+        #expect((model.transcriptHealth == nil ? 0 : 1) + model.captureGuidance.count <= 3)
     }
 
     @Test
