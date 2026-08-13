@@ -703,6 +703,421 @@ struct VoiceMeetingAcceptanceTests {
     }
 
     @Test
+    func reliableTranscriptEvidenceStaysAuditableReadableAndLocalThroughRecovery() async throws {
+        let fixture = try AcceptanceDirectory(prefix: "VoiceMeeting-ReliableTranscript")
+        defer { fixture.remove() }
+
+        // The shared local speech gate rejects silence and impulses for either
+        // source, while sustained speech is eligible for contextual previews.
+        let gate = SpeechActivityGate()
+        let silence = [Float](
+            repeating: 0,
+            count: SpeechActivityGate.samplesPerFrame * 40
+        )
+        var impulse = silence
+        impulse[SpeechActivityGate.samplesPerFrame * 20] = 1
+        let sustained = (0..<(SpeechActivityGate.samplesPerFrame * 40)).map {
+            $0.isMultiple(of: 2) ? Float(0.2) : Float(-0.2)
+        }
+        #expect(!gate.evaluate(silence).isSpeechBearing)
+        #expect(!gate.evaluate(impulse).isSpeechBearing)
+        #expect(gate.evaluate(sustained).isSpeechBearing)
+
+        var segmenter = LivePreviewSegmenter()
+        for source in MeetingAudioSource.allCases {
+            #expect(segmenter.append(source: source, startFrame: 0, samples: silence).isEmpty)
+            #expect(segmenter.append(
+                source: source,
+                startFrame: Int64(silence.count),
+                samples: impulse
+            ).isEmpty)
+            _ = segmenter.append(
+                source: source,
+                startFrame: Int64(silence.count + impulse.count),
+                samples: sustained
+            )
+        }
+        let contextual = segmenter.flush()
+        #expect(Set(contextual.map(\.source)) == Set(MeetingAudioSource.allCases))
+        #expect(contextual.allSatisfy {
+            $0.endMilliseconds - $0.startMilliseconds
+                <= LivePreviewSegmenter.maximumCaptureMilliseconds
+        })
+
+        // A real service boundary proves weak input never invokes VoxType and
+        // every failed final speech span receives exactly one bounded retry.
+        let weakClient = AcceptanceReliabilityClient(failFinal: false)
+        let weakWriter = try MeetingAudioWriter(
+            meetingDirectory: fixture.root.appendingPathComponent("weak"),
+            origin: Date(timeIntervalSince1970: 100)
+        )
+        let microphoneSilence = acceptanceAudioBuffer(
+            source: .microphone,
+            hostTimestamp: 100,
+            duration: 1,
+            amplitude: 0
+        )
+        var systemImpulseSamples = [Float](
+            repeating: 0,
+            count: MeetingAudioWriter.sampleRate
+        )
+        systemImpulseSamples[0] = 1
+        let systemImpulse = MeetingAudioSampleBuffer(
+            source: .system,
+            sourceTimestamp: 300,
+            hostTimestamp: 100,
+            sampleRate: Double(MeetingAudioWriter.sampleRate),
+            channelCount: MeetingAudioWriter.channelCount,
+            interleavedSamples: systemImpulseSamples
+        )
+        _ = try weakWriter.append(microphoneSilence)
+        _ = try weakWriter.append(systemImpulse)
+        let weakService = try LiveTranscriptionService(
+            client: weakClient,
+            engine: .whisper,
+            attestedModel: "large-v3",
+            originHostTimestamp: 100,
+            wavDirectory: fixture.root.appendingPathComponent("weak-wav")
+        )
+        let weakController = LiveTranscriptController(service: weakService)
+        await weakController.append(microphoneSilence)
+        await weakController.append(systemImpulse)
+        await weakController.stop(capture: try weakWriter.finalize())
+        #expect(await weakClient.requests.isEmpty)
+        #expect(weakController.utterances.isEmpty)
+
+        let failingClient = AcceptanceReliabilityClient(failFinal: true)
+        let writer = try MeetingAudioWriter(
+            meetingDirectory: fixture.root.appendingPathComponent("dual"),
+            origin: Date(timeIntervalSince1970: 200)
+        )
+        let service = try LiveTranscriptionService(
+            client: failingClient,
+            engine: .whisper,
+            attestedModel: "large-v3",
+            originHostTimestamp: 200,
+            wavDirectory: fixture.root.appendingPathComponent("dual-wav")
+        )
+        let live = LiveTranscriptController(service: service)
+        for source in MeetingAudioSource.allCases {
+            let buffer = acceptanceAudioBuffer(
+                source: source,
+                hostTimestamp: 200,
+                duration: 1,
+                amplitude: 0.2
+            )
+            _ = try writer.append(buffer)
+            await live.append(buffer)
+        }
+        await live.stop(capture: try writer.finalize())
+        let finalRequests = await failingClient.requests.filter { $0.hasPrefix("final-") }
+        #expect(finalRequests.count == 4)
+        #expect(live.finalSpanOutcomes.count == 2)
+        #expect(live.finalSpanOutcomes.allSatisfy {
+            $0.requestCount == 2
+                && $0.failure != nil
+                && $0.attestedEngine == "whisper"
+                && $0.attestedModel == "large-v3"
+        })
+        #expect(live.utterances.allSatisfy { $0.transcriptionPhase == .preview })
+        let health = MeetingLiveViewModel(snapshot: MeetingLiveSnapshot(
+            meeting: completedMeeting(id: UUID(), title: "Health summary"),
+            lifecycleState: .completed,
+            utterances: live.utterances,
+            previewLag: live.previewLag,
+            transcriptFailures: live.errors,
+            controllerFailure: nil,
+            levels: [:],
+            now: Date(timeIntervalSince1970: 210)
+        )).transcriptHealth
+        #expect(health != nil)
+        #expect(health?.sources.count == 2)
+
+        let selection = SpeechEngineSelection(engine: .whisper, modelID: "large-v3")
+        let attestation = VoxTypeModelAttestation(
+            requestedSelection: selection,
+            effectiveSelection: selection,
+            verifiedAt: Date(timeIntervalSince1970: 300),
+            voxTypeVersion: VoxTypeVersion(major: 0, minor: 7, patch: 5, prerelease: nil)
+        )
+        let first = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 1_000,
+            text: "We chose orka. Thank you.",
+            baseSpeakerID: "you"
+        )
+        let sameTurn = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 8_999,
+            endMilliseconds: 9_500,
+            text: "Same turn.",
+            baseSpeakerID: "you"
+        )
+        let silenceBoundary = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 17_500,
+            endMilliseconds: 18_000,
+            text: "New turn at eight seconds.",
+            baseSpeakerID: "you"
+        )
+        let speakerBoundary = try MeetingUtterance(
+            source: .system,
+            startMilliseconds: 18_001,
+            endMilliseconds: 19_000,
+            text: "Remote answer.",
+            baseSpeakerID: "diarized-name"
+        )
+        let utterances = [first, sameTurn, silenceBoundary, speakerBoundary]
+        let assembled = MeetingTranscriptTurnAssembler.assemble(utterances: utterances)
+        #expect(assembled.map(\.utteranceIDs) == [
+            [first.id, sameTurn.id], [silenceBoundary.id], [speakerBoundary.id],
+        ])
+
+        var meeting = MeetingRecord(
+            title: "Reliable transcript",
+            startedAt: Date(timeIntervalSince1970: 300),
+            endedAt: Date(timeIntervalSince1970: 340),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "large-v3",
+            speechModelAttestation: attestation,
+            transcriptionState: .completed
+        )
+        let failedOutcome = RawTranscriptionSpanOutcome(
+            source: .microphone,
+            originalStartMilliseconds: 8_999,
+            originalEndMilliseconds: 9_500,
+            attemptedStartMilliseconds: 7_499,
+            attemptedEndMilliseconds: 11_000,
+            speechEvidence: gate.evaluate(sustained),
+            requestCount: 2,
+            text: nil,
+            failure: "Final transcription timed out after one retry.",
+            wasCancelled: false,
+            attestedEngine: "whisper",
+            attestedModel: "large-v3"
+        )
+        let attempt = MeetingTranscriptAttempt(
+            createdAt: Date(timeIntervalSince1970: 341),
+            modelAttestation: MeetingTranscriptModelAttestation(meeting: meeting),
+            spanOutcomes: [MeetingTranscriptSpanOutcome(failedOutcome)],
+            retainedPreviews: [sameTurn],
+            utterances: utterances,
+            failures: [MeetingTranscriptFailureDiagnostic(LiveTranscriptFailure(
+                source: .microphone,
+                phase: .final,
+                startMilliseconds: 8_999,
+                endMilliseconds: 9_500,
+                message: "Final transcription timed out after one retry."
+            ))],
+            isSuccessful: true
+        )
+        meeting.selectedRawTranscriptAttemptID = attempt.id
+        let artifactStore = MeetingTranscriptArtifactStore(rootURL: fixture.root)
+        let artifact = try artifactStore.append(
+            attempt,
+            meetingID: meeting.id,
+            selecting: true
+        )
+        let rawURL = fixture.root.appendingPathComponent(meeting.id.uuidString)
+            .appendingPathComponent(MeetingTranscriptArtifactStore.filename)
+        let rawBeforeProcessing = try Data(contentsOf: rawURL)
+        #expect(artifact.selectedAttempt?.retainedPreviews == [sameTurn])
+        #expect(artifact.selectedAttempt?.failures.count == 1)
+
+        let correctedTurns = assembled.map { turn in
+            MeetingProcessedTranscriptTurn(
+                id: turn.id,
+                utteranceIDs: turn.utteranceIDs,
+                startMilliseconds: turn.startMilliseconds,
+                endMilliseconds: turn.endMilliseconds,
+                speakerID: turn.speakerID,
+                speakerLabel: turn.speakerLabel,
+                text: turn.id == first.id
+                    ? "We chose Orca. Thank you. Same turn."
+                    : turn.text,
+                unclear: false
+            )
+        }
+        let processed = MeetingProcessedTranscript(
+            rawAttemptID: attempt.id,
+            terminologyHash: "orca-current",
+            turns: correctedTurns,
+            bullets: ["Orca was selected."],
+            corrections: [MeetingTranscriptCorrection(
+                id: UUID(),
+                utteranceIDs: [first.id],
+                kind: .terminology,
+                before: "orka",
+                after: "Orca",
+                reason: "Private terminology supplies the spelling.",
+                confidence: 1
+            )]
+        )
+        let analysis = MeetingAnalysis(
+            title: "Orca decision",
+            summary: "The current processed transcript records the Orca decision.",
+            topics: ["Orca"],
+            decisions: ["Use Orca"],
+            actionItems: [],
+            risks: [],
+            quotes: [.init(utteranceID: first.id, text: "Thank you")],
+            speakerSuggestions: []
+        )
+        let provider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(processed),
+            analysis: try JSONEncoder().encode(analysis)
+        )
+        let processedStore = MeetingProcessedTranscriptStore(rootURL: fixture.root)
+        let analysisService = MeetingAnalysisService(
+            provider: provider,
+            store: FileMeetingAnalysisStore(rootURL: fixture.root),
+            transcriptArtifactStore: artifactStore,
+            processedTranscriptStore: processedStore
+        )
+        let result = await analysisService.analyzeAfterFinalTranscription(
+            meeting: meeting,
+            utterances: utterances,
+            artifact: artifact,
+            terminology: ["Orca"],
+            terminologyHash: "orca-current"
+        )
+        #expect(result.failure == nil)
+        #expect(result.analysis?.summary.contains("Orca") == true)
+        #expect(await provider.analysisPrompts.first?.contains("We chose Orca. Thank you.") == true)
+        #expect(try Data(contentsOf: rawURL) == rawBeforeProcessing)
+        #expect(try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "orca-current"
+        ) == processed)
+
+        var invented = processed
+        invented = MeetingProcessedTranscript(
+            rawAttemptID: invented.rawAttemptID,
+            terminologyHash: "invented",
+            turns: invented.turns.enumerated().map { index, turn in
+                MeetingProcessedTranscriptTurn(
+                    id: turn.id,
+                    utteranceIDs: turn.utteranceIDs,
+                    startMilliseconds: turn.startMilliseconds,
+                    endMilliseconds: turn.endMilliseconds,
+                    speakerID: turn.speakerID,
+                    speakerLabel: turn.speakerLabel,
+                    text: index == 0 ? "Alice chose Orca. Thank you. Same turn." : turn.text,
+                    unclear: turn.unclear
+                )
+            },
+            bullets: [],
+            corrections: []
+        )
+        let inventedResult = await MeetingTranscriptProcessingService(
+            provider: AcceptancePipelineAI(
+                processing: try JSONEncoder().encode(invented),
+                analysis: try JSONEncoder().encode(analysis)
+            ),
+            store: processedStore
+        ).process(
+            meeting: meeting,
+            artifact: artifact,
+            terminology: ["Orca"],
+            terminologyHash: "invented"
+        )
+        #expect(inventedResult.failure == .schemaFailure)
+        #expect(try Data(contentsOf: rawURL) == rawBeforeProcessing)
+
+        let fallbackProvider = AcceptancePipelineAI(
+            processing: try JSONEncoder().encode(processed),
+            analysis: try JSONEncoder().encode(analysis)
+        )
+        await fallbackProvider.setProcessingFailure(.timedOut)
+        let fallback = await MeetingAnalysisService(
+            provider: fallbackProvider,
+            store: FileMeetingAnalysisStore(
+                rootURL: fixture.root.appendingPathComponent("raw-fallback")
+            ),
+            processedTranscriptStore: MeetingProcessedTranscriptStore(
+                rootURL: fixture.root.appendingPathComponent("raw-fallback")
+            )
+        ).analyzeAfterFinalTranscription(
+            meeting: meeting,
+            utterances: utterances,
+            artifact: artifact,
+            terminology: ["Orca"],
+            terminologyHash: "fallback"
+        )
+        #expect(fallback.failure == nil)
+        #expect(await fallbackProvider.analysisPrompts.first?.contains("FINAL RAW TRANSCRIPT") == true)
+        let analysisSchema = String(decoding: MeetingAnalysisSchema.jsonSchema, as: UTF8.self)
+        #expect(!analysisSchema.localizedCaseInsensitiveContains("follow-up"))
+        #expect(!analysisSchema.localizedCaseInsensitiveContains("render"))
+        #expect(!analysisSchema.localizedCaseInsensitiveContains("export"))
+
+        // Local playback controls never own transcript durability. Explicit
+        // audio deletion unloads the fake engine while raw/processed text stays readable.
+        let meetingStore = MeetingStore(rootURL: fixture.root)
+        let meetingDirectory = meetingStore.directoryURL(for: meeting.id)
+        try FileManager.default.createDirectory(
+            at: meetingDirectory,
+            withIntermediateDirectories: true
+        )
+        let audioURL = meetingDirectory.appendingPathComponent(
+            AudioRetentionController.retainedFilename
+        )
+        try Data([1, 2, 3, 4]).write(to: audioURL)
+        meeting.retainedAudio = RetainedAudioMetadata(
+            filename: AudioRetentionController.retainedFilename,
+            format: AudioRetentionController.retainedFormat,
+            sizeBytes: 4,
+            durationMilliseconds: 20_000
+        )
+        meeting.audioRetentionState = .retained
+        try meetingStore.save(meeting, utterances: utterances)
+        let retention = AudioRetentionController(store: meetingStore)
+        let engine = AcceptancePlaybackEngine(durationMilliseconds: 20_000)
+        let playback = MeetingAudioPlaybackController(retention: retention, engine: engine)
+        playback.load(meetingID: meeting.id)
+        playback.play()
+        playback.seek(to: 8_999)
+        playback.pause()
+        playback.play()
+        #expect(engine.seeks == [8_999])
+        #expect(playback.state == .playing)
+        _ = try retention.deleteRecording(for: meeting.id, confirmed: true)
+        playback.release()
+        #expect(playback.state == .idle)
+        #expect(playback.meetingID == nil)
+        #expect(try artifactStore.load(meetingID: meeting.id)?.selectedAttempt?.utterances
+            == utterances)
+        #expect(try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "orca-current"
+        )?.turns.first?.text.contains("Thank you") == true)
+
+        let prompt = MeetingImprovementPrompt.make(
+            meeting: meeting,
+            attempt: attempt,
+            processedTranscript: processed
+        )
+        #expect(prompt.count <= MeetingImprovementPrompt.maximumCharacters)
+        #expect(prompt.contains("Failure diagnostics:"))
+        #expect(!prompt.contains(first.text))
+        let reviewSource = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/BrainMenu/Views/MeetingTranscriptReviewView.swift"),
+            encoding: .utf8
+        )
+        #expect(reviewSource.contains("Button(\"Create Improvement Prompt\""))
+        #expect(reviewSource.contains("Button(\"Copy\")"))
+        #expect(!reviewSource.contains(".task {"))
+    }
+
+    @Test
     func quickCaptureUsesAdaptiveShortcutExplicitClipboardPickerAndDeliveredStatus() async throws {
         let defaults = try acceptanceDefaults("quick-hotkey")
         let panel = AcceptanceQuickPanel()
@@ -986,6 +1401,55 @@ private actor AcceptanceLiveClient: LiveTranscriptionClient {
         let name = wavURL.lastPathComponent
         let source = name.contains("microphone") ? "microphone" : "system"
         return "\(name.hasPrefix("preview") ? "preview" : "final") \(source)"
+    }
+}
+
+private actor AcceptanceReliabilityClient: LiveTranscriptionClient {
+    let failFinal: Bool
+    private(set) var requests: [String] = []
+
+    init(failFinal: Bool) {
+        self.failFinal = failFinal
+    }
+
+    func transcribe(wavURL: URL, engine: String) async throws -> String {
+        let name = wavURL.lastPathComponent
+        requests.append(name)
+        if failFinal, name.hasPrefix("final-") {
+            throw AIProviderError.timedOut
+        }
+        return name.contains("microphone") ? "preview microphone" : "preview system"
+    }
+}
+
+@MainActor
+private final class AcceptancePlaybackEngine: MeetingAudioPlaying {
+    let durationMilliseconds: Int64
+    var elapsedMilliseconds: Int64 = 0
+    var onProgress: (@MainActor (Int64) -> Void)?
+    var onCompletion: (@MainActor () -> Void)?
+    private(set) var seeks: [Int64] = []
+    private(set) var stopCount = 0
+
+    init(durationMilliseconds: Int64) {
+        self.durationMilliseconds = durationMilliseconds
+    }
+
+    func load(url: URL) throws {
+        elapsedMilliseconds = 0
+    }
+
+    func play() throws {}
+
+    func pause() {}
+
+    func stop() {
+        stopCount += 1
+    }
+
+    func seek(to milliseconds: Int64) throws {
+        seeks.append(milliseconds)
+        elapsedMilliseconds = milliseconds
     }
 }
 
