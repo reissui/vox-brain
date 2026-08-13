@@ -93,8 +93,7 @@ struct RecordingIslandControllerTests {
             startedAt: start,
             recordingKind: .voiceNote
         )))
-        #expect(controller.controls == [.pause, .stop])
-        #expect(!controller.controls.contains(.showTranscript))
+        #expect(controller.controls == [.showTranscript, .pause, .stop])
 
         controller.updateMeeting(.completed, meeting: nil)
         #expect(controller.presentation == .hidden)

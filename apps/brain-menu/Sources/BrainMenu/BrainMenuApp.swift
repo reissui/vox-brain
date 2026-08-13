@@ -949,8 +949,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             engine: engine,
             originHostTimestamp: ProcessInfo.processInfo.systemUptime,
             wavDirectory: store.directoryURL(for: request.meetingID)
-                .appendingPathComponent(".transcription", isDirectory: true),
-            chunkDuration: LiveTranscriptionService.previewChunkDuration
+                .appendingPathComponent(".transcription", isDirectory: true)
         ))
         let writer = try MeetingAudioWriter(
             meetingDirectory: store.directoryURL(for: request.meetingID),

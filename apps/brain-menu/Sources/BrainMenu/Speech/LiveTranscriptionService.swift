@@ -139,7 +139,7 @@ enum LiveTranscriptionServiceError: Error, Equatable, LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case .invalidConfiguration:
-            "Live transcription has an invalid origin, duration, queue bound, or threshold."
+            "Live transcription has an invalid capture origin."
         case .unsafeDirectory:
             "Live transcript WAV files require a private regular directory."
         case .alreadyStopped:
@@ -152,30 +152,22 @@ enum LiveTranscriptionServiceError: Error, Equatable, LocalizedError, Sendable {
     }
 }
 
-/// Chunks each source against one meeting clock while allowing microphone and
-/// system VoxType work to progress independently. A source has one worker and
-/// at most `maximumPendingChunksPerSource` queued WAVs behind it.
+/// Segments each source against one meeting clock while allowing microphone and
+/// system VoxType work to progress independently. A source has one active
+/// request and retains only its newest pending speech window behind it.
 actor LiveTranscriptionService {
     typealias EventHandler = @Sendable (LiveTranscriptionEvent) async -> Void
 
-    static let defaultChunkDuration: TimeInterval = 10
-    static let previewChunkDuration: TimeInterval = 3
-    static let defaultMaximumPendingChunksPerSource = 6
     static let defaultVoiceThreshold: Float = 0.01
 
     let engine: SpeechEngineID
     let originHostTimestamp: TimeInterval
-    let chunkDuration: TimeInterval
-    let maximumPendingChunksPerSource: Int
-
     private let client: any LiveTranscriptionClient
     private let wavDirectory: URL
     private let fileManager: FileManager
-    private let voiceThreshold: Float
     private let sampleRate = MeetingAudioWriter.sampleRate
-    private let chunkFrameCount: Int
 
-    private var windows: [MeetingAudioSource: SourceWindow] = [:]
+    private var segmenter = LivePreviewSegmenter()
     private var queues: [MeetingAudioSource: [PendingChunk]] = [:]
     private var workerTasks: [MeetingAudioSource: Task<Void, Never>] = [:]
     private var activeSources = Set<MeetingAudioSource>()
@@ -191,24 +183,9 @@ actor LiveTranscriptionService {
         engine: SpeechEngineID,
         originHostTimestamp: TimeInterval,
         wavDirectory: URL,
-        chunkDuration: TimeInterval = LiveTranscriptionService.defaultChunkDuration,
-        maximumPendingChunksPerSource: Int = LiveTranscriptionService
-            .defaultMaximumPendingChunksPerSource,
-        voiceThreshold: Float = LiveTranscriptionService.defaultVoiceThreshold,
         fileManager: FileManager = .default
     ) throws {
-        guard originHostTimestamp.isFinite,
-              chunkDuration.isFinite,
-              chunkDuration == Self.defaultChunkDuration
-                || chunkDuration == Self.previewChunkDuration,
-              maximumPendingChunksPerSource > 0,
-              maximumPendingChunksPerSource <= Self.defaultMaximumPendingChunksPerSource,
-              voiceThreshold.isFinite,
-              voiceThreshold >= 0 else {
-            throw LiveTranscriptionServiceError.invalidConfiguration
-        }
-        let frames = Int((chunkDuration * Double(MeetingAudioWriter.sampleRate)).rounded())
-        guard frames > 0 else {
+        guard originHostTimestamp.isFinite else {
             throw LiveTranscriptionServiceError.invalidConfiguration
         }
 
@@ -216,11 +193,7 @@ actor LiveTranscriptionService {
         self.engine = engine
         self.originHostTimestamp = originHostTimestamp
         self.wavDirectory = wavDirectory.standardizedFileURL
-        self.chunkDuration = chunkDuration
-        self.maximumPendingChunksPerSource = maximumPendingChunksPerSource
-        self.voiceThreshold = voiceThreshold
         self.fileManager = fileManager
-        chunkFrameCount = frames
         try Self.preparePrivateDirectory(self.wavDirectory, fileManager: fileManager)
     }
 
@@ -246,73 +219,13 @@ actor LiveTranscriptionService {
         }
         guard firstSampleIndex < normalized.count else { return }
 
-        var globalFrame = firstGlobalFrame
-        var sampleIndex = firstSampleIndex
-        while sampleIndex < normalized.count {
-            var window = windows[buffer.source] ?? SourceWindow()
-            let targetIndex = globalFrame / Int64(chunkFrameCount)
-
-            if let currentIndex = window.index, targetIndex > currentIndex {
-                if let chunk = finishWindow(
-                    source: buffer.source,
-                    window: window,
-                    fullWindow: true
-                ) {
-                    await enqueue(chunk)
-                }
-                window = SourceWindow(nextMinimumIndex: currentIndex + 1)
-            }
-
-            if window.index == nil {
-                guard targetIndex >= window.nextMinimumIndex else {
-                    let obsoleteFrames = min(
-                        normalized.count - sampleIndex,
-                        Int((window.nextMinimumIndex * Int64(chunkFrameCount)) - globalFrame)
-                    )
-                    guard obsoleteFrames > 0 else { break }
-                    sampleIndex += obsoleteFrames
-                    globalFrame += Int64(obsoleteFrames)
-                    windows[buffer.source] = window
-                    continue
-                }
-                window.begin(index: targetIndex, frameCount: chunkFrameCount)
-            }
-
-            guard let currentIndex = window.index else { break }
-            if targetIndex < currentIndex {
-                let skip = min(
-                    normalized.count - sampleIndex,
-                    Int((Int64(currentIndex) * Int64(chunkFrameCount)) - globalFrame)
-                )
-                guard skip > 0 else { break }
-                sampleIndex += skip
-                globalFrame += Int64(skip)
-                windows[buffer.source] = window
-                continue
-            }
-
-            let offset = Int(globalFrame % Int64(chunkFrameCount))
-            let count = min(normalized.count - sampleIndex, chunkFrameCount - offset)
-            let values = normalized[sampleIndex..<(sampleIndex + count)]
-            window.samples.replaceSubrange(offset..<(offset + count), with: values)
-            window.lastWrittenOffset = max(window.lastWrittenOffset, offset + count)
-            if !window.hasVoice {
-                window.hasVoice = values.contains { abs($0) >= voiceThreshold }
-            }
-            sampleIndex += count
-            globalFrame += Int64(count)
-
-            if offset + count == chunkFrameCount {
-                if let chunk = finishWindow(
-                    source: buffer.source,
-                    window: window,
-                    fullWindow: true
-                ) {
-                    await enqueue(chunk)
-                }
-                window = SourceWindow(nextMinimumIndex: currentIndex + 1)
-            }
-            windows[buffer.source] = window
+        let segments = segmenter.append(
+            source: buffer.source,
+            startFrame: firstGlobalFrame,
+            samples: Array(normalized[firstSampleIndex...])
+        )
+        for segment in segments {
+            await enqueue(PendingSamples(segment: segment))
         }
     }
 
@@ -360,15 +273,10 @@ actor LiveTranscriptionService {
             )
         }
 
-        let tailChunks = MeetingAudioSource.allCases.compactMap { source -> PendingSamples? in
-            guard let window = windows[source], window.index != nil else { return nil }
-            return finishWindow(source: source, window: window, fullWindow: false)
-        }
-        await cancelPreviewWork()
-        // Preserve at most one unfinished preview window per source. This keeps
-        // short acknowledgements that fall below final VAD thresholds without
-        // draining an arbitrary backlog before final transcription.
+        let tailChunks = segmenter.flush().map(PendingSamples.init(segment:))
         for chunk in tailChunks { await enqueue(chunk) }
+        // The public stop boundary settles the one active and newest pending
+        // preview per source before starting authoritative final transcription.
         await drainWorkers()
         if wasCancelled || Task.isCancelled {
             isStopping = false
@@ -433,6 +341,7 @@ actor LiveTranscriptionService {
     func cancel() async {
         wasCancelled = true
         isStopping = true
+        segmenter.cancel()
         let finalTask = finalizationTask
         finalTask?.cancel()
         let tasks = Array(workerTasks.values)
@@ -446,7 +355,6 @@ actor LiveTranscriptionService {
         workerTasks.removeAll()
         finalizationTask = nil
         activeSources.removeAll()
-        windows.removeAll()
         isStopping = false
         isStopped = true
         MeetingTranscriptionAudioCleanup.removeDirectoryIfEmpty(
@@ -455,58 +363,12 @@ actor LiveTranscriptionService {
         )
     }
 
-    /// Preview text is opportunistic. Stop never waits for queued preview
-    /// commands before starting the authoritative final pass, and cancellation
-    /// is propagated to any in-flight VoxType child process.
-    private func cancelPreviewWork() async {
-        windows.removeAll()
-        let tasks = Array(workerTasks.values)
-        for task in tasks { task.cancel() }
-        for task in tasks { await task.value }
-        for queue in queues.values {
-            for chunk in queue { try? fileManager.removeItem(at: chunk.wavURL) }
-        }
-        queues.removeAll()
-        workerTasks.removeAll()
-        activeSources.removeAll()
-    }
-
     private var previewLagState: LiveTranscriptPreviewLagState {
         let values = droppedChunks.filter { $0.value > 0 }
         return values.isEmpty ? .current : .lagging(droppedChunksBySource: values)
     }
 
-    private func finishWindow(
-        source: MeetingAudioSource,
-        window: SourceWindow,
-        fullWindow: Bool
-    ) -> PendingSamples? {
-        guard let index = window.index,
-              window.hasVoice,
-              window.lastWrittenOffset > 0 else { return nil }
-        let frameCount = fullWindow ? chunkFrameCount : window.lastWrittenOffset
-        let start = Int64(
-            (Double(index * Int64(chunkFrameCount)) / Double(sampleRate) * 1_000).rounded()
-        )
-        let end = Int64(
-            (Double(index * Int64(chunkFrameCount) + Int64(frameCount))
-                / Double(sampleRate) * 1_000).rounded()
-        )
-        return PendingSamples(
-            source: source,
-            startMilliseconds: start,
-            endMilliseconds: end,
-            samples: Array(window.samples.prefix(frameCount))
-        )
-    }
-
     private func enqueue(_ samples: PendingSamples) async {
-        if queues[samples.source, default: []].count >= maximumPendingChunksPerSource {
-            droppedChunks[samples.source, default: 0] += 1
-            await eventHandler(.previewLagChanged(previewLagState))
-            return
-        }
-
         do {
             let url = try writePreviewWAV(samples)
             let pending = PendingChunk(
@@ -515,13 +377,13 @@ actor LiveTranscriptionService {
                 endMilliseconds: samples.endMilliseconds,
                 wavURL: url
             )
-            queues[samples.source, default: []].append(pending)
-            queues[samples.source]?.sort {
-                if $0.startMilliseconds != $1.startMilliseconds {
-                    return $0.startMilliseconds < $1.startMilliseconds
-                }
-                return $0.endMilliseconds < $1.endMilliseconds
+            let replaced = queues[samples.source, default: []]
+            if !replaced.isEmpty {
+                for chunk in replaced { try? fileManager.removeItem(at: chunk.wavURL) }
+                droppedChunks[samples.source, default: 0] += replaced.count
+                await eventHandler(.previewLagChanged(previewLagState))
             }
+            queues[samples.source] = [pending]
             startWorkerIfNeeded(for: samples.source)
         } catch {
             await eventHandler(.failure(LiveTranscriptFailure(
@@ -903,33 +765,18 @@ private enum FinalSpanOutcome: Sendable {
     case failure(LiveTranscriptFailure, stopSource: Bool)
 }
 
-private struct SourceWindow {
-    var index: Int64?
-    var nextMinimumIndex: Int64
-    var samples: [Float]
-    var lastWrittenOffset = 0
-    var hasVoice = false
-
-    init(nextMinimumIndex: Int64 = 0) {
-        index = nil
-        self.nextMinimumIndex = nextMinimumIndex
-        samples = []
-    }
-
-    mutating func begin(index: Int64, frameCount: Int) {
-        self.index = index
-        nextMinimumIndex = index
-        samples = [Float](repeating: 0, count: frameCount)
-        lastWrittenOffset = 0
-        hasVoice = false
-    }
-}
-
 private struct PendingSamples: Sendable {
     let source: MeetingAudioSource
     let startMilliseconds: Int64
     let endMilliseconds: Int64
     let samples: [Float]
+
+    init(segment: LivePreviewSegmenter.Segment) {
+        source = segment.source
+        startMilliseconds = segment.startMilliseconds
+        endMilliseconds = segment.endMilliseconds
+        samples = segment.samples
+    }
 }
 
 private struct PendingChunk: Sendable {
