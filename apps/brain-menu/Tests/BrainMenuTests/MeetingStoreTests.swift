@@ -5,6 +5,88 @@ import Testing
 @Suite(.serialized)
 struct MeetingStoreTests {
     @Test
+    func legacyTranscriptExposesUnverifiedRawAttemptWithoutMigrationWrite() throws {
+        let temp = try StoreTestDirectory()
+        let store = MeetingStore(rootURL: temp.url)
+        let record = makeRecord(title: "Legacy raw", startedAt: 100)
+        let transcript = [try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 1_000,
+            text: "legacy words",
+            baseSpeakerID: "you"
+        )]
+        try store.save(record, utterances: transcript)
+        let meetingURL = store.directoryURL(for: record.id)
+            .appendingPathComponent(MeetingStore.meetingFilename)
+        var object = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: meetingURL)) as? [String: Any]
+        )
+        object.removeValue(forKey: "selectedRawTranscriptAttemptID")
+        object.removeValue(forKey: "rawTranscriptSchemaVersion")
+        try JSONSerialization.data(withJSONObject: object).write(to: meetingURL)
+
+        let before = try Set(FileManager.default.contentsOfDirectory(
+            atPath: store.directoryURL(for: record.id).path
+        ))
+        let loaded = try store.load(record.id)
+        let after = try Set(FileManager.default.contentsOfDirectory(
+            atPath: store.directoryURL(for: record.id).path
+        ))
+
+        #expect(loaded.rawTranscriptArtifacts?.attempts.count == 1)
+        #expect(loaded.rawTranscriptArtifacts?.selectedAttempt?.utterances == transcript)
+        #expect(loaded.rawTranscriptArtifacts?.selectedAttempt?.modelAttestation.verificationState
+            == .unverifiedLegacy)
+        #expect(loaded.meeting.selectedRawTranscriptAttemptID
+            == loaded.rawTranscriptArtifacts?.selectedAttemptID)
+        #expect(before == after)
+        #expect(!after.contains(MeetingTranscriptArtifactStore.filename))
+    }
+
+    @Test
+    func transcriptEditsAndMeetingStateChangesDoNotMutateRawArtifacts() throws {
+        let temp = try StoreTestDirectory()
+        let store = MeetingStore(rootURL: temp.url)
+        let artifactStore = MeetingTranscriptArtifactStore(rootURL: temp.url)
+        var record = makeRecord(title: "Immutable raw", startedAt: 100)
+        let rawUtterance = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 1_000,
+            text: "engine text",
+            baseSpeakerID: "you"
+        )
+        let attempt = MeetingTranscriptAttempt(
+            modelAttestation: MeetingTranscriptModelAttestation(meeting: record),
+            utterances: [rawUtterance],
+            isSuccessful: true
+        )
+        _ = try artifactStore.append(
+            attempt,
+            meetingID: record.id,
+            selecting: true
+        )
+        record.selectedRawTranscriptAttemptID = attempt.id
+        try store.save(record, utterances: [rawUtterance])
+        let rawURL = store.directoryURL(for: record.id)
+            .appendingPathComponent(MeetingTranscriptArtifactStore.filename)
+        let before = try Data(contentsOf: rawURL)
+
+        var edited = rawUtterance
+        edited.text = "human edit"
+        edited.suppressed = true
+        record.analysisState = .completed
+        record.uploadState = .delivered
+        try store.save(record, utterances: [edited])
+
+        #expect(try Data(contentsOf: rawURL) == before)
+        #expect(try artifactStore.load(meetingID: record.id)?.selectedAttempt?.utterances
+            == [rawUtterance])
+        #expect(try store.load(record.id).utterances == [edited])
+    }
+
+    @Test
     func roundTripsUnicodeAndRejectsInvalidUtteranceTimes() throws {
         let temp = try StoreTestDirectory()
         let store = MeetingStore(rootURL: temp.url)

@@ -73,6 +73,7 @@ final class MeetingStore: @unchecked Sendable {
     static let maximumRecords = 1_000
     static let meetingFilename = MeetingStoreFile.meeting.rawValue
     static let transcriptFilename = MeetingStoreFile.transcript.rawValue
+    static let rawTranscriptFilename = MeetingTranscriptArtifactStore.filename
 
     static var productionRootURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -85,6 +86,7 @@ final class MeetingStore: @unchecked Sendable {
     let rootURL: URL
 
     private let fileManager: FileManager
+    private let transcriptArtifactStore: MeetingTranscriptArtifactStore
     private let failureInjector: (@Sendable (MeetingStoreWriteEvent) throws -> Void)?
     private let lock = NSLock()
     private static let mutationRegistry = MeetingStoreMutationRegistry()
@@ -92,10 +94,13 @@ final class MeetingStore: @unchecked Sendable {
     init(
         rootURL: URL = MeetingStore.productionRootURL,
         fileManager: FileManager = .default,
+        transcriptArtifactStore: MeetingTranscriptArtifactStore? = nil,
         failureInjector: (@Sendable (MeetingStoreWriteEvent) throws -> Void)? = nil
     ) {
         self.rootURL = rootURL.standardizedFileURL
         self.fileManager = fileManager
+        self.transcriptArtifactStore = transcriptArtifactStore
+            ?? MeetingTranscriptArtifactStore(rootURL: rootURL, fileManager: fileManager)
         self.failureInjector = failureInjector
     }
 
@@ -331,6 +336,7 @@ final class MeetingStore: @unchecked Sendable {
 
         var meeting: MeetingRecord
         let usesLegacyTranscriptionSchema: Bool
+        let usesLegacyRawTranscriptSchema: Bool
         do {
             let meetingData = try Data(contentsOf: meetingURL)
             meeting = try Self.decoder().decode(
@@ -339,6 +345,7 @@ final class MeetingStore: @unchecked Sendable {
             )
             let object = try JSONSerialization.jsonObject(with: meetingData) as? [String: Any]
             usesLegacyTranscriptionSchema = object?["transcriptionState"] == nil
+            usesLegacyRawTranscriptSchema = object?["rawTranscriptSchemaVersion"] == nil
         } catch {
             throw ClassifiedLoadError(reason: .corruptMeeting)
         }
@@ -374,7 +381,45 @@ final class MeetingStore: @unchecked Sendable {
                 "This older meeting contains an unavailable transcript. Retry from the saved recording."
             orderedUtterances.removeAll(where: Self.isLegacyUnavailableUtterance)
         }
-        return StoredMeeting(meeting: meeting, utterances: orderedUtterances)
+        let artifacts: MeetingTranscriptArtifact?
+        do {
+            artifacts = try transcriptArtifactStore.load(meetingID: id)
+        } catch let error as MeetingTranscriptArtifactStoreError {
+            switch error {
+            case .unsafeStorePath:
+                throw ClassifiedLoadError(reason: .unsafeEntry)
+            default:
+                throw ClassifiedLoadError(reason: .corruptTranscript)
+            }
+        }
+        if let selectedID = meeting.selectedRawTranscriptAttemptID {
+            guard let artifacts else {
+                throw ClassifiedLoadError(reason: .missingTranscript)
+            }
+            guard artifacts.attempts.contains(where: {
+                $0.id == selectedID && $0.isSuccessful
+            }) else {
+                throw ClassifiedLoadError(reason: .corruptTranscript)
+            }
+        }
+        var exposedArtifacts = artifacts
+        if artifacts == nil && usesLegacyRawTranscriptSchema {
+            let legacyAttempt = MeetingTranscriptAttempt.legacy(
+                meeting: meeting,
+                utterances: orderedUtterances
+            )
+            exposedArtifacts = MeetingTranscriptArtifact(
+                meetingID: meeting.id,
+                attempts: [legacyAttempt],
+                selectedAttemptID: legacyAttempt.isSuccessful ? legacyAttempt.id : nil
+            )
+            meeting.selectedRawTranscriptAttemptID = exposedArtifacts?.selectedAttemptID
+        }
+        return StoredMeeting(
+            meeting: meeting,
+            utterances: orderedUtterances,
+            rawTranscriptArtifacts: exposedArtifacts
+        )
     }
 
     private static func isRecoverableLegacyPlaceholderTranscript(

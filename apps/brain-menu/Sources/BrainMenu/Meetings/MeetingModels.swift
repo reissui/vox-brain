@@ -104,6 +104,8 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     var transcriptionState: MeetingTranscriptionState
     var transcriptionAttemptCount: Int
     var transcriptionErrorMessage: String?
+    var selectedRawTranscriptAttemptID: UUID?
+    var rawTranscriptSchemaVersion: Int?
     var analysisState: MeetingAnalysisState
     var uploadState: MeetingUploadState
     var retainedAudio: RetainedAudioMetadata?
@@ -112,6 +114,11 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
 
     var isVoiceNote: Bool {
         recordingKind == .voiceNote
+    }
+
+    var selectedRawAttemptID: UUID? {
+        get { selectedRawTranscriptAttemptID }
+        set { selectedRawTranscriptAttemptID = newValue }
     }
 
     var acceptsAutomaticAnalysisTitle: Bool {
@@ -137,6 +144,8 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         transcriptionState: MeetingTranscriptionState? = nil,
         transcriptionAttemptCount: Int = 0,
         transcriptionErrorMessage: String? = nil,
+        selectedRawTranscriptAttemptID: UUID? = nil,
+        rawTranscriptSchemaVersion: Int? = MeetingTranscriptArtifact.currentSchemaVersion,
         analysisState: MeetingAnalysisState = .notRequested,
         uploadState: MeetingUploadState = .notUploaded,
         retainedAudio: RetainedAudioMetadata? = nil,
@@ -167,6 +176,8 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
             ?? (lifecycleState == .completed ? .completed : .pending)
         self.transcriptionAttemptCount = max(0, transcriptionAttemptCount)
         self.transcriptionErrorMessage = transcriptionErrorMessage
+        self.selectedRawTranscriptAttemptID = selectedRawTranscriptAttemptID
+        self.rawTranscriptSchemaVersion = rawTranscriptSchemaVersion
         self.analysisState = analysisState
         self.uploadState = uploadState
         self.retainedAudio = retainedAudio
@@ -195,6 +206,8 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         case transcriptionState
         case transcriptionAttemptCount
         case transcriptionErrorMessage
+        case selectedRawTranscriptAttemptID
+        case rawTranscriptSchemaVersion
         case analysisState
         case uploadState
         case retainedAudio
@@ -265,6 +278,14 @@ struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
             transcriptionErrorMessage: try container.decodeIfPresent(
                 String.self,
                 forKey: .transcriptionErrorMessage
+            ),
+            selectedRawTranscriptAttemptID: try container.decodeIfPresent(
+                UUID.self,
+                forKey: .selectedRawTranscriptAttemptID
+            ),
+            rawTranscriptSchemaVersion: try container.decodeIfPresent(
+                Int.self,
+                forKey: .rawTranscriptSchemaVersion
             ),
             analysisState: try container.decode(MeetingAnalysisState.self, forKey: .analysisState),
             uploadState: try container.decode(MeetingUploadState.self, forKey: .uploadState),
@@ -485,4 +506,19 @@ typealias RetainedMeetingAudio = RetainedAudioMetadata
 struct StoredMeeting: Equatable, Sendable {
     var meeting: MeetingRecord
     var utterances: [MeetingUtterance]
+    var rawTranscriptArtifacts: MeetingTranscriptArtifact?
+
+    init(
+        meeting: MeetingRecord,
+        utterances: [MeetingUtterance],
+        rawTranscriptArtifacts: MeetingTranscriptArtifact? = nil
+    ) {
+        self.meeting = meeting
+        self.utterances = utterances
+        self.rawTranscriptArtifacts = rawTranscriptArtifacts
+    }
+
+    var transcriptArtifacts: MeetingTranscriptArtifact? {
+        rawTranscriptArtifacts
+    }
 }
