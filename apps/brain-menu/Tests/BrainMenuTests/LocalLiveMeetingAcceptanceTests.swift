@@ -51,8 +51,11 @@ extension AppIntegrationTests {
             let meeting = MeetingController(
                 detector: LocalLiveMeetingDetector(),
                 recorder: recorder,
-                speechEngine: "parakeet",
-                speechModel: "parakeet-tdt-0.6b-v3"
+                speechEngine: "whisper",
+                speechModel: "large-v3",
+                modelAttester: LocalLiveMeetingModelAttester(
+                    result: .success(.largeV3)
+                )
             )
             let island = RecordingIslandController(
                 defaults: defaults,
@@ -92,6 +95,9 @@ extension AppIntegrationTests {
             await eventually { graph.meetingNotes.state == .saved }
 
             let meetingID = try #require(meeting.currentMeeting?.id)
+            #expect(meeting.currentMeeting?.requestedSpeechSelection == .largeV3)
+            #expect(meeting.currentMeeting?.effectiveSpeechSelection == .largeV3)
+            #expect(meeting.currentMeeting?.speechVerificationState == .verified)
             let applicationIsActiveAfterPresentation = NSApplication.shared.isActive
             #expect(meeting.state == .recording)
             #expect(graph.meetingLivePanel.isPresented)
@@ -137,6 +143,11 @@ extension AppIntegrationTests {
             #expect(
                 recorder.liveTranscriptController?.utterances
                     .contains { $0.text == LocalLiveMeetingVoxTypeClient.previewText } == false)
+            #expect(recorder.liveTranscriptController?.finalEngine == SpeechEngineID.whisper.rawValue)
+            #expect(recorder.liveTranscriptController?.finalSpanOutcomes.allSatisfy {
+                $0.attestedEngine == SpeechEngineID.whisper.rawValue
+                    && $0.attestedModel == SpeechEngineCatalog.englishDefaultModelID
+            } == true)
             #expect(try notesStore.load(meetingID: meetingID) == latestNotes)
             #expect(
                 try String(
@@ -207,6 +218,39 @@ extension AppIntegrationTests {
             #expect(QuickCaptureMode.allCases == [.note, .link])
 
             try assertLocalOnlyDistribution(fixture: fixture)
+        }
+
+        @Test
+        func modelIdentityMismatchBlocksRecordingBeforeAudioStarts() async throws {
+            let fixture = try LocalLiveMeetingFixture()
+            defer { fixture.remove() }
+            let recorder = try LocalLiveMeetingRecorder(
+                root: fixture.meetings,
+                meetingStore: MeetingStore(rootURL: fixture.meetings)
+            )
+            let controller = MeetingController(
+                detector: LocalLiveMeetingDetector(),
+                recorder: recorder,
+                speechEngine: "whisper",
+                speechModel: "large-v3",
+                modelAttester: LocalLiveMeetingModelAttester(result: .failure(
+                    VoxTypeModelAttestationError.modelMismatch(
+                        requested: "large-v3",
+                        effective: "large-v3-turbo"
+                    )
+                ))
+            )
+
+            await controller.startRecording(application: nil)
+
+            #expect(controller.state == .failed)
+            #expect(controller.currentMeeting == nil)
+            #expect(recorder.startCount == 0)
+            guard case .speechModelUnavailable(let message) = controller.failure else {
+                Issue.record("Expected a visible model-attestation failure")
+                return
+            }
+            #expect(message.contains("large-v3-turbo"))
         }
 
         private func eventually(
@@ -286,6 +330,7 @@ private final class LocalLiveMeetingRecorder: MeetingRecording {
     private var notesFlushHandler: (@MainActor @Sendable () async -> Void)?
 
     private(set) var stopCount = 0
+    private(set) var startCount = 0
     var liveTranscriptController: LiveTranscriptController? { transcript }
 
     init(root: URL, meetingStore: MeetingStore) throws {
@@ -294,7 +339,8 @@ private final class LocalLiveMeetingRecorder: MeetingRecording {
         transcript = LiveTranscriptController(
             service: try LiveTranscriptionService(
                 client: LocalLiveMeetingVoxTypeClient(),
-                engine: .parakeet,
+                engine: .whisper,
+                attestedModel: SpeechEngineCatalog.englishDefaultModelID,
                 originHostTimestamp: 100,
                 wavDirectory: root.appendingPathComponent("voxtype-live-\(UUID().uuidString)")
             ))
@@ -313,6 +359,7 @@ private final class LocalLiveMeetingRecorder: MeetingRecording {
     }
 
     func start(_ request: MeetingRecordingRequest) async throws {
+        startCount += 1
         self.request = request
         let writer = try MeetingAudioWriter(
             meetingDirectory: root.appendingPathComponent(request.meetingID.uuidString),
@@ -352,8 +399,11 @@ private final class LocalLiveMeetingRecorder: MeetingRecording {
             startedAt: request.startedAt,
             endedAt: date,
             lifecycleState: .completed,
-            speechEngine: "parakeet",
-            speechModel: "parakeet-tdt-0.6b-v3",
+            speechEngine: request.speechModelAttestation?.effectiveSelection.engine.rawValue
+                ?? "whisper",
+            speechModel: request.speechModelAttestation?.effectiveSelection.modelID
+                ?? "large-v3",
+            speechModelAttestation: request.speechModelAttestation,
             transcriptionState: .completed
         )
         try meetingStore.save(completed, utterances: transcript.utterances)
@@ -378,6 +428,32 @@ private final class LocalLiveMeetingRecorder: MeetingRecording {
             }
         )
     }
+}
+
+private extension SpeechEngineSelection {
+    static let largeV3 = SpeechEngineSelection(engine: .whisper, modelID: "large-v3")
+}
+
+@MainActor
+private final class LocalLiveMeetingModelAttester: VoxTypeModelAttesting {
+    let result: Result<VoxTypeModelAttestation, Error>
+
+    init(result: Result<VoxTypeModelAttestation, Error>) {
+        self.result = result
+    }
+
+    func attestCurrentSelection() async throws -> VoxTypeModelAttestation {
+        try result.get()
+    }
+}
+
+private extension VoxTypeModelAttestation {
+    static let largeV3 = VoxTypeModelAttestation(
+        requestedSelection: .largeV3,
+        effectiveSelection: .largeV3,
+        verifiedAt: Date(timeIntervalSince1970: 1_784_208_000),
+        voxTypeVersion: VoxTypeVersion(major: 0, minor: 7, patch: 5, prerelease: nil)
+    )
 }
 
 private actor LocalLiveMeetingVoxTypeClient: LiveTranscriptionClient {

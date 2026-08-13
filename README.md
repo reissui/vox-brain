@@ -22,10 +22,18 @@ never use the source checkout as the vault.
 VoxType owns speech: recording, transcription, shortcut, limits, models, and
 output behavior. Brain can enable its included VoxType copy and select an
 explicit model, while a compatible standalone installation takes precedence.
+Whisper Large v3 is Brain's single verified default for dictation, live meeting
+preview, and final meeting transcription. Other catalog models remain
+available as explicit fallbacks, but Brain verifies the requested and active
+model identities match before a recording starts.
 
 Meetings use a floating **Transcript / Notes** panel. Transcript text is
 produced on the Mac; Notes autosave locally and remain available for recovery.
-Only finalized text is ingested into the vault—meeting audio stays on the
+After final transcription, Brain keeps immutable raw evidence and creates a
+separate, replaceable processed transcript for readable review and optional AI
+analysis. Review defaults to the current processed transcript and always
+offers the raw fallback. Retained audio has local playback and timestamp seek;
+only finalized text is ingested into the vault and meeting audio stays on the
 recording Mac. See [the meeting guide](integrations/meetings.md).
 
 From a source checkout:
