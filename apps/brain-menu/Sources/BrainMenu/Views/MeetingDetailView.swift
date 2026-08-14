@@ -168,6 +168,34 @@ protocol MeetingTranscriptProcessingControlling: Sendable {
         terminology: [String],
         terminologyHash: String
     ) async -> MeetingTranscriptProcessingRunResult
+    func regenerate(
+        meeting: MeetingRecord,
+        artifact: MeetingTranscriptArtifact,
+        speakerState: SpeakerEditingState,
+        notes: String,
+        terminology: [String],
+        terminologyHash: String
+    ) async -> MeetingTranscriptProcessingRunResult
+}
+
+extension MeetingTranscriptProcessingControlling {
+    func regenerate(
+        meeting: MeetingRecord,
+        artifact: MeetingTranscriptArtifact,
+        speakerState: SpeakerEditingState,
+        notes: String,
+        terminology: [String],
+        terminologyHash: String
+    ) async -> MeetingTranscriptProcessingRunResult {
+        await process(
+            meeting: meeting,
+            artifact: artifact,
+            speakerState: speakerState,
+            notes: notes,
+            terminology: terminology,
+            terminologyHash: terminologyHash
+        )
+    }
 }
 
 extension MeetingTranscriptProcessingService: MeetingTranscriptProcessingControlling {}
@@ -287,7 +315,7 @@ enum MeetingDetailAction: Equatable, Sendable {
     case reanalyze
     case copyFullTranscript
     case selectTranscriptReviewMode(MeetingTranscriptReviewMode)
-    case retryTranscriptProcessing
+    case regenerateTranscript
     case seekAudio(Int64)
     case revealAudio
     case exportAudio(URL?)
@@ -349,7 +377,7 @@ final class MeetingDetailController {
     private(set) var rawTranscriptArtifact: MeetingTranscriptArtifact?
     private(set) var processedTranscript: MeetingProcessedTranscript?
     private(set) var transcriptProcessingMessage: String?
-    private(set) var isTranscriptProcessingRetryInProgress = false
+    private(set) var isTranscriptRegenerationInProgress = false
     @ObservationIgnored private var lastKnownRecordingKind: MeetingRecordingKind = .meeting
 
     init(
@@ -541,7 +569,7 @@ final class MeetingDetailController {
         return MeetingTranscriptReviewViewModel(
             mode: transcriptReviewMode,
             processedIsCurrent: processedTranscript != nil,
-            processingIsRetrying: isTranscriptProcessingRetryInProgress,
+            processingIsRegenerating: isTranscriptRegenerationInProgress,
             processingMessage: transcriptProcessingMessage,
             bullets: Array(processedTranscript?.bullets.prefix(8) ?? []),
             rawRows: rawRows,
@@ -558,7 +586,8 @@ final class MeetingDetailController {
                 verificationLabel: verificationLabel,
                 isVerified: isVerified
             ),
-            canCreateImprovementPrompt: true
+            canCreateImprovementPrompt: transcriptReviewMode == .raw
+                || processedTranscript != nil
         )
     }
 
@@ -567,7 +596,9 @@ final class MeetingDetailController {
         return MeetingImprovementPrompt.make(
             meeting: meeting,
             attempt: attempt,
-            processedTranscript: processedTranscript
+            processedTranscript: transcriptReviewMode == .processed
+                ? processedTranscript
+                : nil
         )
     }
 
@@ -663,8 +694,8 @@ final class MeetingDetailController {
         transcriptProcessingMessage = nil
     }
 
-    private func retryTranscriptProcessing() async {
-        guard !isTranscriptProcessingRetryInProgress,
+    private func regenerateTranscript() async {
+        guard !isTranscriptRegenerationInProgress,
               let transcriptProcessingController,
               let meeting,
               let artifact = rawTranscriptArtifact,
@@ -672,11 +703,11 @@ final class MeetingDetailController {
             transcriptProcessingMessage = "Configure and test a local AI provider before retrying processing."
             return
         }
-        isTranscriptProcessingRetryInProgress = true
+        isTranscriptRegenerationInProgress = true
         transcriptReviewMode = .processed
         transcriptProcessingMessage = "Comparing the raw transcript with audio-derived evidence…"
-        defer { isTranscriptProcessingRetryInProgress = false }
-        let result = await transcriptProcessingController.process(
+        defer { isTranscriptRegenerationInProgress = false }
+        let result = await transcriptProcessingController.regenerate(
             meeting: meeting,
             artifact: artifact,
             speakerState: editor.state,
@@ -772,7 +803,7 @@ final class MeetingDetailController {
               transcriptProcessingController != nil else { return }
         transcriptProcessingTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.retryTranscriptProcessing()
+            await self.regenerateTranscript()
             self.transcriptProcessingTask = nil
         }
     }
@@ -824,8 +855,8 @@ final class MeetingDetailController {
             copyFullTranscript()
         case .selectTranscriptReviewMode(let mode):
             transcriptReviewMode = mode
-        case .retryTranscriptProcessing:
-            await retryTranscriptProcessing()
+        case .regenerateTranscript:
+            await regenerateTranscript()
         case .seekAudio(let milliseconds):
             audioPlayback.seek(to: milliseconds)
         case .revealAudio:
@@ -1192,6 +1223,7 @@ final class MeetingDetailController {
 struct MeetingDetailView: View {
     @State private var controller: MeetingDetailController
     @State private var speakerNames: [String: String] = [:]
+    @State private var showsTranscriptHighlights = false
 
     init(controller: MeetingDetailController) {
         _controller = State(initialValue: controller)
@@ -1283,6 +1315,7 @@ struct MeetingDetailView: View {
                 ForEach(MeetingDetailTab.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
+            .labelsHidden()
             .padding()
             Divider()
             if model.tab == .summary {
@@ -1304,7 +1337,20 @@ struct MeetingDetailView: View {
                     }
                     .accessibilityLabel(model.isVoiceNote ? "Voice note title" : "Meeting title")
                 Spacer()
-                Menu(model.isVoiceNote ? "Voice note actions" : "Meeting actions", systemImage: "ellipsis.circle") {
+                Menu("Actions", systemImage: "ellipsis.circle") {
+                    if model.audioControls.contains(.reveal) {
+                        Button("Reveal in Finder", systemImage: "folder") {
+                            Task { await controller.perform(.revealAudio) }
+                        }
+                    }
+                    if model.audioControls.contains(.export) {
+                        Button("Export", systemImage: "square.and.arrow.up") {
+                            exportAudio()
+                        }
+                    }
+                    if model.audioControls.contains(.reveal) || model.audioControls.contains(.export) {
+                        Divider()
+                    }
                     Button(
                         model.isVoiceNote ? "Move to Meetings" : "Move to Voice Notes",
                         systemImage: "arrow.left.arrow.right"
@@ -1400,6 +1446,7 @@ struct MeetingDetailView: View {
     private func summary(_ model: MeetingDetailViewModel) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                transcriptHighlightsSection(model)
                 analysisSection(model)
                 if !model.isVoiceNote {
                     talkTimeSection(model)
@@ -1411,6 +1458,24 @@ struct MeetingDetailView: View {
             .padding()
             .frame(maxWidth: 820)
             .frame(maxWidth: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private func transcriptHighlightsSection(_ model: MeetingDetailViewModel) -> some View {
+        if let highlights = model.transcriptReview?.bullets, !highlights.isEmpty {
+            DisclosureGroup(isExpanded: $showsTranscriptHighlights) {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(highlights.enumerated()), id: \.offset) { _, highlight in
+                        Text("• \(highlight)")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(.top, 8)
+            } label: {
+                Text("Highlights").font(.title3.bold())
+            }
         }
     }
 
@@ -1581,7 +1646,7 @@ struct MeetingDetailView: View {
                 }
                 HStack {
                     if model.audioControls.contains(.reveal) {
-                        Button("Reveal", systemImage: "folder") {
+                        Button("Reveal in Finder", systemImage: "folder") {
                             Task { await controller.perform(.revealAudio) }
                         }
                     }
@@ -1643,8 +1708,8 @@ struct MeetingDetailView: View {
                         selectMode: { mode in
                             Task { await controller.perform(.selectTranscriptReviewMode(mode)) }
                         },
-                        retryProcessing: {
-                            Task { await controller.perform(.retryTranscriptProcessing) }
+                        regenerateTranscript: {
+                            Task { await controller.perform(.regenerateTranscript) }
                         },
                         seek: { milliseconds in
                             Task { await controller.perform(.seekAudio(milliseconds)) }

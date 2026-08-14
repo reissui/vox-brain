@@ -1123,8 +1123,9 @@ struct VoiceMeetingAcceptanceTests {
                 .appendingPathComponent("Sources/BrainMenu/Views/MeetingTranscriptReviewView.swift"),
             encoding: .utf8
         )
-        #expect(reviewSource.contains("Button(\"Create Improvement Prompt\""))
-        #expect(reviewSource.contains("Button(\"Copy Transcript\""))
+        #expect(reviewSource.contains("Image(systemName: \"wrench.and.screwdriver\")"))
+        #expect(reviewSource.contains("Image(systemName: \"doc.on.doc\")"))
+        #expect(reviewSource.contains("accessibilityLabel(\"Copy \\(model.mode.rawValue) transcript\")"))
         #expect(reviewSource.contains("Button(\"Copy\")"))
         #expect(!reviewSource.contains(".task {"))
     }

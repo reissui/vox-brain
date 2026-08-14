@@ -5,10 +5,11 @@ struct MeetingAudioPlayerView: View {
     let controller: MeetingAudioPlaybackController
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Button(action: controller.toggle) {
                 Image(systemName: controller.state == .playing ? "pause.fill" : "play.fill")
             }
+            .buttonStyle(.borderless)
             .disabled(!canControl)
             .accessibilityLabel(controller.state == .playing ? "Pause meeting recording" : "Play meeting recording")
 
@@ -25,6 +26,9 @@ struct MeetingAudioPlayerView: View {
                 .monospacedDigit()
                 .accessibilityLabel("Duration \(time(controller.durationMilliseconds))")
         }
+        .font(.caption)
+        .controlSize(.small)
+        .frame(height: 22)
         .accessibilityElement(children: .contain)
     }
 

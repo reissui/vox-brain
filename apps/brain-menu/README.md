@@ -56,10 +56,11 @@ Retained meeting audio is playable only on the recording Mac. Transcript
 timestamps seek the local player; pause, resume, and explicit audio deletion do
 not remove raw or processed transcript text. A stale processed transcript
 regenerates when review opens; persistence failures remain retryable and Raw is
-always one click away. The owner-triggered **Create Improvement Prompt** action
-builds a short prompt from the specific failures, timestamps, disfluencies, and
-correction categories detected in that call; Brain does not generate, render,
-or export follow-up material automatically.
+always one click away. **Regenerate** bypasses the stored projection and compares
+Raw with the audio evidence again. The per-version improvement action builds a
+short prompt from the specific failures, timestamps, disfluencies, and correction
+categories detected in that call; Brain does not generate, render, or export
+follow-up material automatically.
 
 ## Local Librarian and AI
 

@@ -22,6 +22,7 @@ private struct MeetingTranscriptProcessingKey: Hashable, Sendable {
     let meetingID: UUID
     let rawAttemptID: UUID
     let terminologyHash: String
+    let regenerationID: UUID?
 }
 
 /// Process-wide coordination is intentional: automatic analysis and a detail
@@ -111,7 +112,36 @@ final class MeetingTranscriptProcessingService: Sendable {
             speakerState: speakerState,
             notes: notes,
             terminology: terminology,
-            terminologyHash: terminologyHash
+            terminologyHash: terminologyHash,
+            forceRegeneration: false
+        )
+    }
+
+    func regenerate(
+        meeting: MeetingRecord,
+        artifact: MeetingTranscriptArtifact,
+        speakerState: SpeakerEditingState = SpeakerEditingState(),
+        notes: String = "",
+        terminology: [String],
+        terminologyHash: String
+    ) async -> MeetingTranscriptProcessingRunResult {
+        guard artifact.meetingID == meeting.id,
+              let selectedID = artifact.selectedAttemptID,
+              let selected = artifact.attempts.first(where: { $0.id == selectedID }) else {
+            return MeetingTranscriptProcessingRunResult(
+                rawAttemptID: artifact.selectedAttemptID,
+                transcript: nil,
+                failure: .noSelectedRawAttempt
+            )
+        }
+        return await process(
+            meeting: meeting,
+            selectedAttempt: selected,
+            speakerState: speakerState,
+            notes: notes,
+            terminology: terminology,
+            terminologyHash: terminologyHash,
+            forceRegeneration: true
         )
     }
 
@@ -123,17 +153,40 @@ final class MeetingTranscriptProcessingService: Sendable {
         terminology: [String],
         terminologyHash: String
     ) async -> MeetingTranscriptProcessingRunResult {
+        await process(
+            meeting: meeting,
+            selectedAttempt: selectedAttempt,
+            speakerState: speakerState,
+            notes: notes,
+            terminology: terminology,
+            terminologyHash: terminologyHash,
+            forceRegeneration: false
+        )
+    }
+
+    private func process(
+        meeting: MeetingRecord,
+        selectedAttempt: MeetingTranscriptAttempt,
+        speakerState: SpeakerEditingState,
+        notes: String,
+        terminology: [String],
+        terminologyHash: String,
+        forceRegeneration: Bool
+    ) async -> MeetingTranscriptProcessingRunResult {
         let key = MeetingTranscriptProcessingKey(
             meetingID: meeting.id,
             rawAttemptID: selectedAttempt.id,
-            terminologyHash: terminologyHash
+            terminologyHash: terminologyHash,
+            regenerationID: forceRegeneration ? UUID() : nil
         )
         await Self.registry.register(key)
-        let previous = try? store.load(
-            meetingID: meeting.id,
-            rawAttemptID: selectedAttempt.id,
-            terminologyHash: terminologyHash
-        )
+        let previous: MeetingProcessedTranscript? = forceRegeneration
+            ? nil
+            : (try? store.load(
+                meetingID: meeting.id,
+                rawAttemptID: selectedAttempt.id,
+                terminologyHash: terminologyHash
+            ))
         if let previous {
             return MeetingTranscriptProcessingRunResult(
                 rawAttemptID: selectedAttempt.id,
@@ -163,7 +216,8 @@ final class MeetingTranscriptProcessingService: Sendable {
                 notes: notes,
                 terminology: terminology,
                 terminologyHash: terminologyHash,
-                key: key
+                key: key,
+                forceRegeneration: forceRegeneration
             )
         }
         guard !Task.isCancelled else {
@@ -183,9 +237,10 @@ final class MeetingTranscriptProcessingService: Sendable {
         notes: String,
         terminology: [String],
         terminologyHash: String,
-        key: MeetingTranscriptProcessingKey
+        key: MeetingTranscriptProcessingKey,
+        forceRegeneration: Bool
     ) async -> MeetingTranscriptProcessingRunResult {
-        if let current = try? store.load(
+        if !forceRegeneration, let current = try? store.load(
             meetingID: meeting.id,
             rawAttemptID: selectedAttempt.id,
             terminologyHash: terminologyHash
