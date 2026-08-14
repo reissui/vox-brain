@@ -227,6 +227,59 @@ struct MeetingTranscriptProcessingServiceTests {
     }
 
     @Test
+    func regenerateBypassesTheCurrentProcessedTranscriptAndReplacesIt() async throws {
+        let fixture = try ProcessingFixture(text: "regenerate me")
+        let store = MeetingProcessedTranscriptStore(rootURL: fixture.root)
+        let cached = fixture.output(text: "regenerate me", terminologyHash: "current")
+        try store.replace(cached, meetingID: fixture.meeting.id)
+        let regenerated = fixture.output(
+            text: "Regenerate me.",
+            corrections: [MeetingTranscriptCorrection(
+                id: UUID(),
+                utteranceIDs: [fixture.utterance.id],
+                kind: .punctuation,
+                before: "regenerate me",
+                after: "Regenerate me.",
+                reason: "Restore sentence capitalization and punctuation.",
+                confidence: 1
+            )],
+            terminologyHash: "current"
+        )
+        let provider = ProcessingProvider(output: try JSONEncoder().encode(regenerated))
+        let service = MeetingTranscriptProcessingService(provider: provider, store: store)
+        let artifact = MeetingTranscriptArtifact(
+            meetingID: fixture.meeting.id,
+            attempts: [fixture.attempt],
+            selectedAttemptID: fixture.attempt.id
+        )
+
+        let reused = await service.process(
+            meeting: fixture.meeting,
+            artifact: artifact,
+            terminology: [],
+            terminologyHash: "current"
+        )
+        #expect(reused.transcript == cached)
+        #expect(provider.runCount == 0)
+
+        let result = await service.regenerate(
+            meeting: fixture.meeting,
+            artifact: artifact,
+            terminology: [],
+            terminologyHash: "current"
+        )
+
+        #expect(result.failure == nil)
+        #expect(result.transcript == regenerated)
+        #expect(provider.runCount == 1)
+        #expect(try store.load(
+            meetingID: fixture.meeting.id,
+            rawAttemptID: fixture.attempt.id,
+            terminologyHash: "current"
+        ) == regenerated)
+    }
+
+    @Test
     func longMeetingProcessesInBoundedChunksAndKeepsLosslessTextWhenAISchemaFails() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "MeetingTranscriptProcessingServiceTests.Long.\(UUID().uuidString)",
@@ -403,10 +456,14 @@ private struct ProcessingInjectedFailure: Error {}
 
 private final class ProcessingProvider: AIProviding, @unchecked Sendable {
     let output: Data
+    private(set) var runCount = 0
 
     init(output: Data) { self.output = output }
 
-    func run(prompt: String, jsonSchema: Data) async throws -> Data { output }
+    func run(prompt: String, jsonSchema: Data) async throws -> Data {
+        runCount += 1
+        return output
+    }
     func testConnection() async -> AIConnectionState { .ready }
 }
 

@@ -1243,6 +1243,16 @@ struct MeetingViewsTests {
         #expect(!live.contains(".onDisappear"))
         #expect(review.contains("Button(\"Select All\")"))
         #expect(review.contains("Button(\"Copy\")"))
+        #expect(review.contains("Button(\"Regenerate\", systemImage: \"arrow.clockwise\")"))
+        #expect(review.contains("Image(systemName: \"doc.on.doc\")"))
+        #expect(review.contains("Image(systemName: \"wrench.and.screwdriver\")"))
+        #expect(!review.contains("Button(\"Copy Transcript\""))
+        #expect(!review.contains("Label(\"Highlights\""))
+        #expect(detail.contains("Menu(\"Actions\", systemImage: \"ellipsis.circle\")"))
+        #expect(detail.contains("Button(\"Reveal in Finder\", systemImage: \"folder\")"))
+        #expect(detail.contains("Button(\"Export\", systemImage: \"square.and.arrow.up\")"))
+        #expect(detail.contains("DisclosureGroup(isExpanded: $showsTranscriptHighlights)"))
+        #expect(detail.contains(".labelsHidden()"))
         #expect(!review.contains("TextEditor"))
         #expect(!review.contains("URLSession"))
         #expect(!review.localizedCaseInsensitiveContains("follow-up"))
@@ -1596,6 +1606,19 @@ struct MeetingViewsTests {
             correctionCount: 1
         ))
         #expect(review.model.isVerified)
+        #expect(controller.improvementPrompt()?.contains("Existing processing recorded 1 corrections") == true)
+
+        try renderEvidence(
+            MeetingDetailView(controller: controller),
+            named: "meeting-summary-collapsed-highlights.png",
+            height: 900
+        )
+        await controller.perform(.selectTab(.transcript))
+        try renderEvidence(
+            MeetingDetailView(controller: controller),
+            named: "meeting-transcript-compact-controls.png",
+            height: 900
+        )
 
         await controller.perform(.copyFullTranscript)
         #expect(clipboard.values == [
@@ -1606,6 +1629,7 @@ struct MeetingViewsTests {
 
         await controller.perform(.selectTranscriptReviewMode(.raw))
         #expect(controller.viewModel.transcriptReview?.mode == .raw)
+        #expect(controller.improvementPrompt()?.contains("Existing processing recorded") == false)
         await controller.perform(.copyFullTranscript)
         #expect(clipboard.values == [
             "You: processed first raw processed same eight-second turn\n\n"
@@ -1690,8 +1714,8 @@ struct MeetingViewsTests {
 
         await controller.perform(.selectTranscriptReviewMode(.processed))
         #expect(controller.viewModel.transcriptReview?.processedIsCurrent == false)
-        await controller.perform(.retryTranscriptProcessing)
-        #expect(processing.calls == 1)
+        await controller.perform(.regenerateTranscript)
+        #expect(processing.regenerationCalls == 1)
         #expect(controller.viewModel.transcriptReview?.mode == .processed)
         #expect(controller.viewModel.transcriptReview?.rawRows.map(\.text)
             == ["immutable raw evidence"])
@@ -1795,6 +1819,7 @@ private final class MemoryProcessedTranscriptStore: MeetingProcessedTranscriptSt
 private final class MeetingTranscriptProcessingSpy: MeetingTranscriptProcessingControlling, @unchecked Sendable {
     let result: MeetingTranscriptProcessingRunResult
     private(set) var calls = 0
+    private(set) var regenerationCalls = 0
     init(result: MeetingTranscriptProcessingRunResult) { self.result = result }
     func process(
         meeting: MeetingRecord,
@@ -1805,6 +1830,18 @@ private final class MeetingTranscriptProcessingSpy: MeetingTranscriptProcessingC
         terminologyHash: String
     ) async -> MeetingTranscriptProcessingRunResult {
         calls += 1
+        return result
+    }
+
+    func regenerate(
+        meeting: MeetingRecord,
+        artifact: MeetingTranscriptArtifact,
+        speakerState: SpeakerEditingState,
+        notes: String,
+        terminology: [String],
+        terminologyHash: String
+    ) async -> MeetingTranscriptProcessingRunResult {
+        regenerationCalls += 1
         return result
     }
 }

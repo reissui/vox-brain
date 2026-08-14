@@ -40,7 +40,7 @@ struct MeetingTranscriptModelViewModel: Equatable, Sendable {
 struct MeetingTranscriptReviewViewModel: Equatable, Sendable {
     let mode: MeetingTranscriptReviewMode
     let processedIsCurrent: Bool
-    let processingIsRetrying: Bool
+    let processingIsRegenerating: Bool
     let processingMessage: String?
     let bullets: [String]
     let rawRows: [MeetingTranscriptReviewRowModel]
@@ -132,14 +132,14 @@ struct MeetingTranscriptReviewView: View {
     let model: MeetingTranscriptReviewViewModel
     let audioPlayback: MeetingAudioPlaybackController
     let selectMode: (MeetingTranscriptReviewMode) -> Void
-    let retryProcessing: () -> Void
+    let regenerateTranscript: () -> Void
     let seek: (Int64) -> Void
     let toggleSelection: ([UUID]) -> Void
     let copyTranscript: () -> Void
     let createImprovementPrompt: () -> String?
 
     @State private var promptPresentation: ImprovementPromptPresentation?
-    @State private var showsTechnicalDetails = false
+    @State private var showsTranscriptDetails = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -157,32 +157,20 @@ struct MeetingTranscriptReviewView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) {
-                    transcriptVersionPicker
-                    processingStatus
-                    Spacer()
-                    transcriptActions
-                }
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        transcriptVersionPicker
-                        processingStatus
-                    }
-                    transcriptActions
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                transcriptVersionPicker
+                processingStatus
+                Spacer(minLength: 8)
+                transcriptActions
             }
 
             if audioPlayback.meetingID != nil {
                 MeetingAudioPlayerView(controller: audioPlayback)
             }
-
-            qualitySummary
-            technicalDetails
         }
-        .padding(20)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
         .background(.background.secondary)
     }
 
@@ -196,79 +184,100 @@ struct MeetingTranscriptReviewView: View {
             }
         }
         .pickerStyle(.segmented)
-        .frame(minWidth: 180, idealWidth: 230, maxWidth: 230)
+        .labelsHidden()
+        .frame(width: 190)
     }
 
     @ViewBuilder
     private var processingStatus: some View {
-        if model.processingIsRetrying {
+        if model.processingIsRegenerating {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
                 Text("Processing")
             }
+            .font(.caption)
             .foregroundStyle(.secondary)
-            .statusCapsule()
         } else if model.processedIsCurrent {
             Label("Ready", systemImage: "checkmark.circle.fill")
+                .font(.caption)
                 .foregroundStyle(.green)
-                .statusCapsule()
         } else {
             Label("Needs attention", systemImage: "exclamationmark.circle.fill")
+                .font(.caption)
                 .foregroundStyle(.orange)
-                .statusCapsule()
         }
     }
 
     private var transcriptActions: some View {
-        HStack {
-            Button("Copy Transcript", systemImage: "doc.on.doc") {
-                copyTranscript()
+        HStack(spacing: 6) {
+            Button("Regenerate", systemImage: "arrow.clockwise") {
+                regenerateTranscript()
             }
+            .buttonStyle(.bordered)
+            .disabled(model.processingIsRegenerating)
+            .help("Regenerate the processed transcript from Raw and audio evidence")
+
+            Button {
+                copyTranscript()
+            } label: {
+                Image(systemName: "doc.on.doc")
+            }
+            .buttonStyle(.borderless)
             .disabled(model.rows.isEmpty)
             .keyboardShortcut("c", modifiers: [.command, .shift])
+            .accessibilityLabel("Copy \(model.mode.rawValue) transcript")
             .accessibilityHint("Copies the full \(model.mode.rawValue.lowercased()) transcript with speaker labels.")
-            Button("Create Improvement Prompt", systemImage: "wrench.and.screwdriver") {
+
+            Button {
                 if let prompt = createImprovementPrompt() {
                     promptPresentation = ImprovementPromptPresentation(prompt: prompt)
                 }
+            } label: {
+                Image(systemName: "wrench.and.screwdriver")
             }
+            .buttonStyle(.borderless)
             .disabled(!model.canCreateImprovementPrompt)
+            .accessibilityLabel("Create \(model.mode.rawValue) improvement prompt")
+            .help("Create an improvement prompt for the \(model.mode.rawValue) transcript")
+
+            Button {
+                showsTranscriptDetails.toggle()
+            } label: {
+                Image(systemName: "info.circle")
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Transcript details")
+            .help("Show transcript details")
+            .popover(isPresented: $showsTranscriptDetails) {
+                transcriptDetails
+                    .padding(16)
+                    .frame(width: 320)
+            }
         }
-        .buttonStyle(.bordered)
+        .controlSize(.small)
         .fixedSize()
     }
 
-    private var qualitySummary: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 18) {
-                qualityItems
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                qualityItems
-            }
-        }
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .accessibilityElement(children: .combine)
-    }
-
-    @ViewBuilder
-    private var qualityItems: some View {
-        Label("\(model.quality.rawUtteranceCount) utterances", systemImage: "text.bubble")
-        Label("\(model.quality.retainedPreviewCount) audio previews", systemImage: "waveform")
-        Label("\(model.quality.correctionCount) corrections", systemImage: "wand.and.stars")
-        if model.quality.skippedFinalCount > 0 {
-            Label(
-                "\(model.quality.skippedFinalCount) skipped spans",
-                systemImage: "exclamationmark.triangle.fill"
-            )
-            .foregroundStyle(.orange)
-        }
-    }
-
-    private var technicalDetails: some View {
-        DisclosureGroup(isExpanded: $showsTechnicalDetails) {
+    private var transcriptDetails: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Transcript details").font(.headline)
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 5) {
+                GridRow {
+                    Text("Utterances").foregroundStyle(.secondary)
+                    Text(String(model.quality.rawUtteranceCount)).monospacedDigit()
+                }
+                GridRow {
+                    Text("Audio previews").foregroundStyle(.secondary)
+                    Text(String(model.quality.retainedPreviewCount)).monospacedDigit()
+                }
+                GridRow {
+                    Text("Corrections").foregroundStyle(.secondary)
+                    Text(String(model.quality.correctionCount)).monospacedDigit()
+                }
+                GridRow {
+                    Text("Skipped spans").foregroundStyle(.secondary)
+                    Text(String(model.quality.skippedFinalCount)).monospacedDigit()
+                }
                 GridRow {
                     Text("Requested").foregroundStyle(.secondary)
                     Text(model.model.requested)
@@ -288,32 +297,22 @@ struct MeetingTranscriptReviewView: View {
                     .foregroundStyle(model.model.isVerified ? .green : .orange)
                 }
             }
-            .padding(.top, 8)
             .textSelection(.enabled)
-        } label: {
-            Label("Transcription details", systemImage: "info.circle")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
         .font(.caption)
     }
 
     private var processedUnavailable: some View {
         VStack(spacing: 18) {
-            ZStack {
-                Circle()
-                    .fill(model.processingIsRetrying ? Color.accentColor.opacity(0.12) : Color.orange.opacity(0.12))
-                    .frame(width: 54, height: 54)
-                if model.processingIsRetrying {
-                    ProgressView().controlSize(.regular)
-                } else {
-                    Image(systemName: "text.badge.xmark")
-                        .font(.title2)
-                        .foregroundStyle(.orange)
-                }
+            if model.processingIsRegenerating {
+                ProgressView().controlSize(.regular)
+            } else {
+                Image(systemName: "text.badge.xmark")
+                    .font(.title2)
+                    .foregroundStyle(.orange)
             }
             VStack(spacing: 7) {
-                Text(model.processingIsRetrying ? "Cleaning up transcript" : "Processed transcript isn’t ready")
+                Text(model.processingIsRegenerating ? "Cleaning up transcript" : "Processed transcript isn’t ready")
                     .font(.title3.bold())
                 Text(
                     model.processingMessage
@@ -329,9 +328,9 @@ struct MeetingTranscriptReviewView: View {
                 Button("View Raw", systemImage: "doc.plaintext") {
                     selectMode(.raw)
                 }
-                if !model.processingIsRetrying {
-                    Button("Retry Processing", systemImage: "arrow.clockwise") {
-                        retryProcessing()
+                if !model.processingIsRegenerating {
+                    Button("Regenerate", systemImage: "arrow.clockwise") {
+                        regenerateTranscript()
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -350,25 +349,6 @@ struct MeetingTranscriptReviewView: View {
 
     private var transcriptContent: some View {
         VStack(spacing: 0) {
-            if model.mode == .processed, !model.bullets.isEmpty {
-                VStack(alignment: .leading, spacing: 9) {
-                    Label("Highlights", systemImage: "sparkles")
-                        .font(.headline)
-                    ForEach(Array(model.bullets.prefix(8).enumerated()), id: \.offset) { _, bullet in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Circle()
-                                .fill(Color.accentColor)
-                                .frame(width: 5, height: 5)
-                            Text(bullet).textSelection(.enabled)
-                        }
-                    }
-                }
-                .padding(16)
-                .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Divider()
-            }
             List(model.rows) { row in
                 HStack(alignment: .top, spacing: 10) {
                     if model.mode == .raw {
@@ -450,15 +430,5 @@ private struct MeetingImprovementPromptSheet: View {
         }
         .padding(20)
         .frame(minWidth: 640, minHeight: 460)
-    }
-}
-
-private extension View {
-    func statusCapsule() -> some View {
-        self
-            .font(.caption.weight(.medium))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(.quaternary, in: Capsule())
     }
 }

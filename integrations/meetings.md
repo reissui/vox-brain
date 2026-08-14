@@ -49,8 +49,8 @@ starts or stops recording automatically.
    with preserved previews, failed-span diagnostics, and verified model
    metadata. Same-speaker utterances separated by less than eight seconds are
    one readable turn; eight seconds or a speaker change starts a new turn.
-   Meetings support speaker editing, talk-time totals, and **Copy Transcript**
-   for both Processed and Raw; Voice Notes show readable paragraphs and
+   Meetings support speaker editing, talk-time totals, and per-version copy
+   controls for both Processed and Raw; Voice Notes show readable paragraphs and
    **Copy Full Transcript**.
 6. Finalize the transcript to write it to the local inbox. Later edits create
    an explicit revision.
@@ -75,7 +75,7 @@ unsupported invented content is rejected. If optional AI is unavailable, a
 conservative local cleanup is saved instead of leaving Processed empty.
 Optional analysis uses the current processed transcript and falls back to raw
 evidence when necessary. A stale transcript regenerates on review and never
-hides Raw. **Create Improvement Prompt** runs only when pressed and produces a
+hides Raw. The per-version improvement action runs only when pressed and produces a
 short prompt targeted to the failures, timestamps, disfluencies, and correction
 categories detected in that call—no transcript content and no automatic
 follow-up generation, rendering, or export. Long transcripts are processed in
@@ -104,8 +104,9 @@ Keep the previous app artifact until this passes.
   and start a new recording. The partial transcript and source audio remain
   available for review and transcription retry.
 - **Processed transcript unavailable:** review starts a fresh processing pass
-  automatically. Switch to **Raw** at any time, or choose **Retry Processing**
-  after a persistence failure. A retry never alters the raw attempt.
+  automatically. Switch to **Raw** at any time, or choose **Regenerate** to
+  bypass the stored projection and compare Raw with the audio evidence again.
+  Regeneration never alters the raw attempt.
 - **No system track:** recheck Screen & System Audio Recording permission.
 - **VoxType or a model is missing:** use **Enable Speech** or **Download** in
   Speech Setup.
