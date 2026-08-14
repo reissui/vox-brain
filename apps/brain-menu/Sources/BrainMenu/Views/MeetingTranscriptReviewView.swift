@@ -50,7 +50,14 @@ struct MeetingTranscriptReviewViewModel: Equatable, Sendable {
     let canCreateImprovementPrompt: Bool
 
     var rows: [MeetingTranscriptReviewRowModel] {
-        mode == .processed && processedIsCurrent ? processedRows : rawRows
+        switch mode {
+        case .processed: processedIsCurrent ? processedRows : []
+        case .raw: rawRows
+        }
+    }
+
+    var fullText: String {
+        rows.map { "\($0.speakerName): \($0.text)" }.joined(separator: "\n\n")
     }
 }
 
@@ -128,6 +135,7 @@ struct MeetingTranscriptReviewView: View {
     let retryProcessing: () -> Void
     let seek: (Int64) -> Void
     let toggleSelection: ([UUID]) -> Void
+    let copyTranscript: () -> Void
     let createImprovementPrompt: () -> String?
 
     @State private var promptPresentation: ImprovementPromptPresentation?
@@ -149,24 +157,17 @@ struct MeetingTranscriptReviewView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Picker("Transcript version", selection: Binding(
-                    get: { model.mode },
-                    set: { mode in selectMode(mode) }
-                )) {
-                    ForEach(MeetingTranscriptReviewMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    transcriptVersionPicker
+                    Spacer()
+                    transcriptActions
                 }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 260)
-                Spacer()
-                Button("Create Improvement Prompt", systemImage: "wrench.and.screwdriver") {
-                    if let prompt = createImprovementPrompt() {
-                        promptPresentation = ImprovementPromptPresentation(prompt: prompt)
-                    }
+                VStack(alignment: .leading, spacing: 8) {
+                    transcriptVersionPicker
+                    transcriptActions
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                 }
-                .disabled(!model.canCreateImprovementPrompt)
             }
 
             if audioPlayback.meetingID != nil {
@@ -196,6 +197,37 @@ struct MeetingTranscriptReviewView: View {
             .textSelection(.enabled)
         }
         .padding()
+    }
+
+    private var transcriptVersionPicker: some View {
+        Picker("Transcript version", selection: Binding(
+            get: { model.mode },
+            set: { mode in selectMode(mode) }
+        )) {
+            ForEach(MeetingTranscriptReviewMode.allCases) { mode in
+                Text(mode.rawValue).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .frame(minWidth: 180, idealWidth: 260, maxWidth: 260)
+    }
+
+    private var transcriptActions: some View {
+        HStack {
+            Button("Copy Transcript", systemImage: "doc.on.doc") {
+                copyTranscript()
+            }
+            .disabled(model.rows.isEmpty)
+            .keyboardShortcut("c", modifiers: [.command, .shift])
+            .accessibilityHint("Copies the full \(model.mode.rawValue.lowercased()) transcript with speaker labels.")
+            Button("Create Improvement Prompt", systemImage: "wrench.and.screwdriver") {
+                if let prompt = createImprovementPrompt() {
+                    promptPresentation = ImprovementPromptPresentation(prompt: prompt)
+                }
+            }
+            .disabled(!model.canCreateImprovementPrompt)
+        }
+        .fixedSize()
     }
 
     private func metric(_ title: String, value: Int) -> some View {

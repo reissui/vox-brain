@@ -227,6 +227,86 @@ struct MeetingTranscriptProcessingServiceTests {
     }
 
     @Test
+    func longMeetingProcessesInBoundedChunksAndKeepsLosslessTextWhenAISchemaFails() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "MeetingTranscriptProcessingServiceTests.Long.\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meeting = MeetingRecord(
+            title: "Long meeting",
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: Date(timeIntervalSince1970: 5_000),
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "large-v3",
+            transcriptionState: .completed
+        )
+        let utterances = try (0..<1_695).map { index in
+            let start = Int64(index) * 9_000
+            return try MeetingUtterance(
+                source: .microphone,
+                startMilliseconds: start,
+                endMilliseconds: start + 1_000,
+                text: "raw utterance \(index)",
+                baseSpeakerID: "you"
+            )
+        }
+        let spanOutcomes = utterances.map { utterance in
+            MeetingTranscriptSpanOutcome(RawTranscriptionSpanOutcome(
+                source: .microphone,
+                originalStartMilliseconds: utterance.startMilliseconds,
+                originalEndMilliseconds: utterance.endMilliseconds,
+                attemptedStartMilliseconds: utterance.startMilliseconds,
+                attemptedEndMilliseconds: utterance.endMilliseconds,
+                speechEvidence: SpeechActivityGate.Result(
+                    isSpeechBearing: true,
+                    frameCount: 34,
+                    maximumRMS: 0.2,
+                    estimatedNoiseFloor: 0.003,
+                    voicedMilliseconds: 900,
+                    voicedRatio: 0.9
+                ),
+                requestCount: 1,
+                text: utterance.text,
+                failure: nil,
+                wasCancelled: false,
+                attestedEngine: "whisper",
+                attestedModel: "large-v3"
+            ))
+        }
+        let attempt = MeetingTranscriptAttempt(
+            modelAttestation: MeetingTranscriptModelAttestation(meeting: meeting),
+            spanOutcomes: spanOutcomes,
+            utterances: utterances,
+            isSuccessful: true
+        )
+        let provider = SchemaRejectingProcessingProvider()
+        let store = MeetingProcessedTranscriptStore(rootURL: root)
+        let result = await MeetingTranscriptProcessingService(
+            provider: provider,
+            store: store
+        ).process(
+            meeting: meeting,
+            selectedAttempt: attempt,
+            terminology: [],
+            terminologyHash: "long-current"
+        )
+
+        #expect(result.failure == nil)
+        #expect(await provider.runCount > 1)
+        #expect(await provider.largestPromptCharacterCount < 500_000)
+        #expect(result.transcript?.turns.count == utterances.count)
+        #expect(result.transcript?.turns.first?.text == "raw utterance 0")
+        #expect(result.transcript?.turns.last?.text == "raw utterance 1694")
+        #expect(try store.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "long-current"
+        ) == result.transcript)
+    }
+
+    @Test
     func atomicFailurePreservesPriorProcessedFileAndRawFile() throws {
         let fixture = try ProcessingFixture(text: "Original")
         let rawStore = MeetingTranscriptArtifactStore(rootURL: fixture.root)
@@ -277,6 +357,19 @@ private final class ProcessingProvider: AIProviding, @unchecked Sendable {
     init(output: Data) { self.output = output }
 
     func run(prompt: String, jsonSchema: Data) async throws -> Data { output }
+    func testConnection() async -> AIConnectionState { .ready }
+}
+
+private actor SchemaRejectingProcessingProvider: AIProviding {
+    private(set) var runCount = 0
+    private(set) var largestPromptCharacterCount = 0
+
+    func run(prompt: String, jsonSchema: Data) async throws -> Data {
+        runCount += 1
+        largestPromptCharacterCount = max(largestPromptCharacterCount, prompt.count)
+        throw AIProviderError.schemaFailure
+    }
+
     func testConnection() async -> AIConnectionState { .ready }
 }
 

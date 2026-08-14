@@ -49,8 +49,9 @@ starts or stops recording automatically.
    with preserved previews, failed-span diagnostics, and verified model
    metadata. Same-speaker utterances separated by less than eight seconds are
    one readable turn; eight seconds or a speaker change starts a new turn.
-   Meetings support speaker editing and talk-time totals; Voice Notes show
-   readable paragraphs and **Copy Full Transcript**.
+   Meetings support speaker editing, talk-time totals, and **Copy Transcript**
+   for both Processed and Raw; Voice Notes show readable paragraphs and
+   **Copy Full Transcript**.
 6. Finalize the transcript to write it to the local inbox. Later edits create
    an explicit revision.
 
@@ -74,7 +75,9 @@ when processing is unavailable. A stale or failed processed transcript stays
 retryable from review and never hides the raw transcript. **Create Improvement
 Prompt** runs only when pressed and produces bounded quality diagnostics for
 copying—no transcript content and no automatic follow-up generation, rendering,
-or export.
+or export. Long transcripts are processed in bounded evidence chunks. If an AI
+chunk does not pass validation, Brain keeps that section verbatim from the raw
+transcript instead of discarding the entire processed view.
 
 ## Smoke test
 

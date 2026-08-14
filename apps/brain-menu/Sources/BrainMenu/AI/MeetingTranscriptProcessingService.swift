@@ -74,6 +74,8 @@ private actor MeetingTranscriptProcessingRegistry {
 /// attempt is read as a value and no dependency exposes a mutation API for it.
 final class MeetingTranscriptProcessingService: Sendable {
     private static let registry = MeetingTranscriptProcessingRegistry()
+    private static let maximumChunkUtteranceCount = 200
+    private static let maximumChunkTextCharacterCount = 12_000
 
     private let provider: any AIProviding
     private let store: any MeetingProcessedTranscriptStoring
@@ -211,75 +213,227 @@ final class MeetingTranscriptProcessingService: Sendable {
                 failure: .providerNotReady(readiness)
             )
         }
-        let prompt = MeetingTranscriptProcessingPrompt.make(
-            meeting: meeting,
+        var processedChunks: [MeetingProcessedTranscript] = []
+        for turns in Self.chunked(assembledTurns) {
+            guard !Task.isCancelled else {
+                return failed(
+                    attemptID: selectedAttempt.id,
+                    previous: nil,
+                    failure: .cancelled
+                )
+            }
+            let chunkAttempt = Self.chunkAttempt(
+                selectedAttempt,
+                containing: turns
+            )
+            let prompt = MeetingTranscriptProcessingPrompt.make(
+                meeting: meeting,
+                selectedAttempt: chunkAttempt,
+                assembledTurns: turns,
+                notes: notes,
+                terminology: terminology,
+                terminologyHash: terminologyHash
+            )
+            do {
+                let data = try await provider.run(
+                    prompt: prompt,
+                    jsonSchema: MeetingTranscriptProcessingSchema.jsonSchema
+                )
+                processedChunks.append(try MeetingTranscriptProcessingSchema.decode(
+                    data,
+                    attempt: chunkAttempt,
+                    assembledTurns: turns,
+                    terminologyHash: terminologyHash,
+                    terminology: terminology
+                ))
+            } catch AIProviderError.schemaFailure {
+                processedChunks.append(Self.losslessTranscript(
+                    rawAttemptID: selectedAttempt.id,
+                    terminologyHash: terminologyHash,
+                    turns: turns
+                ))
+            } catch let error as AIProviderError {
+                return failed(
+                    attemptID: selectedAttempt.id,
+                    previous: nil,
+                    failure: .providerFailure(error)
+                )
+            } catch is CancellationError {
+                return failed(
+                    attemptID: selectedAttempt.id,
+                    previous: nil,
+                    failure: .cancelled
+                )
+            } catch {
+                // Reject the model's unsafe projection, but keep this bounded
+                // section readable by projecting the immutable raw turns.
+                processedChunks.append(Self.losslessTranscript(
+                    rawAttemptID: selectedAttempt.id,
+                    terminologyHash: terminologyHash,
+                    turns: turns
+                ))
+            }
+        }
+
+        let transcript = Self.validatedCombinedTranscript(
+            processedChunks,
             selectedAttempt: selectedAttempt,
             assembledTurns: assembledTurns,
-            notes: notes,
             terminology: terminology,
             terminologyHash: terminologyHash
         )
         do {
-            let data = try await provider.run(
-                prompt: prompt,
-                jsonSchema: MeetingTranscriptProcessingSchema.jsonSchema
-            )
-            let transcript = try MeetingTranscriptProcessingSchema.decode(
-                data,
-                attempt: selectedAttempt,
-                assembledTurns: assembledTurns,
-                terminologyHash: terminologyHash,
-                terminology: terminology
-            )
-            do {
-                guard try await Self.registry.persistIfCurrent(
-                    transcript,
-                    key: key,
-                    store: store
-                ) else {
-                    return failed(
-                        attemptID: selectedAttempt.id,
-                        previous: nil,
-                        failure: .cancelled
-                    )
-                }
-            } catch {
+            guard try await Self.registry.persistIfCurrent(
+                transcript,
+                key: key,
+                store: store
+            ) else {
                 return failed(
                     attemptID: selectedAttempt.id,
                     previous: nil,
-                    failure: .persistenceFailure
+                    failure: .cancelled
                 )
             }
-            return MeetingTranscriptProcessingRunResult(
-                rawAttemptID: selectedAttempt.id,
-                transcript: transcript,
-                failure: nil
-            )
-        } catch AIProviderError.schemaFailure {
-            return failed(
-                attemptID: selectedAttempt.id,
-                previous: nil,
-                failure: .schemaFailure
-            )
-        } catch let error as AIProviderError {
-            return failed(
-                attemptID: selectedAttempt.id,
-                previous: nil,
-                failure: .providerFailure(error)
-            )
-        } catch is CancellationError {
-            return failed(
-                attemptID: selectedAttempt.id,
-                previous: nil,
-                failure: .cancelled
-            )
         } catch {
             return failed(
                 attemptID: selectedAttempt.id,
                 previous: nil,
-                failure: .schemaFailure
+                failure: .persistenceFailure
             )
         }
+        return MeetingTranscriptProcessingRunResult(
+            rawAttemptID: selectedAttempt.id,
+            transcript: transcript,
+            failure: nil
+        )
+    }
+
+    private static func chunked(
+        _ turns: [MeetingTranscriptTurn]
+    ) -> [[MeetingTranscriptTurn]] {
+        guard !turns.isEmpty else { return [[]] }
+        var chunks: [[MeetingTranscriptTurn]] = []
+        var current: [MeetingTranscriptTurn] = []
+        var utteranceCount = 0
+        var textCharacterCount = 0
+
+        for turn in turns {
+            let nextUtteranceCount = utteranceCount + turn.utteranceIDs.count
+            let nextTextCharacterCount = textCharacterCount + turn.text.count
+            if !current.isEmpty,
+               nextUtteranceCount > maximumChunkUtteranceCount
+                || nextTextCharacterCount > maximumChunkTextCharacterCount {
+                chunks.append(current)
+                current = []
+                utteranceCount = 0
+                textCharacterCount = 0
+            }
+            current.append(turn)
+            utteranceCount += turn.utteranceIDs.count
+            textCharacterCount += turn.text.count
+        }
+        if !current.isEmpty { chunks.append(current) }
+        return chunks
+    }
+
+    private static func chunkAttempt(
+        _ attempt: MeetingTranscriptAttempt,
+        containing turns: [MeetingTranscriptTurn]
+    ) -> MeetingTranscriptAttempt {
+        let ids = Set(turns.flatMap(\.utteranceIDs))
+        let utterances = attempt.utterances.filter { ids.contains($0.id) }
+        let start = utterances.map(\.startMilliseconds).min()
+        let end = utterances.map(\.endMilliseconds).max()
+        let spanOutcomes = attempt.spanOutcomes.filter { span in
+            guard let start, let end else { return false }
+            return span.attemptedStartMilliseconds < end
+                && span.attemptedEndMilliseconds > start
+        }
+        return MeetingTranscriptAttempt(
+            id: attempt.id,
+            createdAt: attempt.createdAt,
+            modelAttestation: attempt.modelAttestation,
+            spanOutcomes: spanOutcomes,
+            retainedPreviews: attempt.retainedPreviews.filter { ids.contains($0.id) },
+            utterances: utterances,
+            isSuccessful: true
+        )
+    }
+
+    private static func losslessTranscript(
+        rawAttemptID: UUID,
+        terminologyHash: String,
+        turns: [MeetingTranscriptTurn]
+    ) -> MeetingProcessedTranscript {
+        MeetingProcessedTranscript(
+            rawAttemptID: rawAttemptID,
+            terminologyHash: terminologyHash,
+            turns: turns.map { turn in
+                MeetingProcessedTranscriptTurn(
+                    id: turn.id,
+                    utteranceIDs: turn.utteranceIDs,
+                    startMilliseconds: turn.startMilliseconds,
+                    endMilliseconds: turn.endMilliseconds,
+                    speakerID: turn.speakerID,
+                    speakerLabel: turn.speakerLabel,
+                    text: turn.text,
+                    unclear: turn.text.localizedCaseInsensitiveContains("[unclear]")
+                )
+            },
+            bullets: [],
+            corrections: []
+        )
+    }
+
+    private static func validatedCombinedTranscript(
+        _ chunks: [MeetingProcessedTranscript],
+        selectedAttempt: MeetingTranscriptAttempt,
+        assembledTurns: [MeetingTranscriptTurn],
+        terminology: [String],
+        terminologyHash: String
+    ) -> MeetingProcessedTranscript {
+        let candidate = MeetingProcessedTranscript(
+            rawAttemptID: selectedAttempt.id,
+            terminologyHash: terminologyHash,
+            turns: chunks.flatMap(\.turns),
+            bullets: combinedBullets(chunks),
+            corrections: chunks.flatMap(\.corrections)
+        )
+        if let data = try? JSONEncoder().encode(candidate),
+           let validated = try? MeetingTranscriptProcessingSchema.decode(
+               data,
+               attempt: selectedAttempt,
+               assembledTurns: assembledTurns,
+               terminologyHash: terminologyHash,
+               terminology: terminology
+           ) {
+            return validated
+        }
+        return losslessTranscript(
+            rawAttemptID: selectedAttempt.id,
+            terminologyHash: terminologyHash,
+            turns: assembledTurns
+        )
+    }
+
+    private static func combinedBullets(
+        _ chunks: [MeetingProcessedTranscript]
+    ) -> [String] {
+        var result: [String] = []
+        var index = 0
+        while result.count < MeetingTranscriptProcessingSchema.maximumBullets {
+            var appended = false
+            for chunk in chunks where chunk.bullets.indices.contains(index) {
+                result.append(chunk.bullets[index])
+                appended = true
+                if result.count == MeetingTranscriptProcessingSchema.maximumBullets {
+                    return result
+                }
+            }
+            guard appended else { break }
+            index += 1
+        }
+        return result
     }
 
     func storedTranscript(

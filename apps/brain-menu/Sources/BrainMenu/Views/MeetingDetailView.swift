@@ -988,11 +988,19 @@ final class MeetingDetailController {
     }
 
     private func copyFullTranscript() {
-        guard meeting?.isVoiceNote == true else { return }
-        let value = viewModel.voiceNoteTranscript.fullText
+        let value: String
+        let message: String
+        if meeting?.isVoiceNote == true {
+            value = viewModel.voiceNoteTranscript.fullText
+            message = "Full transcript copied"
+        } else {
+            guard let review = transcriptReviewViewModel else { return }
+            value = review.fullText
+            message = "\(review.mode.rawValue) transcript copied"
+        }
         guard !value.isEmpty else { return }
         clipboard.write(value)
-        copiedMessage = "Full transcript copied"
+        copiedMessage = message
     }
 
     private func revealAudio() {
@@ -1622,6 +1630,9 @@ struct MeetingDetailView: View {
                             Task { await controller.perform(.seekAudio(milliseconds)) }
                         },
                         toggleSelection: controller.toggleSelection,
+                        copyTranscript: {
+                            Task { await controller.perform(.copyFullTranscript) }
+                        },
                         createImprovementPrompt: controller.improvementPrompt
                     )
                 }

@@ -1024,7 +1024,10 @@ struct VoiceMeetingAcceptanceTests {
             terminology: ["Orca"],
             terminologyHash: "invented"
         )
-        #expect(inventedResult.failure == .schemaFailure)
+        #expect(inventedResult.failure == nil)
+        #expect(inventedResult.transcript?.turns.first?.text
+            == "We chose orka. Thank you. Same turn.")
+        #expect(inventedResult.transcript?.turns.first?.text.contains("Alice") == false)
         #expect(try Data(contentsOf: rawURL) == rawBeforeProcessing)
 
         let fallbackProvider = AcceptancePipelineAI(
@@ -1093,7 +1096,7 @@ struct VoiceMeetingAcceptanceTests {
         #expect(try processedStore.load(
             meetingID: meeting.id,
             rawAttemptID: attempt.id,
-            terminologyHash: "orca-current"
+            terminologyHash: "invented"
         )?.turns.first?.text.contains("Thank you") == true)
 
         let prompt = MeetingImprovementPrompt.make(
@@ -1113,6 +1116,7 @@ struct VoiceMeetingAcceptanceTests {
             encoding: .utf8
         )
         #expect(reviewSource.contains("Button(\"Create Improvement Prompt\""))
+        #expect(reviewSource.contains("Button(\"Copy Transcript\""))
         #expect(reviewSource.contains("Button(\"Copy\")"))
         #expect(!reviewSource.contains(".task {"))
     }
