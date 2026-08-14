@@ -227,6 +227,97 @@ struct MeetingTranscriptProcessingServiceTests {
     }
 
     @Test
+    func successfulProviderCannotUndoDeterministicCleanup() async throws {
+        let fixture = try ProcessingFixture(text: "Um, hello, hello, hello. Okay.")
+        let providerOutput = fixture.output(
+            text: fixture.utterance.text,
+            bullets: ["A useful provider-generated highlight."],
+            terminologyHash: "baseline"
+        )
+        let provider = ProcessingProvider(output: try JSONEncoder().encode(providerOutput))
+        let store = MeetingProcessedTranscriptStore(rootURL: fixture.root)
+
+        let result = await MeetingTranscriptProcessingService(
+            provider: provider,
+            store: store
+        ).process(
+            meeting: fixture.meeting,
+            selectedAttempt: fixture.attempt,
+            terminology: [],
+            terminologyHash: "baseline"
+        )
+
+        #expect(result.failure == nil)
+        #expect(provider.runCount == 1)
+        #expect(result.transcript?.turns.first?.text == "hello. Okay.")
+        #expect(result.transcript?.corrections.count == 1)
+        #expect(result.transcript?.bullets == ["A useful provider-generated highlight."])
+    }
+
+    @Test
+    func versionOneProjectionIsStaleUnderTheMandatoryCleanupContract() throws {
+        let fixture = try ProcessingFixture(text: "Um, migrate me")
+        let store = MeetingProcessedTranscriptStore(rootURL: fixture.root)
+        let legacy = MeetingProcessedTranscript(
+            version: 1,
+            rawAttemptID: fixture.attempt.id,
+            terminologyHash: "migration",
+            turns: fixture.output(text: fixture.utterance.text).turns,
+            bullets: [],
+            corrections: []
+        )
+        let destination = store.transcriptURL(for: fixture.meeting.id)
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try JSONEncoder().encode(legacy).write(to: destination)
+
+        #expect(throws: MeetingProcessedTranscriptStoreError.invalidTranscript) {
+            try store.load(
+                meetingID: fixture.meeting.id,
+                rawAttemptID: fixture.attempt.id,
+                terminologyHash: "migration"
+            )
+        }
+    }
+
+    @Test
+    func deterministicCleanupLayersOnTopOfProviderCorrections() async throws {
+        let fixture = try ProcessingFixture(text: "Um, launch Friday")
+        let punctuation = MeetingTranscriptCorrection(
+            id: UUID(),
+            utteranceIDs: [fixture.utterance.id],
+            kind: .punctuation,
+            before: "Um, launch Friday",
+            after: "Um, launch Friday.",
+            reason: "Restore sentence punctuation.",
+            confidence: 1
+        )
+        let providerOutput = fixture.output(
+            text: "Um, launch Friday.",
+            bullets: ["Launch Friday."],
+            corrections: [punctuation],
+            terminologyHash: "layered"
+        )
+        let result = await MeetingTranscriptProcessingService(
+            provider: ProcessingProvider(output: try JSONEncoder().encode(providerOutput)),
+            store: MeetingProcessedTranscriptStore(rootURL: fixture.root)
+        ).process(
+            meeting: fixture.meeting,
+            selectedAttempt: fixture.attempt,
+            terminology: [],
+            terminologyHash: "layered"
+        )
+
+        #expect(result.failure == nil)
+        #expect(result.transcript?.turns.first?.text == "launch Friday.")
+        #expect(result.transcript?.corrections.count == 2)
+        #expect(result.transcript?.corrections.first == punctuation)
+        #expect(result.transcript?.bullets == ["Launch Friday."])
+    }
+
+    @Test
     func regenerateBypassesTheCurrentProcessedTranscriptAndReplacesIt() async throws {
         let fixture = try ProcessingFixture(text: "regenerate me")
         let store = MeetingProcessedTranscriptStore(rootURL: fixture.root)

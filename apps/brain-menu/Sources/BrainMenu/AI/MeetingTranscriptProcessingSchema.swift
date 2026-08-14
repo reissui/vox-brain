@@ -76,7 +76,7 @@ enum MeetingTranscriptProcessingSchemaError: Error, Equatable, Sendable {
 }
 
 enum MeetingTranscriptProcessingSchema {
-    static let currentVersion = 1
+    static let currentVersion = 2
     static let maximumBullets = 8
 
     static let jsonSchema = Data(#"""

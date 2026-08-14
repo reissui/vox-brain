@@ -212,6 +212,9 @@ final class MeetingUploadController {
     private let notesStore: any MeetingNotesStoring
     private let analysisStore: any MeetingAnalysisStoring
     private let uploadStore: any MeetingUploadStoring
+    private let processedTranscriptStore: any MeetingProcessedTranscriptStoring
+    private let transcriptProcessingController: (any MeetingTranscriptProcessingControlling)?
+    private let terminologyProvider: @MainActor () -> (terms: [String], hash: String)
     private let renderer: MeetingMarkdownRenderer
     private let apiProvider: @MainActor () -> (any BrainCaptureAPI)?
     private let sleep: @Sendable (Duration) async throws -> Void
@@ -222,6 +225,12 @@ final class MeetingUploadController {
         notesStore: (any MeetingNotesStoring)? = nil,
         analysisStore: any MeetingAnalysisStoring = FileMeetingAnalysisStore(),
         uploadStore: any MeetingUploadStoring = FileMeetingUploadStore(),
+        processedTranscriptStore: (any MeetingProcessedTranscriptStoring)? = nil,
+        transcriptProcessingController: (any MeetingTranscriptProcessingControlling)? = nil,
+        terminologyProvider: @escaping @MainActor () -> (terms: [String], hash: String) = {
+            let store = MeetingTerminologyStore()
+            return (store.terms, store.contentHash)
+        },
         renderer: MeetingMarkdownRenderer = MeetingMarkdownRenderer(),
         sleep: @escaping @Sendable (Duration) async throws -> Void = {
             try await Task.sleep(for: $0)
@@ -232,6 +241,10 @@ final class MeetingUploadController {
         self.notesStore = notesStore ?? MeetingNotesStore(rootURL: meetingStore.rootURL)
         self.analysisStore = analysisStore
         self.uploadStore = uploadStore
+        self.processedTranscriptStore = processedTranscriptStore
+            ?? MeetingProcessedTranscriptStore(rootURL: meetingStore.rootURL)
+        self.transcriptProcessingController = transcriptProcessingController
+        self.terminologyProvider = terminologyProvider
         self.renderer = renderer
         self.sleep = sleep
         self.now = now
@@ -244,6 +257,12 @@ final class MeetingUploadController {
         analysisStore: any MeetingAnalysisStoring,
         uploadStore: any MeetingUploadStoring,
         api: any BrainCaptureAPI,
+        processedTranscriptStore: (any MeetingProcessedTranscriptStoring)? = nil,
+        transcriptProcessingController: (any MeetingTranscriptProcessingControlling)? = nil,
+        terminologyProvider: @escaping @MainActor () -> (terms: [String], hash: String) = {
+            let store = MeetingTerminologyStore()
+            return (store.terms, store.contentHash)
+        },
         renderer: MeetingMarkdownRenderer = MeetingMarkdownRenderer(),
         sleep: @escaping @Sendable (Duration) async throws -> Void = {
             try await Task.sleep(for: $0)
@@ -254,6 +273,10 @@ final class MeetingUploadController {
         self.notesStore = notesStore ?? MeetingNotesStore(rootURL: meetingStore.rootURL)
         self.analysisStore = analysisStore
         self.uploadStore = uploadStore
+        self.processedTranscriptStore = processedTranscriptStore
+            ?? MeetingProcessedTranscriptStore(rootURL: meetingStore.rootURL)
+        self.transcriptProcessingController = transcriptProcessingController
+        self.terminologyProvider = terminologyProvider
         self.renderer = renderer
         self.sleep = sleep
         self.now = now
@@ -266,6 +289,12 @@ final class MeetingUploadController {
         analysisStore: any MeetingAnalysisStoring,
         uploadStore: any MeetingUploadStoring,
         apiProvider: @escaping @MainActor () -> (any BrainCaptureAPI)?,
+        processedTranscriptStore: (any MeetingProcessedTranscriptStoring)? = nil,
+        transcriptProcessingController: (any MeetingTranscriptProcessingControlling)? = nil,
+        terminologyProvider: @escaping @MainActor () -> (terms: [String], hash: String) = {
+            let store = MeetingTerminologyStore()
+            return (store.terms, store.contentHash)
+        },
         renderer: MeetingMarkdownRenderer = MeetingMarkdownRenderer(),
         sleep: @escaping @Sendable (Duration) async throws -> Void = {
             try await Task.sleep(for: $0)
@@ -277,6 +306,10 @@ final class MeetingUploadController {
         self.analysisStore = analysisStore
         self.uploadStore = uploadStore
         self.apiProvider = apiProvider
+        self.processedTranscriptStore = processedTranscriptStore
+            ?? MeetingProcessedTranscriptStore(rootURL: meetingStore.rootURL)
+        self.transcriptProcessingController = transcriptProcessingController
+        self.terminologyProvider = terminologyProvider
         self.renderer = renderer
         self.sleep = sleep
         self.now = now
@@ -288,7 +321,7 @@ final class MeetingUploadController {
     /// path; it waits for `reupload(meetingID:)`.
     func uploadAfterFinalTranscriptPersistence(meetingID: UUID) async {
         do {
-            let candidate = try makeCandidate(meetingID: meetingID)
+            let candidate = try await makeCandidate(meetingID: meetingID)
             if let existing = try uploadStore.load(meetingID: meetingID) {
                 setCurrent(existing)
                 guard existing.transcriptDigest != candidate.transcriptDigest else {
@@ -325,7 +358,7 @@ final class MeetingUploadController {
     func reupload(meetingID: UUID) async {
         do {
             let existing = try uploadStore.load(meetingID: meetingID)
-            var candidate = try makeCandidate(meetingID: meetingID)
+            var candidate = try await makeCandidate(meetingID: meetingID)
             guard existing?.transcriptDigest != candidate.transcriptDigest else {
                 throw MeetingUploadError.noNewRevision
             }
@@ -399,25 +432,39 @@ final class MeetingUploadController {
         try uploadStore.load(meetingID: meetingID)
     }
 
-    private func makeCandidate(meetingID: UUID) throws -> MeetingUploadRevision {
+    private func makeCandidate(meetingID: UUID) async throws -> MeetingUploadRevision {
         let stored = try meetingStore.load(meetingID)
         guard stored.meeting.lifecycleState == .completed,
               stored.meeting.transcriptionState == .completed else {
             throw MeetingUploadError.transcriptNotFinal
         }
         // Missing, failed, or corrupt analysis can never prevent preservation
-        // of the final raw transcript.
+        // of the final transcript.
         let analysis = try? analysisStore.load(meetingID: meetingID)
         // Notes are owner-authored durable input. Always reload them here so
         // final capture never trusts a stale live-controller snapshot. A bad
         // notes file cannot make the valid transcript unreadable.
         let notes = try? notesStore.load(meetingID: meetingID)
-        let markdown = renderer.render(
-            meeting: stored.meeting,
-            utterances: stored.utterances,
-            storedAnalysis: analysis,
+        let processedTranscript = await currentProcessedTranscript(
+            stored: stored,
+            analysis: analysis,
             notes: notes
         )
+        let markdown = if let processedTranscript {
+            renderer.render(
+                meeting: stored.meeting,
+                processedTranscript: processedTranscript,
+                storedAnalysis: analysis,
+                notes: notes
+            )
+        } else {
+            renderer.render(
+                meeting: stored.meeting,
+                utterances: stored.utterances,
+                storedAnalysis: analysis,
+                notes: notes
+            )
+        }
         guard markdown.lengthOfBytes(using: .utf8) <= Self.maximumRenderedBytes else {
             throw MeetingUploadError.oversizedTranscript
         }
@@ -445,6 +492,43 @@ final class MeetingUploadController {
             lastError: nil,
             updatedAt: now()
         )
+    }
+
+    private func currentProcessedTranscript(
+        stored: StoredMeeting,
+        analysis: StoredMeetingAnalysis?,
+        notes: String?
+    ) async -> MeetingProcessedTranscript? {
+        guard let artifact = stored.rawTranscriptArtifacts,
+              artifact.meetingID == stored.meeting.id,
+              let selectedID = artifact.selectedAttemptID,
+              selectedID == stored.meeting.selectedRawTranscriptAttemptID else {
+            return nil
+        }
+        let terminology = terminologyProvider()
+        if let current = try? processedTranscriptStore.load(
+            meetingID: stored.meeting.id,
+            rawAttemptID: selectedID,
+            terminologyHash: terminology.hash
+        ) {
+            return current
+        }
+        guard let transcriptProcessingController else { return nil }
+        let result = await transcriptProcessingController.process(
+            meeting: stored.meeting,
+            artifact: artifact,
+            speakerState: analysis?.speakerState ?? SpeakerEditingState(),
+            notes: notes ?? "",
+            terminology: terminology.terms,
+            terminologyHash: terminology.hash
+        )
+        guard result.failure == nil,
+              result.rawAttemptID == selectedID,
+              result.transcript?.rawAttemptID == selectedID,
+              result.transcript?.terminologyHash == terminology.hash else {
+            return nil
+        }
+        return result.transcript
     }
 
     private func requireRevision(meetingID: UUID) throws -> MeetingUploadRevision {

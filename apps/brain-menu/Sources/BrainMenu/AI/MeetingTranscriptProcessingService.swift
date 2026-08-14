@@ -315,12 +315,16 @@ final class MeetingTranscriptProcessingService: Sendable {
                     prompt: prompt,
                     jsonSchema: MeetingTranscriptProcessingSchema.jsonSchema
                 )
-                processedChunks.append(try MeetingTranscriptProcessingSchema.decode(
+                let candidate = try MeetingTranscriptProcessingSchema.decode(
                     data,
                     attempt: chunkAttempt,
                     assembledTurns: turns,
                     terminologyHash: terminologyHash,
                     terminology: terminology
+                )
+                processedChunks.append(MeetingTranscriptCleanup.enforcingBaseline(
+                    on: candidate,
+                    attempt: chunkAttempt
                 ))
             } catch AIProviderError.schemaFailure {
                 processedChunks.append(MeetingTranscriptCleanup.makeTranscript(
@@ -489,6 +493,21 @@ final class MeetingTranscriptProcessingService: Sendable {
             corrections: chunks.flatMap(\.corrections)
         )
         if let data = try? JSONEncoder().encode(candidate),
+           let validated = try? MeetingTranscriptProcessingSchema.decode(
+               data,
+               attempt: selectedAttempt,
+               assembledTurns: assembledTurns,
+               terminologyHash: terminologyHash,
+               terminology: terminology
+           ) {
+            return validated
+        }
+        let baseline = MeetingTranscriptCleanup.makeTranscript(
+            attempt: selectedAttempt,
+            turns: assembledTurns,
+            terminologyHash: terminologyHash
+        )
+        if let data = try? JSONEncoder().encode(baseline),
            let validated = try? MeetingTranscriptProcessingSchema.decode(
                data,
                attempt: selectedAttempt,

@@ -59,45 +59,15 @@ enum MeetingTranscriptCleanup {
                 textByUtteranceID[utterance.id] = original
                 continue
             }
-            if let evidence = nonSpeechEvidence(for: utterance, in: attempt) {
-                textByUtteranceID[utterance.id] = ""
-                corrections.append(MeetingTranscriptCorrection(
-                    id: utterance.id,
-                    utteranceIDs: [utterance.id],
-                    kind: .hallucination,
-                    before: original,
-                    after: "",
-                    reason: "Overlapping audio activity was classified as non-speech "
-                        + "(\(Int(evidence.voicedMilliseconds.rounded())) voiced ms, "
-                        + "ratio \(String(format: "%.2f", evidence.voicedRatio))).",
-                    confidence: 1
-                ))
-                continue
-            }
-
             let correctionSource = normalized(original)
-            let cleaned = clean(correctionSource)
-            textByUtteranceID[utterance.id] = cleaned.text
-            guard cleaned.text != correctionSource else { continue }
-            var detected: [String] = []
-            if cleaned.fillerCount > 0 {
-                detected.append("\(cleaned.fillerCount) standalone filler word"
-                    + (cleaned.fillerCount == 1 ? "" : "s"))
-            }
-            if cleaned.repeatedWordRunCount > 0 {
-                detected.append("\(cleaned.repeatedWordRunCount) accidental repeated-word run"
-                    + (cleaned.repeatedWordRunCount == 1 ? "" : "s"))
-            }
-            corrections.append(MeetingTranscriptCorrection(
-                id: utterance.id,
-                utteranceIDs: [utterance.id],
-                kind: .grammar,
-                before: correctionSource,
-                after: cleaned.text,
-                reason: "Removed " + detected.joined(separator: " and ")
-                    + " while preserving the remaining words and meaning.",
-                confidence: 0.98
-            ))
+            let baseline = baselineCleanup(
+                correctionSource,
+                utterance: utterance,
+                attempt: attempt,
+                correctionID: utterance.id
+            )
+            textByUtteranceID[utterance.id] = baseline.text
+            if let correction = baseline.correction { corrections.append(correction) }
         }
 
         return MeetingProcessedTranscript(
@@ -121,10 +91,131 @@ enum MeetingTranscriptCleanup {
         )
     }
 
+    /// A successful provider response is an enhancement of the deterministic
+    /// cleanup baseline, never a replacement for it. Provider corrections are
+    /// replayed per immutable raw utterance before the known-safe local rules
+    /// remove any fillers, repetition, or evidence-backed non-speech that the
+    /// provider left behind.
+    static func enforcingBaseline(
+        on candidate: MeetingProcessedTranscript,
+        attempt: MeetingTranscriptAttempt
+    ) -> MeetingProcessedTranscript {
+        var correctionsByFirstUtterance: [UUID: [MeetingTranscriptCorrection]] = [:]
+        for correction in candidate.corrections {
+            guard let firstID = correction.utteranceIDs.first else { continue }
+            correctionsByFirstUtterance[firstID, default: []].append(correction)
+        }
+        var textByUtteranceID: [UUID: String] = [:]
+        var corrections: [MeetingTranscriptCorrection] = []
+
+        for utterance in attempt.utterances
+            .filter({ !$0.suppressed })
+            .sorted(by: MeetingUtterance.chronologicallyPrecedes) {
+            var current = normalized(utterance.text)
+            for correction in correctionsByFirstUtterance[utterance.id] ?? [] {
+                corrections.append(correction)
+                if correction.utteranceIDs.count == 1 {
+                    current = replacingFirst(
+                        correction.before,
+                        in: current,
+                        with: correction.after
+                    )
+                }
+            }
+
+            let baseline = baselineCleanup(
+                current,
+                utterance: utterance,
+                attempt: attempt,
+                correctionID: UUID()
+            )
+            textByUtteranceID[utterance.id] = baseline.text
+            if let correction = baseline.correction { corrections.append(correction) }
+        }
+
+        return MeetingProcessedTranscript(
+            rawAttemptID: candidate.rawAttemptID,
+            terminologyHash: candidate.terminologyHash,
+            turns: candidate.turns.map { turn in
+                let text = turn.utteranceIDs.compactMap { textByUtteranceID[$0] }
+                    .joined(separator: " ")
+                return MeetingProcessedTranscriptTurn(
+                    id: turn.id,
+                    utteranceIDs: turn.utteranceIDs,
+                    startMilliseconds: turn.startMilliseconds,
+                    endMilliseconds: turn.endMilliseconds,
+                    speakerID: turn.speakerID,
+                    speakerLabel: turn.speakerLabel,
+                    text: text,
+                    unclear: text.localizedCaseInsensitiveContains("[unclear]")
+                )
+            },
+            bullets: candidate.bullets,
+            corrections: corrections
+        )
+    }
+
     private struct CleanedText {
         let text: String
         let fillerCount: Int
         let repeatedWordRunCount: Int
+    }
+
+    private struct BaselineCleanup {
+        let text: String
+        let correction: MeetingTranscriptCorrection?
+    }
+
+    private static func baselineCleanup(
+        _ source: String,
+        utterance: MeetingUtterance,
+        attempt: MeetingTranscriptAttempt,
+        correctionID: UUID
+    ) -> BaselineCleanup {
+        guard !source.isEmpty else { return BaselineCleanup(text: source, correction: nil) }
+        if let evidence = nonSpeechEvidence(for: utterance, in: attempt) {
+            return BaselineCleanup(
+                text: "",
+                correction: MeetingTranscriptCorrection(
+                    id: correctionID,
+                    utteranceIDs: [utterance.id],
+                    kind: .hallucination,
+                    before: source,
+                    after: "",
+                    reason: "Overlapping audio activity was classified as non-speech "
+                        + "(\(Int(evidence.voicedMilliseconds.rounded())) voiced ms, "
+                        + "ratio \(String(format: "%.2f", evidence.voicedRatio))).",
+                    confidence: 1
+                )
+            )
+        }
+
+        let cleaned = clean(source)
+        guard cleaned.text != source else {
+            return BaselineCleanup(text: source, correction: nil)
+        }
+        var detected: [String] = []
+        if cleaned.fillerCount > 0 {
+            detected.append("\(cleaned.fillerCount) standalone filler word"
+                + (cleaned.fillerCount == 1 ? "" : "s"))
+        }
+        if cleaned.repeatedWordRunCount > 0 {
+            detected.append("\(cleaned.repeatedWordRunCount) accidental repeated-word run"
+                + (cleaned.repeatedWordRunCount == 1 ? "" : "s"))
+        }
+        return BaselineCleanup(
+            text: cleaned.text,
+            correction: MeetingTranscriptCorrection(
+                id: correctionID,
+                utteranceIDs: [utterance.id],
+                kind: .grammar,
+                before: source,
+                after: cleaned.text,
+                reason: "Removed " + detected.joined(separator: " and ")
+                    + " while preserving the remaining words and meaning.",
+                confidence: 0.98
+            )
+        )
     }
 
     private static func clean(_ value: String) -> CleanedText {
@@ -182,6 +273,17 @@ enum MeetingTranscriptCleanup {
             range: NSRange(location: 0, length: value.utf16.count),
             withTemplate: replacement
         )
+    }
+
+    private static func replacingFirst(
+        _ target: String,
+        in value: String,
+        with replacement: String
+    ) -> String {
+        guard let range = value.range(of: target) else { return value }
+        var result = value
+        result.replaceSubrange(range, with: replacement)
+        return result
     }
 
     private static func normalized(_ value: String) -> String {

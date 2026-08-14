@@ -212,10 +212,13 @@ struct SavedMeetingTranscriptProcessingControllerFactory {
         self.providerFactory = providerFactory
     }
 
-    func make() -> (any MeetingTranscriptProcessingControlling)? {
+    func make(
+        store: any MeetingProcessedTranscriptStoring = MeetingProcessedTranscriptStore()
+    ) -> (any MeetingTranscriptProcessingControlling)? {
         let configuration = settings.load().canonicalized()
         return MeetingTranscriptProcessingService(
-            provider: providerFactory.makeProvider(configuration: configuration)
+            provider: providerFactory.makeProvider(configuration: configuration),
+            store: store
         )
     }
 }
@@ -727,6 +730,9 @@ final class MeetingDetailController {
         processedTranscript = transcript
         transcriptReviewMode = .processed
         transcriptProcessingMessage = nil
+        await uploadController.uploadAfterFinalTranscriptPersistence(meetingID: meetingID)
+        loadUploadRevision()
+        if let uploadError = uploadController.errorMessage { errorMessage = uploadError }
     }
 
     func load() {
