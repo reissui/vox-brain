@@ -275,9 +275,18 @@ struct MeetingTranscriptProcessingServiceTests {
                 attestedModel: "large-v3"
             ))
         }
+        let retainedPreview = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: utterances[300].startMilliseconds,
+            endMilliseconds: utterances[300].endMilliseconds,
+            text: "distinct retained preview evidence",
+            baseSpeakerID: "you",
+            transcriptionPhase: .preview
+        )
         let attempt = MeetingTranscriptAttempt(
             modelAttestation: MeetingTranscriptModelAttestation(meeting: meeting),
             spanOutcomes: spanOutcomes,
+            retainedPreviews: [retainedPreview],
             utterances: utterances,
             isSuccessful: true
         )
@@ -296,6 +305,7 @@ struct MeetingTranscriptProcessingServiceTests {
         #expect(result.failure == nil)
         #expect(await provider.runCount > 1)
         #expect(await provider.largestPromptCharacterCount < 500_000)
+        #expect(await provider.sawRetainedPreviewEvidence)
         #expect(result.transcript?.turns.count == utterances.count)
         #expect(result.transcript?.turns.first?.text == "raw utterance 0")
         #expect(result.transcript?.turns.last?.text == "raw utterance 1694")
@@ -304,6 +314,46 @@ struct MeetingTranscriptProcessingServiceTests {
             rawAttemptID: attempt.id,
             terminologyHash: "long-current"
         ) == result.transcript)
+    }
+
+    @Test
+    func providerFailureStillPersistsAnAudioAwareLocallyCleanedTranscript() async throws {
+        let fixture = try ProcessingFixture(text: "Um, hello, hello, hello. Okay.")
+        let store = MeetingProcessedTranscriptStore(rootURL: fixture.root)
+        let result = await MeetingTranscriptProcessingService(
+            provider: FailingProcessingProvider(),
+            store: store
+        ).process(
+            meeting: fixture.meeting,
+            selectedAttempt: fixture.attempt,
+            terminology: [],
+            terminologyHash: "fallback"
+        )
+
+        #expect(result.failure == nil)
+        #expect(result.transcript?.turns.first?.text == "hello. Okay.")
+        #expect(result.transcript?.corrections.count == 1)
+        #expect(try store.load(
+            meetingID: fixture.meeting.id,
+            rawAttemptID: fixture.attempt.id,
+            terminologyHash: "fallback"
+        ) == result.transcript)
+
+        let nonSpeech = try ProcessingFixture(text: "Thank you", speechBearing: false)
+        let nonSpeechStore = MeetingProcessedTranscriptStore(rootURL: nonSpeech.root)
+        let nonSpeechResult = await MeetingTranscriptProcessingService(
+            provider: FailingProcessingProvider(readiness: .timeout),
+            store: nonSpeechStore
+        ).process(
+            meeting: nonSpeech.meeting,
+            selectedAttempt: nonSpeech.attempt,
+            terminology: [],
+            terminologyHash: "audio-fallback"
+        )
+
+        #expect(nonSpeechResult.failure == nil)
+        #expect(nonSpeechResult.transcript?.turns.first?.text.isEmpty == true)
+        #expect(nonSpeechResult.transcript?.corrections.first?.kind == .hallucination)
     }
 
     @Test
@@ -363,14 +413,31 @@ private final class ProcessingProvider: AIProviding, @unchecked Sendable {
 private actor SchemaRejectingProcessingProvider: AIProviding {
     private(set) var runCount = 0
     private(set) var largestPromptCharacterCount = 0
+    private(set) var sawRetainedPreviewEvidence = false
 
     func run(prompt: String, jsonSchema: Data) async throws -> Data {
         runCount += 1
         largestPromptCharacterCount = max(largestPromptCharacterCount, prompt.count)
+        sawRetainedPreviewEvidence = sawRetainedPreviewEvidence
+            || prompt.contains("distinct retained preview evidence")
         throw AIProviderError.schemaFailure
     }
 
     func testConnection() async -> AIConnectionState { .ready }
+}
+
+private struct FailingProcessingProvider: AIProviding {
+    let readiness: AIConnectionState
+
+    init(readiness: AIConnectionState = .ready) {
+        self.readiness = readiness
+    }
+
+    func run(prompt: String, jsonSchema: Data) async throws -> Data {
+        throw AIProviderError.timedOut
+    }
+
+    func testConnection() async -> AIConnectionState { readiness }
 }
 
 private struct ProcessingFixture {

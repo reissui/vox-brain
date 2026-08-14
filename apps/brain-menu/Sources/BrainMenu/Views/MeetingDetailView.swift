@@ -186,7 +186,6 @@ struct SavedMeetingTranscriptProcessingControllerFactory {
 
     func make() -> (any MeetingTranscriptProcessingControlling)? {
         let configuration = settings.load().canonicalized()
-        guard configuration.provider != .disabled else { return nil }
         return MeetingTranscriptProcessingService(
             provider: providerFactory.makeProvider(configuration: configuration)
         )
@@ -345,6 +344,7 @@ final class MeetingDetailController {
     @ObservationIgnored private let processedTranscriptStore: any MeetingProcessedTranscriptStoring
     @ObservationIgnored private let transcriptProcessingController: (any MeetingTranscriptProcessingControlling)?
     @ObservationIgnored private let terminologyStore: MeetingTerminologyStore
+    @ObservationIgnored private var transcriptProcessingTask: Task<Void, Never>?
     let audioPlayback: MeetingAudioPlaybackController
     private(set) var rawTranscriptArtifact: MeetingTranscriptArtifact?
     private(set) var processedTranscript: MeetingProcessedTranscript?
@@ -643,18 +643,20 @@ final class MeetingDetailController {
             } else {
                 processedTranscript = nil
             }
-            transcriptReviewMode = processedTranscript == nil ? .raw : .processed
+            transcriptReviewMode = .processed
             transcriptProcessingMessage = processedTranscript == nil
-                ? "The processed transcript is unavailable or stale."
+                ? "Preparing a clean, readable transcript…"
                 : nil
         } catch {
             processedTranscript = nil
-            transcriptReviewMode = .raw
+            transcriptReviewMode = .processed
             transcriptProcessingMessage = "Processed transcript review data is unavailable: \(Self.bounded(error))"
         }
     }
 
     private func clearTranscriptReview() {
+        transcriptProcessingTask?.cancel()
+        transcriptProcessingTask = nil
         rawTranscriptArtifact = nil
         processedTranscript = nil
         transcriptReviewMode = .raw
@@ -671,7 +673,8 @@ final class MeetingDetailController {
             return
         }
         isTranscriptProcessingRetryInProgress = true
-        transcriptProcessingMessage = nil
+        transcriptReviewMode = .processed
+        transcriptProcessingMessage = "Comparing the raw transcript with audio-derived evidence…"
         defer { isTranscriptProcessingRetryInProgress = false }
         let result = await transcriptProcessingController.process(
             meeting: meeting,
@@ -681,17 +684,18 @@ final class MeetingDetailController {
             terminology: terminologyStore.terms,
             terminologyHash: terminologyStore.contentHash
         )
+        guard !Task.isCancelled, self.meeting != nil else { return }
         guard result.failure == nil,
               let transcript = result.transcript,
               transcript.rawAttemptID == selectedRawTranscriptAttempt?.id,
               transcript.terminologyHash == terminologyStore.contentHash else {
             processedTranscript = nil
-            transcriptReviewMode = .raw
             transcriptProcessingMessage = Self.processingFailureMessage(result.failure)
             return
         }
         processedTranscript = transcript
         transcriptReviewMode = .processed
+        transcriptProcessingMessage = nil
     }
 
     func load() {
@@ -736,6 +740,7 @@ final class MeetingDetailController {
             }
             loadTranscriptReview(meeting: stored.meeting, fallbackUtterances: stored.utterances)
             state = .ready
+            startTranscriptProcessingIfNeeded()
         } catch let error as MeetingStoreError {
             meeting = nil
             refreshAudioCapabilities(for: nil)
@@ -757,6 +762,18 @@ final class MeetingDetailController {
             editor = SpeakerEditor(utterances: [])
             clearTranscriptReview()
             state = .failed(Self.bounded(error))
+        }
+    }
+
+    private func startTranscriptProcessingIfNeeded() {
+        guard processedTranscript == nil,
+              selectedRawTranscriptAttempt != nil,
+              transcriptProcessingTask == nil,
+              transcriptProcessingController != nil else { return }
+        transcriptProcessingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.retryTranscriptProcessing()
+            self.transcriptProcessingTask = nil
         }
     }
 
@@ -1059,6 +1076,8 @@ final class MeetingDetailController {
     private func deleteMeeting() async {
         guard isMeetingDeletionPending, !isMeetingDeletionInProgress else { return }
         isMeetingDeletionInProgress = true
+        transcriptProcessingTask?.cancel()
+        transcriptProcessingTask = nil
         do {
             try await transcriptionController.cancelAndWaitForDeletion(
                 meetingID: meetingID
@@ -1073,6 +1092,7 @@ final class MeetingDetailController {
             analysis = nil
             uploadRevision = nil
             editor = SpeakerEditor(utterances: [])
+            clearTranscriptReview()
             state = .deleted
             errorMessage = nil
         } catch {

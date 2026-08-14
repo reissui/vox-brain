@@ -1,10 +1,9 @@
 import Foundation
 
-/// A bounded, diagnostic-only prompt that the owner may copy into a tool of
-/// their choice. It intentionally contains no transcript, notes, names, or
-/// terminology entries.
+/// A short, call-specific prompt that contains quality signals but no private
+/// transcript, notes, names, or terminology entries.
 enum MeetingImprovementPrompt {
-    static let maximumCharacters = 4_000
+    static let maximumCharacters = 1_500
 
     static func make(
         meeting: MeetingRecord,
@@ -23,86 +22,66 @@ enum MeetingImprovementPrompt {
         let effective = modelIdentity(attestation.effectiveSelection)
         let verified = attestation.verificationState == .verified
             && attestation.requestedSelection == attestation.effectiveSelection
-        let verification = verified ? "verified" : "unverified"
-        let spans = attempt.spanOutcomes.sorted(by: spanOrder)
         let failures = attempt.failures.sorted(by: failureOrder)
-        let evidenceStarts = spans.map(\.originalStartMilliseconds)
-            + attempt.utterances.map(\.startMilliseconds)
-        let evidenceEnds = spans.map(\.originalEndMilliseconds)
-            + attempt.utterances.map(\.endMilliseconds)
-        let windowSpan = if let start = evidenceStarts.min(), let end = evidenceEnds.max() {
-            "\(timestamp(start))-\(timestamp(end)) (\(max(0, end - start)) ms)"
-        } else {
-            "none"
-        }
-        let totalFinalWindowMilliseconds = spans.reduce(Int64(0)) {
-            $0 + max(0, $1.originalEndMilliseconds - $1.originalStartMilliseconds)
-        }
+        let cleanup = MeetingTranscriptCleanup.metrics(for: attempt)
         let correctionCounts = Dictionary(
             grouping: processedTranscript?.corrections ?? [],
             by: \MeetingTranscriptCorrection.kind
         ).mapValues(\.count)
 
-        var lines = [
-            "Meeting transcript quality improvement request",
-            "",
-            "Evidence summary (diagnostics only; no transcript content is included):",
-            "- Requested speech model: \(requested)",
-            "- Effective speech model: \(effective)",
-            "- Model verification: \(verification)",
-            "- Raw attempt ID: \(attempt.id.uuidString.lowercased())",
-            "- Raw utterances: \(attempt.utterances.count)",
-            "- Retained live previews: \(attempt.retainedPreviews.count)",
-            "- Attempt window span: \(windowSpan)",
-            "- Final windows: \(spans.count)",
-            "- Final window duration: \(totalFinalWindowMilliseconds) ms",
-            "- Skipped/failed final windows: \(attempt.failureTotals.final)",
-            "- Failures: \(attempt.failureTotals.total) total, \(attempt.failureTotals.systemic) systemic, \(attempt.failureTotals.preview) preview, \(attempt.failureTotals.final) final",
-            "- Corrections: \(processedTranscript?.corrections.count ?? 0) total"
-        ]
-
-        for kind in MeetingTranscriptCorrectionKind.allCases {
-            lines.append("  - \(kind.rawValue): \(correctionCounts[kind, default: 0])")
+        var issues: [String] = []
+        if cleanup.fillerCount > 0 || cleanup.repeatedWordRunCount > 0 {
+            issues.append(
+                "- \(cleanup.fillerCount) filler word"
+                    + (cleanup.fillerCount == 1 ? "" : "s")
+                    + " and \(cleanup.repeatedWordRunCount) repeated-word run"
+                    + (cleanup.repeatedWordRunCount == 1 ? "" : "s")
+                    + " were detected; distinguish accidental disfluency from intentional emphasis."
+            )
         }
-
-        lines.append("")
-        lines.append("Window spans:")
-        if spans.isEmpty {
-            lines.append("- None recorded")
-        } else {
-            for (index, span) in spans.prefix(20).enumerated() {
-                let outcome = span.failure == nil && !span.wasCancelled ? "completed" : "failed/skipped"
-                lines.append(
-                    "- \(index + 1). \(timestamp(span.originalStartMilliseconds))-\(timestamp(span.originalEndMilliseconds)); \(span.source.rawValue); requests=\(span.requestCount); \(outcome)"
-                )
-            }
-            if spans.count > 20 { lines.append("- \(spans.count - 20) additional windows omitted") }
+        if cleanup.nonSpeechUtteranceCount > 0 {
+            issues.append(
+                "- \(cleanup.nonSpeechUtteranceCount) utterance"
+                    + (cleanup.nonSpeechUtteranceCount == 1 ? " overlaps" : "s overlap")
+                    + " audio classified as non-speech; verify before removing it."
+            )
         }
-
-        lines.append("")
-        lines.append("Failure diagnostics:")
-        if failures.isEmpty {
-            lines.append("- None recorded")
-        } else {
-            for failure in failures.prefix(12) {
-                let range = failure.startMilliseconds.map { start in
+        if !failures.isEmpty {
+            let ranges = failures.prefix(6).map { failure in
+                failure.startMilliseconds.map { start in
                     "\(timestamp(start))-\(timestamp(failure.endMilliseconds ?? start))"
                 } ?? "timestamp unavailable"
-                lines.append(
-                    "- \(range); \(failure.source.rawValue); \(failure.phase.rawValue); systemic=\(failure.isSystemic); category=\(failureCategory(failure.message))"
-                )
-            }
-            if failures.count > 12 { lines.append("- \(failures.count - 12) additional failures omitted") }
+            }.joined(separator: ", ")
+            let categories = Dictionary(grouping: failures, by: {
+                failureCategory($0.message)
+            }).map { "\($0.key)=\($0.value.count)" }.sorted().joined(separator: ", ")
+            issues.append(
+                "- \(attempt.failureTotals.final) final audio span"
+                    + (attempt.failureTotals.final == 1 ? " was" : "s were")
+                    + " skipped or failed at \(ranges) (\(categories))."
+            )
+        }
+        if !verified {
+            issues.append("- Model identity is unverified (requested \(requested), effective \(effective)).")
+        }
+        if let processedTranscript, !processedTranscript.corrections.isEmpty {
+            let kinds = MeetingTranscriptCorrectionKind.allCases.compactMap { kind in
+                let count = correctionCounts[kind, default: 0]
+                return count > 0 ? "\(kind.rawValue)=\(count)" : nil
+            }.joined(separator: ", ")
+            issues.append("- Existing processing recorded \(processedTranscript.corrections.count) corrections (\(kinds)).")
+        }
+        if issues.isEmpty {
+            issues.append("- No explicit failures were recorded; check only for subtle readability errors.")
         }
 
-        lines += [
+        let lines = [
+            "Improve this meeting transcript using the retained audio and immutable raw evidence.",
             "",
-            "Concrete checks:",
-            "1. Verify the configured model resolves to the effective model and reports a fresh attestation.",
-            "2. Reproduce each failed final window at its timestamp and classify capture, speech-gate, model, timeout, or persistence cause.",
-            "3. Compare retained preview and final-window counts to find speech lost during finalization.",
-            "4. Use correction-kind counts to prioritize terminology, hallucination, punctuation, grammar, boundary, and unclear-audio regressions.",
-            "5. Add a deterministic regression check for every confirmed failure without changing immutable raw evidence."
+            "Detected issues:"
+        ] + issues + [
+            "",
+            "Compare the flagged timestamps with the audio-derived previews and speech activity. Remove fillers and accidental repetition, repair only well-supported wording, mark genuinely unclear audio as [unclear], and preserve names, numbers, decisions, speaker meaning, and intentional emphasis. Do not change the Raw transcript."
         ]
 
         return bounded(lines)
@@ -140,19 +119,6 @@ enum MeetingImprovementPrompt {
         if normalized.contains("persist") || normalized.contains("write") { return "persistence" }
         if normalized.contains("audio") || normalized.contains("speech") { return "audio" }
         return "other"
-    }
-
-    private static func spanOrder(
-        _ lhs: MeetingTranscriptSpanOutcome,
-        _ rhs: MeetingTranscriptSpanOutcome
-    ) -> Bool {
-        if lhs.originalStartMilliseconds != rhs.originalStartMilliseconds {
-            return lhs.originalStartMilliseconds < rhs.originalStartMilliseconds
-        }
-        if lhs.originalEndMilliseconds != rhs.originalEndMilliseconds {
-            return lhs.originalEndMilliseconds < rhs.originalEndMilliseconds
-        }
-        return lhs.source.rawValue < rhs.source.rawValue
     }
 
     private static func failureOrder(

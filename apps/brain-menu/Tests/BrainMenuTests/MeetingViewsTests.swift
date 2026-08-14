@@ -1623,7 +1623,7 @@ struct MeetingViewsTests {
     }
 
     @Test
-    func staleProcessedTranscriptFallsBackToRawAndFailedRetryDoesNotHideIt() async throws {
+    func staleProcessedTranscriptDefaultsToProcessedAndFailedRetryKeepsRawAvailable() async throws {
         let id = UUID()
         let attemptID = UUID()
         let utterance = try MeetingUtterance(
@@ -1681,7 +1681,7 @@ struct MeetingViewsTests {
         )
 
         controller.load()
-        #expect(controller.viewModel.transcriptReview?.mode == .raw)
+        #expect(controller.viewModel.transcriptReview?.mode == .processed)
         #expect(controller.viewModel.transcriptReview?.rawRows.map(\.text)
             == ["immutable raw evidence"])
         #expect(controller.viewModel.transcriptReview?.model.isVerified == false)
@@ -1692,7 +1692,7 @@ struct MeetingViewsTests {
         #expect(controller.viewModel.transcriptReview?.processedIsCurrent == false)
         await controller.perform(.retryTranscriptProcessing)
         #expect(processing.calls == 1)
-        #expect(controller.viewModel.transcriptReview?.mode == .raw)
+        #expect(controller.viewModel.transcriptReview?.mode == .processed)
         #expect(controller.viewModel.transcriptReview?.rawRows.map(\.text)
             == ["immutable raw evidence"])
         #expect(controller.viewModel.transcriptReview?.processingMessage?.contains("evidence checks") == true)

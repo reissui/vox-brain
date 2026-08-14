@@ -44,8 +44,8 @@ starts or stops recording automatically.
 3. Pause and resume explicitly. Dictation cannot use the microphone during a
    recording.
 4. Choose **End & Process**. Dismissing the prompt keeps recording.
-5. Review the saved item. **Processed** is selected automatically when a
-   current processed transcript exists; **Raw** remains the immutable fallback
+5. Review the saved item. **Processed** is selected automatically and starts
+   building as soon as Raw completes. **Raw** remains the immutable fallback
    with preserved previews, failed-span diagnostics, and verified model
    metadata. Same-speaker utterances separated by less than eight seconds are
    one readable turn; eight seconds or a speaker change starts a new turn.
@@ -68,16 +68,20 @@ a recording removes its audio; deleting its entire item removes all of that
 item’s data. Brain never automatically deletes a saved recording.
 
 Processed text is a separate, replaceable projection of the immutable raw
-attempt. Private terminology can correct supported spellings while every change
-keeps an audit record; unsupported invented content is rejected. Optional
-analysis uses the current processed transcript and falls back to raw evidence
-when processing is unavailable. A stale or failed processed transcript stays
-retryable from review and never hides the raw transcript. **Create Improvement
-Prompt** runs only when pressed and produces bounded quality diagnostics for
-copying—no transcript content and no automatic follow-up generation, rendering,
-or export. Long transcripts are processed in bounded evidence chunks. If an AI
-chunk does not pass validation, Brain keeps that section verbatim from the raw
-transcript instead of discarding the entire processed view.
+attempt. It compares final turns with overlapping live previews and speech
+activity, removes supported fillers and accidental repeated-word runs, and
+records every change. Private terminology can correct supported spellings;
+unsupported invented content is rejected. If optional AI is unavailable, a
+conservative local cleanup is saved instead of leaving Processed empty.
+Optional analysis uses the current processed transcript and falls back to raw
+evidence when necessary. A stale transcript regenerates on review and never
+hides Raw. **Create Improvement Prompt** runs only when pressed and produces a
+short prompt targeted to the failures, timestamps, disfluencies, and correction
+categories detected in that call—no transcript content and no automatic
+follow-up generation, rendering, or export. Long transcripts are processed in
+bounded evidence chunks. If an AI chunk does not pass validation, Brain keeps
+a locally cleaned, evidence-traceable section instead of discarding the entire
+processed view.
 
 ## Smoke test
 
@@ -99,9 +103,9 @@ Keep the previous app artifact until this passes.
 - **Recording interrupted:** reconnect the microphone, run the Speech test,
   and start a new recording. The partial transcript and source audio remain
   available for review and transcription retry.
-- **Processed transcript unavailable:** switch to **Raw** to keep reviewing the
-  immutable transcript, then choose **Retry Processing**. A failed retry does
-  not replace the last valid analysis or alter the raw attempt.
+- **Processed transcript unavailable:** review starts a fresh processing pass
+  automatically. Switch to **Raw** at any time, or choose **Retry Processing**
+  after a persistence failure. A retry never alters the raw attempt.
 - **No system track:** recheck Screen & System Audio Recording permission.
 - **VoxType or a model is missing:** use **Enable Speech** or **Download** in
   Speech Setup.

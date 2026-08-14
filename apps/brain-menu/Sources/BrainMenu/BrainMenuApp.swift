@@ -152,7 +152,9 @@ final class BrainAppControllerGraph {
     @ObservationIgnored private let actionRouter: BrainAppActionRouter
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var automaticMeetingAnalysisTask: Task<Void, Never>?
+    @ObservationIgnored private var automaticTranscriptProcessingTasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private let meetingAnalysisFactory: @MainActor () -> (any MeetingDetailAnalysisControlling)?
+    @ObservationIgnored private let transcriptProcessingFactory: @MainActor () -> (any MeetingTranscriptProcessingControlling)?
     @ObservationIgnored private var lastNotifiedMeetingID: UUID?
     @ObservationIgnored private var dictationStartedAt: Date?
     @ObservationIgnored private var activityClockTask: Task<Void, Never>?
@@ -226,6 +228,9 @@ final class BrainAppControllerGraph {
         updates: UpdateController = UpdateController(),
         audioRetention: AudioRetentionController = AudioRetentionController(),
         now: @escaping @MainActor () -> Date = Date.init,
+        transcriptProcessingFactory: @escaping @MainActor () -> (any MeetingTranscriptProcessingControlling)? = {
+            SavedMeetingTranscriptProcessingControllerFactory().make()
+        },
         meetingAnalysisFactory: @escaping @MainActor () -> (any MeetingDetailAnalysisControlling)? = {
             SavedMeetingAnalysisControllerFactory().make()
         }
@@ -240,6 +245,7 @@ final class BrainAppControllerGraph {
         self.updates = updates
         self.audioRetention = audioRetention
         self.now = now
+        self.transcriptProcessingFactory = transcriptProcessingFactory
         self.meetingAnalysisFactory = meetingAnalysisFactory
         self.dictationHistory = dictationHistory
         let router = BrainAppActionRouter()
@@ -402,6 +408,8 @@ final class BrainAppControllerGraph {
         activityClockTask = nil
         automaticMeetingAnalysisTask?.cancel()
         automaticMeetingAnalysisTask = nil
+        automaticTranscriptProcessingTasks.values.forEach { $0.cancel() }
+        automaticTranscriptProcessingTasks = [:]
         meetingLivePanel.hide()
         recordingIsland.hideImmediately()
     }
@@ -601,9 +609,29 @@ final class BrainAppControllerGraph {
     }
 
     private func startAutomaticMeetingAnalysisIfReady(for record: MeetingRecord) {
-        guard record.transcriptionState == .completed,
-              record.analysisState == .notRequested else { return }
+        guard record.transcriptionState == .completed else { return }
+        startAutomaticTranscriptProcessing(for: record.id)
+        guard record.analysisState == .notRequested else { return }
         startAutomaticMeetingAnalysis(for: record.id)
+    }
+
+    private func startAutomaticTranscriptProcessing(for meetingID: UUID) {
+        guard automaticTranscriptProcessingTasks[meetingID] == nil,
+              let stored = try? meetings.storedMeetingForPostProcessing(meetingID),
+              let artifact = stored.rawTranscriptArtifacts,
+              let controller = transcriptProcessingFactory() else { return }
+        let terminology = speechSettings.meetingTerminology
+        automaticTranscriptProcessingTasks[meetingID] = Task { @MainActor [weak self] in
+            _ = await controller.process(
+                meeting: stored.meeting,
+                artifact: artifact,
+                speakerState: SpeakerEditingState(),
+                notes: "",
+                terminology: terminology.terms,
+                terminologyHash: terminology.contentHash
+            )
+            self?.automaticTranscriptProcessingTasks[meetingID] = nil
+        }
     }
 
     private func startAutomaticMeetingAnalysis(for meetingID: UUID) {
