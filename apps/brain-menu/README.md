@@ -46,8 +46,9 @@ is an editable meeting scratchpad.
 Saved meetings open on **Processed**. Processing starts as soon as the raw
 transcript completes, compares final text with overlapping audio-derived live
 previews and speech activity, and removes supported fillers or accidental
-repetition. A conservative local cleanup is persisted when optional AI is
-disabled or unavailable. **Raw** always exposes the immutable engine evidence,
+repetition. Conservative local cleanup is the mandatory baseline even when the
+optional AI provider succeeds, so a no-op provider response cannot restore known
+fillers or repetition. **Raw** always exposes the immutable engine evidence,
 including preserved previews and bounded failure diagnostics. Adjacent
 utterances from one speaker remain one readable turn when silence is under
 eight seconds; eight seconds or a speaker change starts a new turn.
@@ -61,6 +62,10 @@ Raw with the audio evidence again. The per-version improvement action builds a
 short prompt from the specific failures, timestamps, disfluencies, and correction
 categories detected in that call; Brain does not generate, render, or export
 follow-up material automatically.
+
+Brain waits for the current Processed projection before its first vault handoff.
+The immutable Raw transcript is used only when processing cannot produce a
+current, valid projection.
 
 ## Local Librarian and AI
 

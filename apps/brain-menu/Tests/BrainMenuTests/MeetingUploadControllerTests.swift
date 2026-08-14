@@ -61,6 +61,200 @@ struct MeetingUploadControllerTests {
     }
 
     @Test
+    func finalCapturePrefersTheCurrentProcessedTranscript() async throws {
+        let fixture = try UploadFixture()
+        var meeting = completedMeeting(title: "Processed handoff")
+        let raw = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 2_000,
+            text: "Um, raw, raw, raw transcript.",
+            baseSpeakerID: "you"
+        )
+        let attempt = MeetingTranscriptAttempt(
+            modelAttestation: MeetingTranscriptModelAttestation(meeting: meeting),
+            utterances: [raw],
+            isSuccessful: true
+        )
+        _ = try MeetingTranscriptArtifactStore(rootURL: fixture.rootURL).append(
+            attempt,
+            meetingID: meeting.id,
+            selecting: true
+        )
+        meeting.selectedRawTranscriptAttemptID = attempt.id
+        try fixture.meetingStore.save(meeting, utterances: [raw])
+
+        let terminologyHash = MeetingTerminologyStore().contentHash
+        try MeetingProcessedTranscriptStore(rootURL: fixture.rootURL).replace(
+            MeetingProcessedTranscript(
+                rawAttemptID: attempt.id,
+                terminologyHash: terminologyHash,
+                turns: [MeetingProcessedTranscriptTurn(
+                    id: raw.id,
+                    utteranceIDs: [raw.id],
+                    startMilliseconds: raw.startMilliseconds,
+                    endMilliseconds: raw.endMilliseconds,
+                    speakerID: "you",
+                    speakerLabel: "You",
+                    text: "Clean transcript.",
+                    unclear: false
+                )],
+                bullets: [],
+                corrections: []
+            ),
+            meetingID: meeting.id
+        )
+        let api = MeetingUploadAPISpy(
+            captureResults: [.value(BrainCaptureReceipt(id: "processed", state: "queued"))],
+            statusResults: [.value(BrainCaptureStatus(
+                id: "processed",
+                state: .delivered,
+                retryable: false,
+                error: nil,
+                createdAt: Date(timeIntervalSince1970: 1),
+                updatedAt: Date(timeIntervalSince1970: 2),
+                deliveredAt: Date(timeIntervalSince1970: 2)
+            ))]
+        )
+
+        await fixture.controller(api: api)
+            .uploadAfterFinalTranscriptPersistence(meetingID: meeting.id)
+
+        let markdown = try #require(await api.captureCalls.first?.request.transcript)
+        #expect(markdown.contains("Clean transcript."))
+        #expect(!markdown.contains(raw.text))
+    }
+
+    @Test
+    func processedRendererOmitsTurnsThatCleanupRemovedCompletely() throws {
+        let meeting = completedMeeting(title: "Empty cleaned turn")
+        let removedID = UUID()
+        let retainedID = UUID()
+        let processed = MeetingProcessedTranscript(
+            rawAttemptID: UUID(),
+            terminologyHash: "current",
+            turns: [
+                MeetingProcessedTranscriptTurn(
+                    id: removedID,
+                    utteranceIDs: [removedID],
+                    startMilliseconds: 0,
+                    endMilliseconds: 500,
+                    speakerID: "you",
+                    speakerLabel: "You",
+                    text: "   ",
+                    unclear: false
+                ),
+                MeetingProcessedTranscriptTurn(
+                    id: retainedID,
+                    utteranceIDs: [retainedID],
+                    startMilliseconds: 1_000,
+                    endMilliseconds: 2_000,
+                    speakerID: "you",
+                    speakerLabel: "You",
+                    text: "Retained meaning.",
+                    unclear: false
+                ),
+            ],
+            bullets: [],
+            corrections: []
+        )
+
+        let markdown = MeetingMarkdownRenderer().render(
+            meeting: meeting,
+            processedTranscript: processed,
+            storedAnalysis: nil
+        )
+
+        #expect(!markdown.contains("00:00:00.000–00:00:00.500"))
+        #expect(markdown.contains("### [00:00:01.000–00:00:02.000] You\n\nRetained meaning."))
+    }
+
+    @Test
+    func finalCaptureBuildsTheProcessedTranscriptBeforeHandoffWhenMissing() async throws {
+        let fixture = try UploadFixture()
+        var meeting = completedMeeting(title: "Processed before handoff")
+        let raw = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 2_000,
+            text: "Um, raw, raw, raw transcript.",
+            baseSpeakerID: "you"
+        )
+        let attempt = MeetingTranscriptAttempt(
+            modelAttestation: MeetingTranscriptModelAttestation(meeting: meeting),
+            utterances: [raw],
+            isSuccessful: true
+        )
+        _ = try MeetingTranscriptArtifactStore(rootURL: fixture.rootURL).append(
+            attempt,
+            meetingID: meeting.id,
+            selecting: true
+        )
+        meeting.selectedRawTranscriptAttemptID = attempt.id
+        try fixture.meetingStore.save(meeting, utterances: [raw])
+
+        let terminologyHash = "upload-current"
+        let providerOutput = MeetingProcessedTranscript(
+            rawAttemptID: attempt.id,
+            terminologyHash: terminologyHash,
+            turns: [MeetingProcessedTranscriptTurn(
+                id: raw.id,
+                utteranceIDs: [raw.id],
+                startMilliseconds: raw.startMilliseconds,
+                endMilliseconds: raw.endMilliseconds,
+                speakerID: "you",
+                speakerLabel: "You",
+                text: raw.text,
+                unclear: false
+            )],
+            bullets: ["Provider output completed."],
+            corrections: []
+        )
+        let processedStore = MeetingProcessedTranscriptStore(rootURL: fixture.rootURL)
+        let processor = MeetingTranscriptProcessingService(
+            provider: UploadProcessingProvider(output: try JSONEncoder().encode(providerOutput)),
+            store: processedStore
+        )
+        let api = MeetingUploadAPISpy(
+            captureResults: [.value(BrainCaptureReceipt(id: "processed-first", state: "queued"))],
+            statusResults: [.value(BrainCaptureStatus(
+                id: "processed-first",
+                state: .delivered,
+                retryable: false,
+                error: nil,
+                createdAt: Date(timeIntervalSince1970: 1),
+                updatedAt: Date(timeIntervalSince1970: 2),
+                deliveredAt: Date(timeIntervalSince1970: 2)
+            ))]
+        )
+        let controller = MeetingUploadController(
+            meetingStore: fixture.meetingStore,
+            notesStore: fixture.notesStore,
+            analysisStore: fixture.analysisStore,
+            uploadStore: fixture.uploadStore,
+            api: api,
+            processedTranscriptStore: processedStore,
+            transcriptProcessingController: processor,
+            terminologyProvider: { ([], terminologyHash) },
+            sleep: { _ in }
+        )
+
+        await controller.uploadAfterFinalTranscriptPersistence(meetingID: meeting.id)
+
+        let markdown = try #require(await api.captureCalls.first?.request.transcript)
+        #expect(markdown.contains("raw transcript."))
+        #expect(!markdown.contains(raw.text))
+        let loaded = try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: terminologyHash
+        )
+        let saved = try #require(loaded)
+        #expect(saved.corrections.count == 1)
+        #expect(saved.bullets == ["Provider output completed."])
+    }
+
+    @Test
     func nonblankNotesRenderVerbatimBeforeTranscriptAndBlankNotesChangeNoBytes() throws {
         let meeting = completedMeeting(title: "Notes rendering")
         let utterances = try sampleUtterances()
@@ -489,6 +683,13 @@ private actor MeetingUploadAPISpy: BrainCaptureAPI {
         guard !statusResults.isEmpty else { throw LocalBrainError.invalidOutput }
         return try statusResults.removeFirst().get()
     }
+}
+
+private struct UploadProcessingProvider: AIProviding {
+    let output: Data
+
+    func run(prompt: String, jsonSchema: Data) async throws -> Data { output }
+    func testConnection() async -> AIConnectionState { .ready }
 }
 
 @MainActor

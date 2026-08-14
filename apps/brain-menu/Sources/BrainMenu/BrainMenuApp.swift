@@ -693,9 +693,13 @@ final class BrainAppControllerGraph {
         let store = MeetingStore()
         let notesStore = MeetingNotesStore(rootURL: store.rootURL)
         let audioMonitor = MeetingAudioMonitor()
+        let processedTranscriptStore = MeetingProcessedTranscriptStore(rootURL: store.rootURL)
         let uploader = MeetingUploadController(
             meetingStore: store,
-            notesStore: notesStore
+            notesStore: notesStore,
+            processedTranscriptStore: processedTranscriptStore,
+            transcriptProcessingController: SavedMeetingTranscriptProcessingControllerFactory()
+                .make(store: processedTranscriptStore)
         )
         let transcription = MeetingTranscriptionCoordinator(
             store: store,

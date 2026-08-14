@@ -33,15 +33,62 @@ struct MeetingMarkdownRenderer: Sendable {
             state: speakerState
         ).utterances.filter { !$0.suppressed }
 
+        return render(
+            meeting: meeting,
+            transcript: editedUtterances.map {
+                return TranscriptEntry(
+                    startMilliseconds: $0.startMilliseconds,
+                    endMilliseconds: $0.endMilliseconds,
+                    text: $0.text,
+                    speaker: $0.humanName
+                        ?? SpeakerEditor.defaultDisplayName(for: $0.baseSpeakerID)
+                )
+            },
+            analysis: analysis,
+            notes: notes
+        )
+    }
+
+    func render(
+        meeting: MeetingRecord,
+        processedTranscript: MeetingProcessedTranscript,
+        storedAnalysis: StoredMeetingAnalysis?,
+        notes: String? = nil
+    ) -> String {
+        render(
+            meeting: meeting,
+            transcript: processedTranscript.turns.compactMap {
+                guard !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                return TranscriptEntry(
+                    startMilliseconds: $0.startMilliseconds,
+                    endMilliseconds: $0.endMilliseconds,
+                    text: $0.text,
+                    speaker: $0.speakerLabel
+                )
+            },
+            analysis: meeting.analysisState == .completed ? storedAnalysis?.analysis : nil,
+            notes: notes
+        )
+    }
+
+    private func render(
+        meeting: MeetingRecord,
+        transcript: [TranscriptEntry],
+        analysis: MeetingAnalysis?,
+        notes: String?
+    ) -> String {
+
         var sections: [String] = []
         sections.append("# \(Self.escapeHeading(meeting.title))")
         sections.append([
             "- Date: \(Self.escapeInline(Self.dateString(meeting.startedAt)))",
-            "- Duration: \(Self.durationString(meeting: meeting, utterances: editedUtterances))",
+            "- Duration: \(Self.durationString(meeting: meeting, transcript: transcript))",
             "- Engine: \(Self.escapeHeading(Self.engineDescription(meeting)))",
         ].joined(separator: "\n"))
 
-        let participants = Self.participants(in: editedUtterances)
+        let participants = Self.participants(in: transcript)
         let participantLines = participants.isEmpty
             ? "- Unknown speaker"
             : participants.map { Self.listItem($0) }.joined(separator: "\n")
@@ -61,13 +108,11 @@ struct MeetingMarkdownRenderer: Sendable {
             sections.append("## Notes\n\n\(notes)")
         }
 
-        let transcript = editedUtterances.map { utterance in
-            let speaker = utterance.humanName
-                ?? SpeakerEditor.defaultDisplayName(for: utterance.baseSpeakerID)
-            let timestamp = "\(Self.timestamp(utterance.startMilliseconds))–\(Self.timestamp(utterance.endMilliseconds))"
-            return "### [\(timestamp)] \(Self.escapeHeading(speaker))\n\n\(Self.escapeUnexpectedHeadings(utterance.text))"
+        let renderedTranscript = transcript.map { entry in
+            let timestamp = "\(Self.timestamp(entry.startMilliseconds))–\(Self.timestamp(entry.endMilliseconds))"
+            return "### [\(timestamp)] \(Self.escapeHeading(entry.speaker))\n\n\(Self.escapeUnexpectedHeadings(entry.text))"
         }.joined(separator: "\n\n")
-        sections.append("## Transcript\n\n\(transcript)")
+        sections.append("## Transcript\n\n\(renderedTranscript)")
 
         return sections.joined(separator: "\n\n") + "\n"
     }
@@ -117,14 +162,19 @@ struct MeetingMarkdownRenderer: Sendable {
         return "\(result).md"
     }
 
-    private static func participants(in utterances: [MeetingUtterance]) -> [String] {
+    private struct TranscriptEntry {
+        let startMilliseconds: Int64
+        let endMilliseconds: Int64
+        let text: String
+        let speaker: String
+    }
+
+    private static func participants(in transcript: [TranscriptEntry]) -> [String] {
         var seen: Set<String> = []
         var result: [String] = []
-        for utterance in utterances {
-            let name = utterance.humanName
-                ?? SpeakerEditor.defaultDisplayName(for: utterance.baseSpeakerID)
-            if seen.insert(name).inserted {
-                result.append(name)
+        for entry in transcript {
+            if seen.insert(entry.speaker).inserted {
+                result.append(entry.speaker)
             }
         }
         return result
@@ -146,7 +196,7 @@ struct MeetingMarkdownRenderer: Sendable {
 
     private static func durationString(
         meeting: MeetingRecord,
-        utterances: [MeetingUtterance]
+        transcript: [TranscriptEntry]
     ) -> String {
         let wallClockMilliseconds: Int64?
         if let endedAt = meeting.endedAt {
@@ -155,7 +205,7 @@ struct MeetingMarkdownRenderer: Sendable {
                 Int64((endedAt.timeIntervalSince(meeting.startedAt) * 1_000).rounded())
             )
         } else {
-            wallClockMilliseconds = utterances.map(\.endMilliseconds).max()
+            wallClockMilliseconds = transcript.map(\.endMilliseconds).max()
         }
         return timestamp(wallClockMilliseconds ?? 0)
     }

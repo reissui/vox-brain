@@ -72,16 +72,19 @@ attempt. It compares final turns with overlapping live previews and speech
 activity, removes supported fillers and accidental repeated-word runs, and
 records every change. Private terminology can correct supported spellings;
 unsupported invented content is rejected. If optional AI is unavailable, a
-conservative local cleanup is saved instead of leaving Processed empty.
+conservative local cleanup is saved instead of leaving Processed empty. That
+cleanup remains the baseline when AI succeeds, so known fillers and repeated
+word runs cannot be restored by an otherwise valid no-op response.
 Optional analysis uses the current processed transcript and falls back to raw
-evidence when necessary. A stale transcript regenerates on review and never
-hides Raw. The per-version improvement action runs only when pressed and produces a
-short prompt targeted to the failures, timestamps, disfluencies, and correction
-categories detected in that call—no transcript content and no automatic
-follow-up generation, rendering, or export. Long transcripts are processed in
-bounded evidence chunks. If an AI chunk does not pass validation, Brain keeps
-a locally cleaned, evidence-traceable section instead of discarding the entire
-processed view.
+evidence when necessary. The first Brain/vault handoff waits for the current
+Processed projection and uses Raw only as a failure-safe fallback. A stale
+transcript regenerates on review and never hides Raw. The per-version
+improvement action runs only when pressed and produces a short prompt targeted
+to the failures, timestamps, disfluencies, and correction categories detected
+in that call—no transcript content and no automatic follow-up generation,
+rendering, or export. Long transcripts are processed in bounded evidence
+chunks. If an AI chunk does not pass validation, Brain keeps a locally cleaned,
+evidence-traceable section instead of discarding the entire processed view.
 
 ## Smoke test
 
