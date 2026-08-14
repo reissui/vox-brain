@@ -1566,6 +1566,7 @@ struct MeetingViewsTests {
             retention: AudioRetentionController(store: store),
             engine: playbackEngine
         )
+        let clipboard = MeetingClipboardSpy()
         let controller = MeetingDetailController(
             meetingID: meeting.id,
             store: store,
@@ -1573,7 +1574,7 @@ struct MeetingViewsTests {
             uploadController: MeetingDetailUploadSpy(),
             audioController: AudioRetentionController(store: store),
             audioChecker: FileMeetingLocalAudioChecker(rootURL: root),
-            clipboard: MeetingClipboardSpy(),
+            clipboard: clipboard,
             transcriptArtifactStore: artifactStore,
             processedTranscriptStore: processedStore,
             transcriptProcessingController: nil,
@@ -1596,8 +1597,22 @@ struct MeetingViewsTests {
         ))
         #expect(review.model.isVerified)
 
+        await controller.perform(.copyFullTranscript)
+        #expect(clipboard.values == [
+            "You: processed first raw processed same eight-second turn\n\n"
+                + "You: processed new turn",
+        ])
+        #expect(controller.viewModel.copiedMessage == "Processed transcript copied")
+
         await controller.perform(.selectTranscriptReviewMode(.raw))
         #expect(controller.viewModel.transcriptReview?.mode == .raw)
+        await controller.perform(.copyFullTranscript)
+        #expect(clipboard.values == [
+            "You: processed first raw processed same eight-second turn\n\n"
+                + "You: processed new turn",
+            "You: first raw same eight-second turn\n\nYou: new turn",
+        ])
+        #expect(controller.viewModel.copiedMessage == "Raw transcript copied")
         await controller.perform(.seekAudio(17_500))
         #expect(playbackEngine.seeks == [17_500])
 

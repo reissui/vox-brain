@@ -32,9 +32,10 @@ produced on the Mac; Notes autosave locally and remain available for recovery.
 After final transcription, Brain keeps immutable raw evidence and creates a
 separate, replaceable processed transcript for readable review and optional AI
 analysis. Review defaults to the current processed transcript and always
-offers the raw fallback. Retained audio has local playback and timestamp seek;
-only finalized text is ingested into the vault and meeting audio stays on the
-recording Mac. See [the meeting guide](integrations/meetings.md).
+offers the raw fallback. Meetings can copy either the Processed or Raw
+transcript with speaker labels. Retained audio has local playback and timestamp
+seek; only finalized text is ingested into the vault and meeting audio stays on
+the recording Mac. See [the meeting guide](integrations/meetings.md).
 
 From a source checkout:
 
