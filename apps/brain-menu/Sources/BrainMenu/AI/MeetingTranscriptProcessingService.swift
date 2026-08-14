@@ -205,15 +205,28 @@ final class MeetingTranscriptProcessingService: Sendable {
             assignments: reconciled.assignments,
             speakers: reconciled.speakers
         )
+        let localCandidate = MeetingTranscriptCleanup.makeTranscript(
+            attempt: selectedAttempt,
+            turns: assembledTurns,
+            terminologyHash: terminologyHash
+        )
+        let localTranscript = Self.validatedCombinedTranscript(
+            [localCandidate],
+            selectedAttempt: selectedAttempt,
+            assembledTurns: assembledTurns,
+            terminology: terminology,
+            terminologyHash: terminologyHash
+        )
         let readiness = await provider.testConnection()
         guard readiness == .ready else {
-            return failed(
+            return await persist(
+                localTranscript,
                 attemptID: selectedAttempt.id,
-                previous: nil,
-                failure: .providerNotReady(readiness)
+                key: key
             )
         }
         var processedChunks: [MeetingProcessedTranscript] = []
+        var providerFailed = false
         for turns in Self.chunked(assembledTurns) {
             guard !Task.isCancelled else {
                 return failed(
@@ -226,6 +239,14 @@ final class MeetingTranscriptProcessingService: Sendable {
                 selectedAttempt,
                 containing: turns
             )
+            if providerFailed {
+                processedChunks.append(MeetingTranscriptCleanup.makeTranscript(
+                    attempt: chunkAttempt,
+                    turns: turns,
+                    terminologyHash: terminologyHash
+                ))
+                continue
+            }
             let prompt = MeetingTranscriptProcessingPrompt.make(
                 meeting: meeting,
                 selectedAttempt: chunkAttempt,
@@ -247,17 +268,18 @@ final class MeetingTranscriptProcessingService: Sendable {
                     terminology: terminology
                 ))
             } catch AIProviderError.schemaFailure {
-                processedChunks.append(Self.losslessTranscript(
-                    rawAttemptID: selectedAttempt.id,
-                    terminologyHash: terminologyHash,
-                    turns: turns
+                processedChunks.append(MeetingTranscriptCleanup.makeTranscript(
+                    attempt: chunkAttempt,
+                    turns: turns,
+                    terminologyHash: terminologyHash
                 ))
-            } catch let error as AIProviderError {
-                return failed(
-                    attemptID: selectedAttempt.id,
-                    previous: nil,
-                    failure: .providerFailure(error)
-                )
+            } catch is AIProviderError {
+                providerFailed = true
+                processedChunks.append(MeetingTranscriptCleanup.makeTranscript(
+                    attempt: chunkAttempt,
+                    turns: turns,
+                    terminologyHash: terminologyHash
+                ))
             } catch is CancellationError {
                 return failed(
                     attemptID: selectedAttempt.id,
@@ -267,10 +289,10 @@ final class MeetingTranscriptProcessingService: Sendable {
             } catch {
                 // Reject the model's unsafe projection, but keep this bounded
                 // section readable by projecting the immutable raw turns.
-                processedChunks.append(Self.losslessTranscript(
-                    rawAttemptID: selectedAttempt.id,
-                    terminologyHash: terminologyHash,
-                    turns: turns
+                processedChunks.append(MeetingTranscriptCleanup.makeTranscript(
+                    attempt: chunkAttempt,
+                    turns: turns,
+                    terminologyHash: terminologyHash
                 ))
             }
         }
@@ -282,6 +304,14 @@ final class MeetingTranscriptProcessingService: Sendable {
             terminology: terminology,
             terminologyHash: terminologyHash
         )
+        return await persist(transcript, attemptID: selectedAttempt.id, key: key)
+    }
+
+    private func persist(
+        _ transcript: MeetingProcessedTranscript,
+        attemptID: UUID,
+        key: MeetingTranscriptProcessingKey
+    ) async -> MeetingTranscriptProcessingRunResult {
         do {
             guard try await Self.registry.persistIfCurrent(
                 transcript,
@@ -289,20 +319,20 @@ final class MeetingTranscriptProcessingService: Sendable {
                 store: store
             ) else {
                 return failed(
-                    attemptID: selectedAttempt.id,
+                    attemptID: attemptID,
                     previous: nil,
                     failure: .cancelled
                 )
             }
         } catch {
             return failed(
-                attemptID: selectedAttempt.id,
+                attemptID: attemptID,
                 previous: nil,
                 failure: .persistenceFailure
             )
         }
         return MeetingTranscriptProcessingRunResult(
-            rawAttemptID: selectedAttempt.id,
+            rawAttemptID: attemptID,
             transcript: transcript,
             failure: nil
         )
@@ -354,7 +384,11 @@ final class MeetingTranscriptProcessingService: Sendable {
             createdAt: attempt.createdAt,
             modelAttestation: attempt.modelAttestation,
             spanOutcomes: spanOutcomes,
-            retainedPreviews: attempt.retainedPreviews.filter { ids.contains($0.id) },
+            retainedPreviews: attempt.retainedPreviews.filter { preview in
+                guard let start, let end else { return false }
+                return preview.startMilliseconds < end
+                    && preview.endMilliseconds > start
+            },
             utterances: utterances,
             isSuccessful: true
         )

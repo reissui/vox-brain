@@ -619,7 +619,12 @@ struct VoiceMeetingAcceptanceTests {
             meetingID: meeting.id,
             rawAttemptID: attempt.id,
             terminologyHash: "newest"
-        ) == newestProcessed)
+        ) == nil)
+        #expect(try processedStore.load(
+            meetingID: meeting.id,
+            rawAttemptID: attempt.id,
+            terminologyHash: "changed"
+        )?.turns.first?.text == utterance.text)
 
         let fallbackProvider = AcceptancePipelineAI(
             processing: try JSONEncoder().encode(processed),
@@ -643,7 +648,8 @@ struct VoiceMeetingAcceptanceTests {
         )
         #expect(fallback.failure == nil)
         #expect(fallback.meeting.transcriptionState == .completed)
-        #expect(await fallbackProvider.analysisPrompts.first?.contains("FINAL RAW TRANSCRIPT") == true)
+        #expect(await fallbackProvider.analysisPrompts.first?
+            .contains("BEGIN READABLE PROCESSED TRANSCRIPT") == true)
 
         let cancellationProvider = AcceptancePipelineAI(
             processing: try JSONEncoder().encode(processed),
@@ -1051,7 +1057,8 @@ struct VoiceMeetingAcceptanceTests {
             terminologyHash: "fallback"
         )
         #expect(fallback.failure == nil)
-        #expect(await fallbackProvider.analysisPrompts.first?.contains("FINAL RAW TRANSCRIPT") == true)
+        #expect(await fallbackProvider.analysisPrompts.first?
+            .contains("BEGIN READABLE PROCESSED TRANSCRIPT") == true)
         let analysisSchema = String(decoding: MeetingAnalysisSchema.jsonSchema, as: UTF8.self)
         #expect(!analysisSchema.localizedCaseInsensitiveContains("follow-up"))
         #expect(!analysisSchema.localizedCaseInsensitiveContains("render"))
@@ -1105,7 +1112,8 @@ struct VoiceMeetingAcceptanceTests {
             processedTranscript: processed
         )
         #expect(prompt.count <= MeetingImprovementPrompt.maximumCharacters)
-        #expect(prompt.contains("Failure diagnostics:"))
+        #expect(prompt.contains("1 final audio span"))
+        #expect(prompt.contains("00:08-00:09"))
         #expect(!prompt.contains(first.text))
         let reviewSource = try String(
             contentsOf: URL(fileURLWithPath: #filePath)

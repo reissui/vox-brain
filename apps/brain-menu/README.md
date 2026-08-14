@@ -43,20 +43,23 @@ is an editable meeting scratchpad.
 - Meeting and Voice Note audio stays on the recording Mac. Only final text is
   written to the local inbox.
 
-Saved meetings open on the current **Processed** transcript when optional AI
-processing has produced one for the selected raw attempt and current private
-terminology. **Raw** always exposes the immutable engine evidence, including
-preserved previews and bounded failure diagnostics. Adjacent utterances from
-one speaker remain one readable turn when silence is under eight seconds;
-eight seconds or a speaker change starts a new turn.
+Saved meetings open on **Processed**. Processing starts as soon as the raw
+transcript completes, compares final text with overlapping audio-derived live
+previews and speech activity, and removes supported fillers or accidental
+repetition. A conservative local cleanup is persisted when optional AI is
+disabled or unavailable. **Raw** always exposes the immutable engine evidence,
+including preserved previews and bounded failure diagnostics. Adjacent
+utterances from one speaker remain one readable turn when silence is under
+eight seconds; eight seconds or a speaker change starts a new turn.
 
 Retained meeting audio is playable only on the recording Mac. Transcript
 timestamps seek the local player; pause, resume, and explicit audio deletion do
-not remove raw or processed transcript text. If transcript processing fails or
-becomes stale, review falls back to Raw and offers **Retry Processing**. The
-owner-triggered **Create Improvement Prompt** action builds a bounded,
-diagnostic-only prompt that can be copied; Brain does not generate, render, or
-export follow-up material automatically.
+not remove raw or processed transcript text. A stale processed transcript
+regenerates when review opens; persistence failures remain retryable and Raw is
+always one click away. The owner-triggered **Create Improvement Prompt** action
+builds a short prompt from the specific failures, timestamps, disfluencies, and
+correction categories detected in that call; Brain does not generate, render,
+or export follow-up material automatically.
 
 ## Local Librarian and AI
 

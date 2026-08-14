@@ -466,6 +466,62 @@ struct AppIntegrationTests {
     }
 
     @Test
+    func completedRawTranscriptStartsProcessingWithoutWaitingForAnalysis() async throws {
+        let recorder = AppMeetingRecorder()
+        let meeting = MeetingController(
+            detector: MeetingDetector(),
+            recorder: recorder,
+            speechEngine: "whisper",
+            speechModel: "large-v3"
+        )
+        let library = AppMeetingLibrary()
+        let processor = AppMeetingTranscriptProcessor()
+        let graph = makeGraph(
+            meeting: meeting,
+            meetings: MeetingsController(
+                store: library,
+                analysisStore: AppEmptyAnalysisStore()
+            ),
+            transcriptProcessingFactory: { processor },
+            meetingAnalysisFactory: { nil }
+        )
+
+        await graph.toggleMeeting()
+        let active = try #require(meeting.currentMeeting)
+        let utterance = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 1_000,
+            text: "Um, hello, hello, hello.",
+            baseSpeakerID: "you"
+        )
+        let attempt = MeetingTranscriptAttempt(
+            id: UUID(),
+            modelAttestation: MeetingTranscriptModelAttestation(meeting: active),
+            utterances: [utterance],
+            isSuccessful: true
+        )
+        var saved = active
+        saved.endedAt = active.startedAt.addingTimeInterval(60)
+        saved.lifecycleState = .completed
+        saved.transcriptionState = .completed
+        saved.selectedRawTranscriptAttemptID = attempt.id
+        let artifact = MeetingTranscriptArtifact(
+            meetingID: saved.id,
+            attempts: [attempt],
+            selectedAttemptID: attempt.id
+        )
+        library.save(saved, utterances: [utterance], artifact: artifact)
+        recorder.completion = saved
+
+        await graph.toggleMeeting()
+        await eventually { processor.calls == 1 }
+
+        #expect(processor.meetingIDs == [saved.id])
+        #expect(library.values[saved.id]?.meeting.analysisState == .notRequested)
+    }
+
+    @Test
     func scenesBorrowOneControllerGraphAndStartingTwiceDoesNotDuplicateLongRunningOwners() {
         let captureRegistrar = AppCaptureHotkeyRegistrar()
         let graph = makeGraph(
@@ -857,6 +913,7 @@ struct AppIntegrationTests {
         continuousDictation: ContinuousDictationController? = nil,
         meetings: MeetingsController? = nil,
         now: @escaping @MainActor () -> Date = Date.init,
+        transcriptProcessingFactory: @escaping @MainActor () -> (any MeetingTranscriptProcessingControlling)? = { nil },
         meetingAnalysisFactory: @escaping @MainActor () -> (any MeetingDetailAnalysisControlling)? = { nil },
         captureRegistrar: AppCaptureHotkeyRegistrar = AppCaptureHotkeyRegistrar()
     ) -> BrainAppControllerGraph {
@@ -898,6 +955,7 @@ struct AppIntegrationTests {
             aiSettings: AISettingsController(settings: AppAISettings()),
             audioRetention: AudioRetentionController(),
             now: now,
+            transcriptProcessingFactory: transcriptProcessingFactory,
             meetingAnalysisFactory: meetingAnalysisFactory
         )
     }
@@ -1065,8 +1123,43 @@ private final class AppMeetingLibrary: MeetingLibraryStoring, @unchecked Sendabl
         values[meeting.id] = StoredMeeting(meeting: meeting, utterances: utterances)
     }
 
+    func save(
+        _ meeting: MeetingRecord,
+        utterances: [MeetingUtterance],
+        artifact: MeetingTranscriptArtifact
+    ) {
+        values[meeting.id] = StoredMeeting(
+            meeting: meeting,
+            utterances: utterances,
+            rawTranscriptArtifacts: artifact
+        )
+    }
+
     func delete(_ id: UUID, confirmed: Bool) throws {
         values.removeValue(forKey: id)
+    }
+}
+
+private final class AppMeetingTranscriptProcessor: MeetingTranscriptProcessingControlling,
+    @unchecked Sendable {
+    private(set) var calls = 0
+    private(set) var meetingIDs: [UUID] = []
+
+    func process(
+        meeting: MeetingRecord,
+        artifact: MeetingTranscriptArtifact,
+        speakerState: SpeakerEditingState,
+        notes: String,
+        terminology: [String],
+        terminologyHash: String
+    ) async -> MeetingTranscriptProcessingRunResult {
+        calls += 1
+        meetingIDs.append(meeting.id)
+        return MeetingTranscriptProcessingRunResult(
+            rawAttemptID: artifact.selectedAttemptID,
+            transcript: nil,
+            failure: nil
+        )
     }
 }
 

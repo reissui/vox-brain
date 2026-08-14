@@ -94,13 +94,13 @@ struct MeetingImprovementPromptTests {
 
         #expect(first == second)
         #expect(first.count <= MeetingImprovementPrompt.maximumCharacters)
-        #expect(first.contains("Requested speech model: whisper/large-v3"))
-        #expect(first.contains("Raw utterances: 1"))
-        #expect(first.contains("Attempt window span: 00:08-00:13 (5000 ms)"))
-        #expect(first.contains("Final window duration: 5000 ms"))
-        #expect(first.contains("Corrections: 1 total"))
-        #expect(first.contains("00:00-00:00") || first.contains("timestamp unavailable"))
-        #expect(first.contains("Concrete checks:"))
+        #expect(first.contains("40 final audio spans"))
+        #expect(first.contains("00:00-00:00"))
+        #expect(first.contains("timeout=40"))
+        #expect(first.contains("requested whisper/large-v3"))
+        #expect(first.contains("Existing processing recorded 1 corrections (terminology=1)"))
+        #expect(first.localizedCaseInsensitiveContains("retained audio"))
+        #expect(!first.contains("Concrete checks:"))
         #expect(!first.contains("SECRET MEETING TITLE"))
         #expect(!first.contains("SECRET TRANSCRIPT BODY"))
         #expect(!first.contains("SECRET FINAL SPAN"))
@@ -138,10 +138,55 @@ struct MeetingImprovementPromptTests {
         #expect(MeetingImprovementPrompt.make(
             attempt: mismatch,
             processedTranscript: nil
-        ).contains("Model verification: unverified"))
+        ).contains("Model identity is unverified"))
         #expect(MeetingImprovementPrompt.make(
             attempt: legacy,
             processedTranscript: nil
-        ).contains("Model verification: unverified"))
+        ).contains("Model identity is unverified"))
+    }
+
+    @Test
+    func promptBrieflyTargetsDetectedCallSpecificProblems() throws {
+        let meeting = MeetingRecord(
+            title: "Private title",
+            startedAt: .now,
+            lifecycleState: .completed,
+            speechEngine: "whisper",
+            speechModel: "large-v3"
+        )
+        let utterance = try MeetingUtterance(
+            source: .microphone,
+            startMilliseconds: 0,
+            endMilliseconds: 2_000,
+            text: "Um, hello, hello, hello. Uh, ship it.",
+            baseSpeakerID: "you"
+        )
+        let attempt = MeetingTranscriptAttempt(
+            modelAttestation: MeetingTranscriptModelAttestation(meeting: meeting),
+            retainedPreviews: [utterance],
+            utterances: [utterance],
+            failures: [MeetingTranscriptFailureDiagnostic(LiveTranscriptFailure(
+                source: .microphone,
+                phase: .final,
+                startMilliseconds: 5_000,
+                endMilliseconds: 6_000,
+                message: "timed out"
+            ))],
+            isSuccessful: true
+        )
+
+        let prompt = MeetingImprovementPrompt.make(
+            attempt: attempt,
+            processedTranscript: nil
+        )
+
+        #expect(prompt.count < 1_500)
+        #expect(prompt.contains("2 filler"))
+        #expect(prompt.contains("1 repeated-word"))
+        #expect(prompt.contains("00:05-00:06"))
+        #expect(prompt.localizedCaseInsensitiveContains("timeout"))
+        #expect(prompt.localizedCaseInsensitiveContains("compare"))
+        #expect(!prompt.contains("Private title"))
+        #expect(!prompt.contains("ship it"))
     }
 }

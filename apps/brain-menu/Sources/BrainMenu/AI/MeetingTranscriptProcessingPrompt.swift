@@ -17,6 +17,7 @@ enum MeetingTranscriptProcessingPrompt {
             notes: notes,
             glossary: terminology,
             turns: assembledTurns.map(ContextTurn.init),
+            retainedPreviews: selectedAttempt.retainedPreviews.map(ContextPreview.init),
             speechEvidence: selectedAttempt.spanOutcomes.map(ContextSpeechEvidence.init)
         )
         let encoder = JSONEncoder()
@@ -36,6 +37,8 @@ enum MeetingTranscriptProcessingPrompt {
         - The glossary is a spelling hint only, never evidence that a term, person, or fact was spoken. Record every applied glossary change as a terminology correction.
         - Every text change must have one ordered correction with the affected raw utterance IDs, exact before and after text, a concrete evidence-based reason, and confidence from 0 through 1.
         - Use [unclear] when audio cannot be recovered confidently; record it as unclearAudio and set that turn's unclear field true. Never guess the missing words.
+        - Compare every raw turn with overlapping retained live previews and speech-activity windows. Prefer wording corroborated by multiple audio-derived observations; do not use a preview whose timing does not overlap.
+        - Remove standalone fillers such as um, uh, erm, er, ah, and accidental immediate word repetitions when they add no meaning. Record these edits as grammar corrections. Preserve deliberate repetition used for emphasis.
         - Remove suspected transcription hallucinations only when the supplied speech evidence for that exact span supports the removal. Cite that evidence in the reason. The raw transcript remains immutable.
         - Generic phrases have no global blacklist. In particular, greetings, acknowledgements, and phrases such as "thank you" are real unless the supplied evidence for their exact span supports removal.
         - Punctuation and grammar cleanup must not change meaning. turnBoundary may only regroup words; it may not rewrite them.
@@ -56,7 +59,24 @@ enum MeetingTranscriptProcessingPrompt {
         let notes: String
         let glossary: [String]
         let turns: [ContextTurn]
+        let retainedPreviews: [ContextPreview]
         let speechEvidence: [ContextSpeechEvidence]
+    }
+
+    private struct ContextPreview: Encodable {
+        let id: UUID
+        let source: MeetingAudioSource
+        let startMilliseconds: Int64
+        let endMilliseconds: Int64
+        let text: String
+
+        init(_ utterance: MeetingUtterance) {
+            id = utterance.id
+            source = utterance.source
+            startMilliseconds = utterance.startMilliseconds
+            endMilliseconds = utterance.endMilliseconds
+            text = utterance.text
+        }
     }
 
     private struct ContextTurn: Encodable {
