@@ -136,6 +136,8 @@ struct MeetingTranscriptReviewView: View {
     let seek: (Int64) -> Void
     let toggleSelection: ([UUID]) -> Void
     let copyTranscript: () -> Void
+    let downloadTranscript: () -> Void
+    let revealSavedTranscript: () -> Void
     let createImprovementPrompt: () -> String?
 
     @State private var promptPresentation: ImprovementPromptPresentation?
@@ -227,6 +229,25 @@ struct MeetingTranscriptReviewView: View {
             .keyboardShortcut("c", modifiers: [.command, .shift])
             .accessibilityLabel("Copy \(model.mode.rawValue) transcript")
             .accessibilityHint("Copies the full \(model.mode.rawValue.lowercased()) transcript with speaker labels.")
+
+            Button {
+                downloadTranscript()
+            } label: {
+                Image(systemName: "square.and.arrow.down")
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.rows.isEmpty)
+            .accessibilityLabel("Download \(model.mode.rawValue) transcript")
+            .help("Download the \(model.mode.rawValue.lowercased()) transcript as Markdown")
+
+            Button {
+                revealSavedTranscript()
+            } label: {
+                Image(systemName: "folder")
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Reveal saved \(model.mode.rawValue) transcript")
+            .help("Reveal the saved \(model.mode.rawValue.lowercased()) Markdown file in Finder")
 
             Button {
                 if let prompt = createImprovementPrompt() {

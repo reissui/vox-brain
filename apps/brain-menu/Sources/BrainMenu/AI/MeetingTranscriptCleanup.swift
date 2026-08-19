@@ -10,10 +10,16 @@ struct MeetingTranscriptCleanupMetrics: Equatable, Sendable {
 /// unavailable. Every edit remains traceable to one immutable raw utterance.
 enum MeetingTranscriptCleanup {
     private static let fillerPattern = try! NSRegularExpression(
-        pattern: #"(?i)(?<![\p{L}\p{N}])(?:um+|uh+|erm+|er+|ah+|hmm+|arr+)(?![\p{L}\p{N}])"#
+        pattern: #"(?i)(?<![\p{L}\p{N}])(?:um+|uh+|erm+|er+|ah+|hmm+|mhm+|mhmm+|arr+|huh+)(?![\p{L}\p{N}])"#
     )
     private static let repeatedWordPattern = try! NSRegularExpression(
         pattern: #"(?i)\b([\p{L}\p{N}][\p{L}\p{N}’'-]*)(?:[\s,;:-]+\1\b){2,}"#
+    )
+    private static let strayDotRunPattern = try! NSRegularExpression(
+        pattern: #"(?:\s*\.\s*){2,}"#
+    )
+    private static let isolatedDotPattern = try! NSRegularExpression(
+        pattern: #"(?<=\s)\.(?=\s)"#
     )
     private static let repeatedWhitespacePattern = try! NSRegularExpression(pattern: #"\s{2,}"#)
     private static let whitespaceBeforePunctuationPattern = try! NSRegularExpression(
@@ -159,6 +165,7 @@ enum MeetingTranscriptCleanup {
         let text: String
         let fillerCount: Int
         let repeatedWordRunCount: Int
+        let strayDotCount: Int
     }
 
     private struct BaselineCleanup {
@@ -203,6 +210,10 @@ enum MeetingTranscriptCleanup {
             detected.append("\(cleaned.repeatedWordRunCount) accidental repeated-word run"
                 + (cleaned.repeatedWordRunCount == 1 ? "" : "s"))
         }
+        if cleaned.strayDotCount > 0 {
+            detected.append("\(cleaned.strayDotCount) stray dot fragment"
+                + (cleaned.strayDotCount == 1 ? "" : "s"))
+        }
         return BaselineCleanup(
             text: cleaned.text,
             correction: MeetingTranscriptCorrection(
@@ -221,12 +232,13 @@ enum MeetingTranscriptCleanup {
     private static func clean(_ value: String) -> CleanedText {
         let fillerCount = matchCount(fillerPattern, in: value)
         let repeatedWordRunCount = matchCount(repeatedWordPattern, in: value)
-        guard fillerCount > 0 || repeatedWordRunCount > 0 else {
-            return CleanedText(text: value, fillerCount: 0, repeatedWordRunCount: 0)
-        }
+        let strayDotCount = matchCount(strayDotRunPattern, in: value)
+            + matchCount(isolatedDotPattern, in: value)
 
         var text = replacing(repeatedWordPattern, in: value, with: "$1")
         text = replacing(fillerPattern, in: text, with: "")
+        text = replacing(strayDotRunPattern, in: text, with: " ")
+        text = replacing(isolatedDotPattern, in: text, with: "")
         text = replacing(repeatedWhitespacePattern, in: text, with: " ")
         text = replacing(whitespaceBeforePunctuationPattern, in: text, with: "$1")
         text = replacing(punctuationCollisionPattern, in: text, with: "$1")
@@ -236,7 +248,8 @@ enum MeetingTranscriptCleanup {
         return CleanedText(
             text: text,
             fillerCount: fillerCount,
-            repeatedWordRunCount: repeatedWordRunCount
+            repeatedWordRunCount: repeatedWordRunCount,
+            strayDotCount: strayDotCount
         )
     }
 
