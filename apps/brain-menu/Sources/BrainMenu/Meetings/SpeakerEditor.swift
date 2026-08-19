@@ -221,6 +221,23 @@ struct SpeakerEditor: Sendable {
         return true
     }
 
+    /// Removes selected utterances from the editable transcript. The immutable
+    /// raw artifact is unchanged; suppressions flow into processed output.
+    @discardableResult
+    mutating func suppress(utteranceIDs: Set<UUID>) -> Bool {
+        let knownIDs = Set(utterances.map(\.id))
+        let selectedIDs = utteranceIDs.intersection(knownIDs)
+        guard !selectedIDs.isEmpty else { return false }
+        var changed = false
+        for index in utterances.indices {
+            guard selectedIDs.contains(utterances[index].id),
+                  !utterances[index].suppressed else { continue }
+            utterances[index].suppressed = true
+            changed = true
+        }
+        return changed
+    }
+
     /// Creates a deterministic ID from the original speaker and selected
     /// stable utterance IDs. The result therefore survives persistence and a
     /// later transcript-processing pass without relying on array position.

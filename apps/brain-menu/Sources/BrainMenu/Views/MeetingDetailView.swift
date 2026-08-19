@@ -319,6 +319,9 @@ enum MeetingDetailAction: Equatable, Sendable {
     case copyFullTranscript
     case selectTranscriptReviewMode(MeetingTranscriptReviewMode)
     case regenerateTranscript
+    case suppressSelectedUtterances
+    case exportTranscript(URL?)
+    case revealSavedTranscript
     case seekAudio(Int64)
     case revealAudio
     case exportAudio(URL?)
@@ -375,6 +378,8 @@ final class MeetingDetailController {
     @ObservationIgnored private let processedTranscriptStore: any MeetingProcessedTranscriptStoring
     @ObservationIgnored private let transcriptProcessingController: (any MeetingTranscriptProcessingControlling)?
     @ObservationIgnored private let terminologyStore: MeetingTerminologyStore
+    @ObservationIgnored private let transcriptMarkdownExporter: MeetingTranscriptMarkdownExporter
+    @ObservationIgnored private let meetingsRootURL: URL
     @ObservationIgnored private var transcriptProcessingTask: Task<Void, Never>?
     let audioPlayback: MeetingAudioPlaybackController
     private(set) var rawTranscriptArtifact: MeetingTranscriptArtifact?
@@ -402,6 +407,8 @@ final class MeetingDetailController {
         transcriptProcessingController: (any MeetingTranscriptProcessingControlling)? =
             SavedMeetingTranscriptProcessingControllerFactory().make(),
         terminologyStore: MeetingTerminologyStore = MeetingTerminologyStore(),
+        transcriptMarkdownExporter: MeetingTranscriptMarkdownExporter = MeetingTranscriptMarkdownExporter(),
+        meetingsRootURL: URL = MeetingStore.productionRootURL,
         audioPlayback: MeetingAudioPlaybackController = MeetingAudioPlaybackController(
             engine: SystemMeetingAudioPlayer()
         )
@@ -420,6 +427,8 @@ final class MeetingDetailController {
         self.processedTranscriptStore = processedTranscriptStore
         self.transcriptProcessingController = transcriptProcessingController
         self.terminologyStore = terminologyStore
+        self.transcriptMarkdownExporter = transcriptMarkdownExporter
+        self.meetingsRootURL = meetingsRootURL
         self.audioPlayback = audioPlayback
     }
 
@@ -515,7 +524,7 @@ final class MeetingDetailController {
     }
 
     var transcriptReviewViewModel: MeetingTranscriptReviewViewModel? {
-        guard let attempt = selectedRawTranscriptAttempt else { return nil }
+        guard let attempt = mergedRawTranscriptAttempt else { return nil }
         let rawTurns = MeetingTranscriptTurnAssembler.assemble(
             utterances: attempt.utterances,
             assignments: editor.assignments,
@@ -619,6 +628,42 @@ final class MeetingDetailController {
         return attempt
     }
 
+    private var mergedRawTranscriptAttempt: MeetingTranscriptAttempt? {
+        selectedRawTranscriptAttempt?.applyingSuppressions(from: editor.utterances)
+    }
+
+    private func artifactForProcessing() -> MeetingTranscriptArtifact? {
+        guard var artifact = rawTranscriptArtifact,
+              let mergedAttempt = mergedRawTranscriptAttempt,
+              let index = artifact.attempts.firstIndex(where: { $0.id == mergedAttempt.id }) else {
+            return nil
+        }
+        artifact.attempts[index] = mergedAttempt
+        return artifact
+    }
+
+    private func syncTranscriptMarkdownFiles() {
+        guard let meeting, let attempt = selectedRawTranscriptAttempt else { return }
+        do {
+            _ = try transcriptMarkdownExporter.writeRaw(
+                meeting: meeting,
+                attempt: attempt,
+                speakerState: editor.state,
+                suppressionSource: editor.utterances,
+                rootURL: meetingsRootURL
+            )
+            if let processedTranscript {
+                _ = try transcriptMarkdownExporter.writeProcessed(
+                    meeting: meeting,
+                    processedTranscript: processedTranscript,
+                    rootURL: meetingsRootURL
+                )
+            }
+        } catch {
+            // Markdown exports are best-effort beside the meeting JSON files.
+        }
+    }
+
     private func reviewRows(
         _ turns: [MeetingTranscriptTurn],
         selected: Bool
@@ -701,7 +746,7 @@ final class MeetingDetailController {
         guard !isTranscriptRegenerationInProgress,
               let transcriptProcessingController,
               let meeting,
-              let artifact = rawTranscriptArtifact,
+              let artifact = artifactForProcessing(),
               selectedRawTranscriptAttempt != nil else {
             transcriptProcessingMessage = "Configure and test a local AI provider before retrying processing."
             return
@@ -730,6 +775,7 @@ final class MeetingDetailController {
         processedTranscript = transcript
         transcriptReviewMode = .processed
         transcriptProcessingMessage = nil
+        syncTranscriptMarkdownFiles()
         await uploadController.uploadAfterFinalTranscriptPersistence(meetingID: meetingID)
         loadUploadRevision()
         if let uploadError = uploadController.errorMessage { errorMessage = uploadError }
@@ -776,6 +822,7 @@ final class MeetingDetailController {
                 errorMessage = "Local analysis is unavailable: \(Self.bounded(error))"
             }
             loadTranscriptReview(meeting: stored.meeting, fallbackUtterances: stored.utterances)
+            syncTranscriptMarkdownFiles()
             state = .ready
             startTranscriptProcessingIfNeeded()
         } catch let error as MeetingStoreError {
@@ -863,6 +910,12 @@ final class MeetingDetailController {
             transcriptReviewMode = mode
         case .regenerateTranscript:
             await regenerateTranscript()
+        case .suppressSelectedUtterances:
+            await suppressSelectedUtterances()
+        case .exportTranscript(let destination):
+            exportTranscript(to: destination)
+        case .revealSavedTranscript:
+            revealSavedTranscript()
         case .seekAudio(let milliseconds):
             audioPlayback.seek(to: milliseconds)
         case .revealAudio:
@@ -1055,6 +1108,83 @@ final class MeetingDetailController {
         guard !value.isEmpty else { return }
         clipboard.write(value)
         copiedMessage = message
+    }
+
+    private func suppressSelectedUtterances() async {
+        guard !selectedUtteranceIDs.isEmpty, let meeting else { return }
+        var candidate = editor
+        guard candidate.suppress(utteranceIDs: selectedUtteranceIDs) else { return }
+        do {
+            try store.save(meeting, utterances: candidate.utterances)
+            editor = candidate
+            utterances = candidate.utterances
+            selectedUtteranceIDs.removeAll()
+            processedTranscript = nil
+            transcriptReviewMode = .raw
+            transcriptProcessingMessage = "Preparing a clean, readable transcript…"
+            syncTranscriptMarkdownFiles()
+            errorMessage = nil
+            await regenerateTranscript()
+        } catch {
+            errorMessage = "Selected transcript text was not removed: \(Self.bounded(error))"
+        }
+    }
+
+    private func exportTranscript(to destination: URL?) {
+        guard let meeting, let destination else { return }
+        guard let review = transcriptReviewViewModel else { return }
+        let markdown: String
+        switch review.mode {
+        case .raw:
+            guard let attempt = selectedRawTranscriptAttempt else { return }
+            markdown = transcriptMarkdownExporter.renderRaw(
+                meeting: meeting,
+                attempt: attempt,
+                speakerState: editor.state,
+                suppressionSource: editor.utterances
+            )
+        case .processed:
+            guard let processedTranscript else { return }
+            markdown = transcriptMarkdownExporter.renderProcessed(
+                meeting: meeting,
+                processedTranscript: processedTranscript
+            )
+        }
+        guard !markdown.isEmpty else { return }
+        do {
+            try transcriptMarkdownExporter.export(
+                markdown: markdown,
+                to: destination
+            )
+            copiedMessage = "\(review.mode.rawValue) transcript downloaded"
+            errorMessage = nil
+        } catch {
+            errorMessage = "The transcript could not be exported: \(Self.bounded(error))"
+        }
+    }
+
+    private func revealSavedTranscript() {
+        guard let meeting else { return }
+        let url: URL
+        switch transcriptReviewMode {
+        case .raw:
+            url = transcriptMarkdownExporter.rawURL(meetingID: meeting.id, rootURL: meetingsRootURL)
+        case .processed:
+            url = transcriptMarkdownExporter.processedURL(
+                meetingID: meeting.id,
+                rootURL: meetingsRootURL
+            )
+        }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            syncTranscriptMarkdownFiles()
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                errorMessage = "No saved \(transcriptReviewMode.rawValue.lowercased()) transcript file is available yet."
+                return
+            }
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     private func revealAudio() {
@@ -1724,6 +1854,12 @@ struct MeetingDetailView: View {
                         copyTranscript: {
                             Task { await controller.perform(.copyFullTranscript) }
                         },
+                        downloadTranscript: {
+                            exportTranscript()
+                        },
+                        revealSavedTranscript: {
+                            Task { await controller.perform(.revealSavedTranscript) }
+                        },
                         createImprovementPrompt: controller.improvementPrompt
                     )
                 }
@@ -1802,10 +1938,15 @@ struct MeetingDetailView: View {
 
     private func meetingTranscriptEditingControls(_ model: MeetingDetailViewModel) -> some View {
         HStack {
-            Text("Select utterances to reassign or split.")
+            Text("Select utterances to remove, reassign, or split.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
+            Button("Remove", systemImage: "trash", role: .destructive) {
+                Task { await controller.perform(.suppressSelectedUtterances) }
+            }
+            .disabled(controller.selectedUtteranceIDs.isEmpty)
+            .help("Remove selected transcript turns from the editable transcript")
             Menu("Reassign") {
                 ForEach(model.speakers) { speaker in
                     Button(speaker.displayName) {
@@ -1932,5 +2073,17 @@ struct MeetingDetailView: View {
         panel.allowedContentTypes = [.audio]
         guard panel.runModal() == .OK else { return }
         Task { await controller.perform(.exportAudio(panel.url)) }
+    }
+
+    private func exportTranscript() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.init(filenameExtension: "md") ?? .plainText]
+        let mode = controller.transcriptReviewMode
+        let title = MeetingMarkdownRenderer.filenameSafeTitle(
+            "\(controller.viewModel.title) \(mode.rawValue)"
+        )
+        panel.nameFieldStringValue = title
+        guard panel.runModal() == .OK else { return }
+        Task { await controller.perform(.exportTranscript(panel.url)) }
     }
 }
