@@ -15,6 +15,7 @@ plist_source="$app_dir/Resources/Info.plist"
 entitlements="$app_dir/Resources/Brain.entitlements"
 app_icon="$app_dir/Resources/Brain.icns"
 voxtype_fetcher="$app_dir/fetch-voxtype.sh"
+speaker_encoder_fetcher="$app_dir/fetch-speaker-encoder.sh"
 voxtype_plist="$app_dir/Resources/VoxTypeInfo.plist"
 voxtype_license="$app_dir/Resources/VoxType-LICENSE.txt"
 
@@ -58,6 +59,7 @@ for required in \
   "$entitlements" \
   "$app_icon" \
   "$voxtype_fetcher" \
+  "$speaker_encoder_fetcher" \
   "$voxtype_plist" \
   "$voxtype_license"; do
   if [ ! -f "$required" ]; then
@@ -150,9 +152,15 @@ mkdir -p \
   "$voxtype_contents/Resources"
 install -m 0644 "$plist_source" "$staged_app/Contents/Info.plist"
 install -m 0644 "$app_icon" "$staged_app/Contents/Resources/Brain.icns"
+# The speaker encoder is optional. The fetcher stages a pinned, verified model
+# when BRAIN_SPEAKER_ENCODER_SOURCE is set and exits successfully without one
+# otherwise, so a build with no model still produces a working app that simply
+# leaves remote speakers unclustered.
+staged_speaker_encoder="$staged_app/Contents/Resources/SpeakerEncoder.mlmodelc"
+"$speaker_encoder_fetcher" "$staged_speaker_encoder"
 speaker_encoder="$app_dir/Resources/SpeakerEncoder.mlmodelc"
-if [ -d "$speaker_encoder" ]; then
-  cp -R "$speaker_encoder" "$staged_app/Contents/Resources/SpeakerEncoder.mlmodelc"
+if [ ! -d "$staged_speaker_encoder" ] && [ -d "$speaker_encoder" ]; then
+  cp -R "$speaker_encoder" "$staged_speaker_encoder"
 fi
 install -m 0755 "$binary" "$staged_app/Contents/MacOS/BrainMenu"
 install -m 0755 "$observer_binary" "$staged_app/Contents/Helpers/BrainDictationObserver"

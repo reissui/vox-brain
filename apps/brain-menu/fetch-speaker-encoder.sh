@@ -19,8 +19,21 @@ mkdir -p "$(dirname "$destination")"
 cp -R "$source_model" "$destination"
 expected_sha256="${BRAIN_SPEAKER_ENCODER_SHA256:-}"
 if [ -n "$expected_sha256" ]; then
-  actual_sha256="$(tar -C "$destination" -cf - . | shasum -a 256 | awk '{print $1}')"
+  # A compiled model is a directory. Hash sorted per-file digests rather than an
+  # archive stream so the pin depends only on file names and contents, never on
+  # timestamps, ownership, or archive member order.
+  actual_sha256="$(
+    cd "$destination" &&
+      /usr/bin/find . -type f -print0 |
+      LC_ALL=C sort -z |
+      while IFS= read -r -d '' file; do
+        /usr/bin/shasum -a 256 "$file"
+      done |
+      /usr/bin/shasum -a 256 |
+      /usr/bin/awk '{print $1}'
+  )"
   if [ "$actual_sha256" != "$expected_sha256" ]; then
+    rm -rf "$destination"
     echo "error: SpeakerEncoder SHA-256 verification failed" >&2
     exit 65
   fi

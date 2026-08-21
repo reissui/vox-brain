@@ -125,6 +125,12 @@ application metadata, and signatures. The pinned upstream VoxType binary is
 verified by SHA-256 and universal architecture, signed inside Brain’s nested
 code, and distributed with its MIT license.
 
+The speaker encoder used to split remote voices is optional. Set
+`BRAIN_SPEAKER_ENCODER_SOURCE` to a compiled `SpeakerEncoder.mlmodelc` directory
+to bundle one, and `BRAIN_SPEAKER_ENCODER_SHA256` to pin it; the digest hashes
+sorted per-file contents, so it does not change with file timestamps. Packaging
+without the model succeeds and the app keeps every remote voice as Remote.
+
 It must not contain vault Markdown, personal attachments, tokens, Git metadata,
 OAuth files, source-control history, or machine-specific paths.
 
