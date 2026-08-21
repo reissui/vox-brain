@@ -516,9 +516,9 @@ struct AppIntegrationTests {
         recorder.completion = saved
 
         await graph.toggleMeeting()
-        await eventually { processor.calls == 1 }
+        await eventually { processor.meetingIDs == [saved.id] }
 
-        #expect(processor.meetingIDs == [saved.id])
+        #expect(processor.calls == 1)
         #expect(library.values[saved.id]?.meeting.analysisState == .notRequested)
     }
 
@@ -1143,8 +1143,12 @@ private final class AppMeetingLibrary: MeetingLibraryStoring, @unchecked Sendabl
 
 private final class AppMeetingTranscriptProcessor: MeetingTranscriptProcessingControlling,
     @unchecked Sendable {
-    private(set) var calls = 0
-    private(set) var meetingIDs: [UUID] = []
+    private let lock = NSLock()
+    private var recordedCalls = 0
+    private var recordedMeetingIDs: [UUID] = []
+
+    var calls: Int { lock.withLock { recordedCalls } }
+    var meetingIDs: [UUID] { lock.withLock { recordedMeetingIDs } }
 
     func process(
         meeting: MeetingRecord,
@@ -1154,8 +1158,10 @@ private final class AppMeetingTranscriptProcessor: MeetingTranscriptProcessingCo
         terminology: [String],
         terminologyHash: String
     ) async -> MeetingTranscriptProcessingRunResult {
-        calls += 1
-        meetingIDs.append(meeting.id)
+        lock.withLock {
+            recordedCalls += 1
+            recordedMeetingIDs.append(meeting.id)
+        }
         return MeetingTranscriptProcessingRunResult(
             rawAttemptID: artifact.selectedAttemptID,
             transcript: nil,
