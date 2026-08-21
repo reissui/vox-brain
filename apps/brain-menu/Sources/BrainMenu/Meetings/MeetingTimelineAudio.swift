@@ -291,6 +291,13 @@ struct MeetingTimelineAudio: Sendable {
         )
     }
 
+    /// Reads one bounded span of a source track on the meeting timeline.
+    /// Regions the manifest never mapped read as silence; a region the track
+    /// cannot supply throws instead of returning misaligned audio.
+    func samples(for span: MeetingTimelineSpeechSpan) throws -> [Float] {
+        try samples(for: span, maximumExtraFrames: Self.maximumRetryContextFrames)
+    }
+
     /// Creates a unique owner-only WAV. The caller owns and must remove the returned file.
     func writeWAV(
         for span: MeetingTimelineSpeechSpan,

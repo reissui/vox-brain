@@ -29,10 +29,11 @@ struct MeetingSpeakerClusterer: Sendable {
 
         for i in normalized.indices {
             for j in normalized.indices where j > i {
-                if Self.cosine(normalized[i].vector, normalized[j].vector)
-                    >= Self.sameSpeakerCosineThreshold {
-                    union(i, j)
-                }
+                guard let similarity = Self.cosine(
+                    normalized[i].vector,
+                    normalized[j].vector
+                ), similarity >= Self.sameSpeakerCosineThreshold else { continue }
+                union(i, j)
             }
         }
 
@@ -51,7 +52,9 @@ struct MeetingSpeakerClusterer: Sendable {
 
         var map: [UUID: String] = [:]
         for (offset, group) in ordered.enumerated() {
-            let id = MeetingSpeakerIdentity.clusteredID(index: offset + 2)
+            let id = MeetingSpeakerIdentity.clusteredID(
+                index: offset + MeetingSpeakerIdentity.firstClusterIndex
+            )
             for point in group { map[point.id] = id }
         }
         return map
@@ -63,7 +66,11 @@ struct MeetingSpeakerClusterer: Sendable {
         return vector.map { $0 / norm }
     }
 
-    private static func cosine(_ lhs: [Float], _ rhs: [Float]) -> Float {
-        zip(lhs, rhs).reduce(Float(0)) { $0 + $1.0 * $1.1 }
+    /// Vectors from different embedding dimensions are not comparable, so a
+    /// length mismatch yields no similarity at all rather than a truncated
+    /// dot product that could merge two different people.
+    private static func cosine(_ lhs: [Float], _ rhs: [Float]) -> Float? {
+        guard lhs.count == rhs.count, !lhs.isEmpty else { return nil }
+        return zip(lhs, rhs).reduce(Float(0)) { $0 + $1.0 * $1.1 }
     }
 }

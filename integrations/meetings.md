@@ -49,7 +49,7 @@ starts or stops recording automatically.
 5. Review the saved item. **Processed** is selected automatically and starts
    building as soon as Raw completes. **Raw** remains the immutable fallback
    with preserved previews, failed-span diagnostics, and verified model
-   metadata.    Same-speaker utterances separated by less than eight seconds are
+   metadata. Same-speaker utterances separated by less than eight seconds are
    one readable turn; eight seconds or a speaker change starts a new turn.
    After hangup, distinct voices on system audio become Speaker 2, Speaker 3,
    …; live captions stay You vs Remote; rename/merge in review still works.

@@ -29,6 +29,16 @@ struct MeetingSpeakerClustererTests {
     }
 
     @Test
+    func mismatchedVectorLengthsNeverMerge() {
+        let map = MeetingSpeakerClusterer().cluster([
+            .init(id: a, startMilliseconds: 0, vector: [1, 0]),
+            .init(id: b, startMilliseconds: 1_000, vector: [1, 0, 0]),
+        ])
+        #expect(map[a] == "remote-2")
+        #expect(map[b] == "remote-3")
+    }
+
+    @Test
     func oneEmbeddingWritesNothing() {
         let map = MeetingSpeakerClusterer().cluster([
             .init(id: a, startMilliseconds: 0, vector: [1, 0]),

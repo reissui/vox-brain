@@ -262,29 +262,35 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
 
         let resolvedMeeting = meeting
         let utterances = transcript.utterances
-        let clusteredUtterances = Self.applyingClusters(
-            utterances,
-            capture: capture,
-            isVoiceNote: resolvedMeeting.isVoiceNote,
-            diarizer: diarizer
-        )
+        let spanOutcomes = transcript.finalSpanOutcomes
         let failures = transcript.errors.filter { $0.phase == .final }
         let allFailureDiagnostics = transcript.errors.map(MeetingTranscriptFailureDiagnostic.init)
         let systemicFailures = failures.filter(\.isSystemic)
         let isSuccessful = systemicFailures.isEmpty
             && (utterances.isEmpty ? failures.isEmpty : true)
-        let attempt = Self.makeAttempt(
-            meeting: meeting,
-            spanOutcomes: transcript.finalSpanOutcomes,
-            utterances: clusteredUtterances,
-            retainedPreviews: clusteredUtterances.filter { $0.transcriptionPhase == .preview },
-            failures: allFailureDiagnostics,
-            isSuccessful: isSuccessful
-        )
+        // Clustering reads retained audio and runs an on-device encoder. It
+        // shares the persistence hop off the main actor so hangup never blocks
+        // the UI while the final transcript is being frozen.
         let outcome = await Task.detached(
             priority: .utility
-        ) { [store, retention, transcriptArtifactStore] in
-            Self.persistFinalResult(
+        ) { [store, retention, transcriptArtifactStore, diarizer] in
+            let clusteredUtterances = Self.applyingClusters(
+                utterances,
+                capture: capture,
+                isVoiceNote: resolvedMeeting.isVoiceNote,
+                diarizer: diarizer
+            )
+            let attempt = Self.makeAttempt(
+                meeting: resolvedMeeting,
+                spanOutcomes: spanOutcomes,
+                utterances: clusteredUtterances,
+                retainedPreviews: clusteredUtterances.filter {
+                    $0.transcriptionPhase == .preview
+                },
+                failures: allFailureDiagnostics,
+                isSuccessful: isSuccessful
+            )
+            return Self.persistFinalResult(
                 meeting: resolvedMeeting,
                 capture: capture,
                 utterances: clusteredUtterances,
@@ -839,8 +845,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         diarizer: any MeetingSpeakerDiarizing
     ) -> [MeetingUtterance] {
         guard !isVoiceNote else { return utterances }
-        let track = capture.tracks.first { $0.source == .system }
-        let map = diarizer.assign(utterances: utterances, systemTrack: track)
+        let map = diarizer.assign(utterances: utterances, capture: capture)
         guard !map.isEmpty else { return utterances }
         return utterances.map { utterance in
             guard utterance.source == .system,
@@ -850,6 +855,9 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             }
             var updated = utterance
             updated.baseSpeakerID = clustered
+            // The transcriber's name for this span described the old, merged
+            // remote speaker. Labels for a clustered ID come from the resolver.
+            updated.humanName = nil
             return updated
         }
     }

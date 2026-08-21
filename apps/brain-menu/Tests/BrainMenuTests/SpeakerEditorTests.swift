@@ -337,6 +337,42 @@ struct SpeakerEditorTests {
     }
 
     @Test
+    func talkTimeKeepsAcceptedSuggestionsAndIgnoresAdvisoryOnes() throws {
+        let accepted = try utterance(
+            id: "00000000-0000-0000-0000-000000000081",
+            source: .system,
+            start: 0,
+            end: 2_000,
+            text: "a",
+            base: "remote-2"
+        )
+        let suggested = try utterance(
+            id: "00000000-0000-0000-0000-000000000082",
+            source: .system,
+            start: 2_000,
+            end: 3_000,
+            text: "b",
+            base: "remote-3"
+        )
+        let chart = TalkTimeCalculator().calculate(
+            utterances: [accepted, suggested],
+            assignments: [
+                accepted.id: SpeakerAssignment(speakerID: "alex", provenance: .aiAccepted),
+                suggested.id: SpeakerAssignment(speakerID: "sam", provenance: .aiSuggestion),
+            ],
+            speakers: [
+                "alex": MeetingSpeaker(id: "alex", displayName: "Alex"),
+                "sam": MeetingSpeaker(id: "sam", displayName: "Sam"),
+            ]
+        )
+
+        #expect(Set(chart.data.map(\.speakerID)) == ["alex", "remote-3"])
+        #expect(chart.data.first { $0.speakerID == "alex" }?.displayName == "Alex")
+        #expect(chart.data.first { $0.speakerID == "alex" }?.durationMilliseconds == 2_000)
+        #expect(chart.data.contains { $0.speakerID == "remote" } == false)
+    }
+
+    @Test
     func zeroSpeechAndChartOrderingAndColorsAreStable() throws {
         let point = try utterance(
             id: "00000000-0000-0000-0000-000000000061",

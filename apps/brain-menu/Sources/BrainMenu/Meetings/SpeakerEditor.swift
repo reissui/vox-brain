@@ -441,15 +441,6 @@ struct SpeakerEditor: Sendable {
         return "\(base)-\(suffix)"
     }
 
-    private static func defaultSpeakerID(for source: MeetingUtteranceSource) -> String {
-        switch source {
-        case .microphone:
-            youSpeakerID
-        case .system:
-            remoteSpeakerID
-        }
-    }
-
     static func defaultDisplayName(for speakerID: String) -> String {
         switch speakerID {
         case youSpeakerID:
@@ -458,7 +449,7 @@ struct SpeakerEditor: Sendable {
             return "Remote"
         default:
             if MeetingSpeakerIdentity.isClusteredID(speakerID),
-               let number = Int(speakerID.dropFirst("remote-".count)) {
+               let number = Int(speakerID.dropFirst(MeetingSpeakerIdentity.clusterPrefix.count)) {
                 return "Speaker \(number)"
             }
             return "Speaker"

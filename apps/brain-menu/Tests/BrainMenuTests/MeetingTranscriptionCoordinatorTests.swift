@@ -1276,7 +1276,7 @@ struct MeetingTranscriptionCoordinatorTests {
     @Test
     func completePersistsClusteredSpeakersOnUtterancesAndAttempt() async throws {
         let fixture = try MeetingTranscriptionCoordinatorFixture()
-        let capture = try fixture.makeCapture()
+        let capture = try fixture.makeTwoRemoteTurnCapture()
         let client = CoordinatorSuccessClient()
         let diarizer = SequentialSystemClusterDiarizer(speakerIDs: ["remote-2", "remote-3"])
         let coordinator = fixture.coordinator(client: client, diarizer: diarizer)
@@ -1289,9 +1289,12 @@ struct MeetingTranscriptionCoordinatorTests {
         )
         let stored = try fixture.store.load(fixture.meeting.id)
         let attempt = try #require(stored.rawTranscriptArtifacts?.selectedAttempt)
+        let storedSystem = stored.utterances.filter { $0.source == .system }
+        let attemptSystem = attempt.utterances.filter { $0.source == .system }
 
-        #expect(stored.utterances.filter { $0.source == .system }.map(\.baseSpeakerID).contains("remote-2"))
-        #expect(attempt.utterances.filter { $0.source == .system }.map(\.baseSpeakerID).contains("remote-2"))
+        #expect(storedSystem.map(\.baseSpeakerID) == ["remote-2", "remote-3"])
+        #expect(attemptSystem.map(\.baseSpeakerID) == ["remote-2", "remote-3"])
+        #expect(storedSystem.allSatisfy { $0.humanName == nil })
         #expect(stored.utterances.contains { $0.source == .microphone && $0.baseSpeakerID == "you" })
         #expect(completed.transcriptionState == .completed)
     }
@@ -1465,6 +1468,31 @@ private final class MeetingTranscriptionCoordinatorFixture {
         return try writer.finalize()
     }
 
+    /// Two voiced system callbacks separated by more than the span merge
+    /// window, so final transcription plans one utterance per remote turn.
+    func makeTwoRemoteTurnCapture() throws -> MeetingAudioCaptureSummary {
+        let writer = try MeetingAudioWriter(
+            meetingDirectory: meetingDirectory,
+            origin: meeting.startedAt
+        )
+        let voicedFrames = [Float](repeating: 0.25, count: 8_000)
+        for (source, hostTimestamp) in [
+            (MeetingAudioSource.microphone, 100.0),
+            (.system, 100.5),
+            (.system, 103.0),
+        ] {
+            _ = try writer.append(MeetingAudioSampleBuffer(
+                source: source,
+                sourceTimestamp: hostTimestamp - 90,
+                hostTimestamp: hostTimestamp,
+                sampleRate: 16_000,
+                channelCount: 1,
+                interleavedSamples: voicedFrames
+            ))
+        }
+        return try writer.finalize()
+    }
+
     func rawURLs(for capture: MeetingAudioCaptureSummary) -> [URL] {
         capture.tracks.map(\.fileURL) + [
             meetingDirectory.appendingPathComponent(MeetingAudioWriter.manifestFilename),
@@ -1563,14 +1591,6 @@ private final class MeetingTranscriptionCoordinatorFixture {
     }
 }
 
-private struct FixedMapDiarizer: MeetingSpeakerDiarizing {
-    var map: [UUID: String]
-
-    func assign(utterances: [MeetingUtterance], systemTrack: MeetingAudioTrack?) -> [UUID: String] {
-        map
-    }
-}
-
 private final class RecordingDiarizerFlag: @unchecked Sendable {
     var called = false
 }
@@ -1580,9 +1600,12 @@ private struct RecordingDiarizer: MeetingSpeakerDiarizing {
     let speakerIDs: [String]
     var simulateMissingSystemTrack = false
 
-    func assign(utterances: [MeetingUtterance], systemTrack: MeetingAudioTrack?) -> [UUID: String] {
+    func assign(
+        utterances: [MeetingUtterance],
+        capture: MeetingAudioCaptureSummary?
+    ) -> [UUID: String] {
         flag.called = true
-        guard !simulateMissingSystemTrack, systemTrack != nil else { return [:] }
+        guard !simulateMissingSystemTrack, capture != nil else { return [:] }
         let system = utterances
             .filter { $0.source == .system }
             .sorted(by: MeetingUtterance.chronologicallyPrecedes)
@@ -1597,7 +1620,10 @@ private struct RecordingDiarizer: MeetingSpeakerDiarizing {
 private struct SequentialSystemClusterDiarizer: MeetingSpeakerDiarizing {
     let speakerIDs: [String]
 
-    func assign(utterances: [MeetingUtterance], systemTrack: MeetingAudioTrack?) -> [UUID: String] {
+    func assign(
+        utterances: [MeetingUtterance],
+        capture: MeetingAudioCaptureSummary?
+    ) -> [UUID: String] {
         let system = utterances
             .filter { $0.source == .system }
             .sorted(by: MeetingUtterance.chronologicallyPrecedes)

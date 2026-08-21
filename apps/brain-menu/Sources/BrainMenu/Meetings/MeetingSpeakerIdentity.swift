@@ -1,12 +1,21 @@
 import Foundation
 
 enum MeetingSpeakerIdentity {
-    static func clusteredID(index: Int) -> String { "remote-\(index)" }
+    static let clusterPrefix = "remote-"
+    /// `remote` already means the undifferentiated remote side, so a cluster
+    /// only exists once the diarizer found at least two distinct voices.
+    static let firstClusterIndex = 2
+
+    static func clusteredID(index: Int) -> String { "\(clusterPrefix)\(index)" }
 
     static func isClusteredID(_ id: String) -> Bool {
-        guard id.hasPrefix("remote-") else { return false }
-        let digits = id.dropFirst("remote-".count)
-        return !digits.isEmpty && digits.allSatisfy(\.isNumber)
+        guard id.hasPrefix(clusterPrefix) else { return false }
+        let digits = id.dropFirst(clusterPrefix.count)
+        guard !digits.isEmpty,
+              digits.allSatisfy({ $0.isASCII && $0.isNumber }),
+              digits.first != "0",
+              let index = Int(digits) else { return false }
+        return index >= firstClusterIndex
     }
 
     static func defaultDisplayName(for speakerID: String) -> String {
@@ -19,7 +28,10 @@ enum MeetingSpeakerIdentity {
         assignment: SpeakerAssignment?,
         speakers: [String: MeetingSpeaker]
     ) -> (id: String, label: String, provenance: SpeakerAssignmentProvenance) {
-        if let assignment, assignment.provenance == .manual {
+        // A manual edit and an explicitly accepted suggestion are both the
+        // owner's own decision, so either outranks any clustered or default ID.
+        // An unaccepted `aiSuggestion` stays advisory.
+        if let assignment, assignment.provenance == .manual || assignment.provenance == .aiAccepted {
             return (
                 assignment.speakerID,
                 speakers[assignment.speakerID]?.displayName
