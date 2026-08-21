@@ -38,6 +38,21 @@ struct MeetingTranscriptTurnAssemblerTests {
     }
 
     @Test
+    func clusteredRemoteIDsSplitTurnsAndJunkStillCollapses() throws {
+        let first = try utterance(.system, 0, 1_000, "hello", base: "remote-2")
+        let same = try utterance(.system, 1_100, 2_000, "again", base: "remote-2")
+        let other = try utterance(.system, 2_100, 3_000, "other", base: "remote-3")
+        let junk = try utterance(.system, 3_100, 4_000, "junk", base: "untrusted-diarization")
+        let mic = try utterance(.microphone, 4_100, 5_000, "me", base: "you")
+        let turns = MeetingTranscriptTurnAssembler.assemble(
+            utterances: [mic, junk, other, same, first]
+        )
+        #expect(turns.map(\.speakerID) == ["remote-2", "remote-3", "remote", "you"])
+        #expect(turns.map(\.speakerLabel) == ["Speaker 2", "Speaker 3", "Remote", "You"])
+        #expect(turns[0].text == "hello again")
+    }
+
+    @Test
     func preservesOverlapsAndUsesDeterministicOrderingForTies() throws {
         let sameSpeakerEarly = try utterance(.microphone, 0, 10_000, "one", base: "you")
         let sameSpeakerOverlap = try utterance(.microphone, 5_000, 6_000, "two", base: "you")
