@@ -371,7 +371,12 @@ struct SpeakerEditor: Sendable {
                 )
                 ensureSpeaker(canonicalID, fallbackName: utterance.humanName)
             } else {
-                let sourceID = Self.defaultSpeakerID(for: utterance.source)
+                let sourceID = MeetingSpeakerIdentity.resolved(
+                    source: utterance.source,
+                    baseSpeakerID: utterance.baseSpeakerID,
+                    assignment: nil,
+                    speakers: state.speakers
+                ).id
                 let canonicalID = canonicalSpeakerID(for: sourceID)
                 state.assignments[utterance.id] = SpeakerAssignment(
                     speakerID: canonicalID,

@@ -53,7 +53,10 @@ optional AI provider succeeds, so a no-op provider response cannot restore known
 fillers or repetition. **Raw** always exposes the immutable engine evidence,
 including preserved previews and bounded failure diagnostics. Adjacent
 utterances from one speaker remain one readable turn when silence is under
-eight seconds; eight seconds or a speaker change starts a new turn.
+eight seconds; eight seconds or a speaker change starts a new turn. After
+hangup, distinct voices on system audio become Speaker 2, Speaker 3, …; live
+captions stay You vs Remote; rename/merge in review still works. Clustering
+is local and fail-closed.
 
 Retained meeting audio is playable only on the recording Mac. Transcript
 timestamps seek the local player; pause, resume, and explicit audio deletion do
