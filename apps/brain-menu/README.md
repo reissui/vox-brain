@@ -53,7 +53,10 @@ optional AI provider succeeds, so a no-op provider response cannot restore known
 fillers or repetition. **Raw** always exposes the immutable engine evidence,
 including preserved previews and bounded failure diagnostics. Adjacent
 utterances from one speaker remain one readable turn when silence is under
-eight seconds; eight seconds or a speaker change starts a new turn.
+eight seconds; eight seconds or a speaker change starts a new turn. After
+hangup, distinct voices on system audio become Speaker 2, Speaker 3, …; live
+captions stay You vs Remote; rename/merge in review still works. Clustering
+is local and fail-closed.
 
 Retained meeting audio is playable only on the recording Mac. Transcript
 timestamps seek the local player; pause, resume, and explicit audio deletion do
@@ -121,6 +124,12 @@ contains the BrainMenu executable, helpers, VoxType login item, local runtime,
 application metadata, and signatures. The pinned upstream VoxType binary is
 verified by SHA-256 and universal architecture, signed inside Brain’s nested
 code, and distributed with its MIT license.
+
+The speaker encoder used to split remote voices is optional. Set
+`BRAIN_SPEAKER_ENCODER_SOURCE` to a compiled `SpeakerEncoder.mlmodelc` directory
+to bundle one, and `BRAIN_SPEAKER_ENCODER_SHA256` to pin it; the digest hashes
+sorted per-file contents, so it does not change with file timestamps. Packaging
+without the model succeeds and the app keeps every remote voice as Remote.
 
 It must not contain vault Markdown, personal attachments, tokens, Git metadata,
 OAuth files, source-control history, or machine-specific paths.

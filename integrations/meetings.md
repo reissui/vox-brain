@@ -51,7 +51,10 @@ starts or stops recording automatically.
    with preserved previews, failed-span diagnostics, and verified model
    metadata. Same-speaker utterances separated by less than eight seconds are
    one readable turn; eight seconds or a speaker change starts a new turn.
-   Meetings support speaker editing, talk-time totals, and per-version copy
+   After hangup, distinct voices on system audio become Speaker 2, Speaker 3,
+   …; live captions stay You vs Remote; rename/merge in review still works.
+   Clustering is local and fail-closed. Meetings support speaker editing,
+   talk-time totals, and per-version copy
    controls for both Processed and Raw; Voice Notes show readable paragraphs and
    **Copy Full Transcript**.
 6. Finalize the transcript to write it to the local inbox. Later edits create

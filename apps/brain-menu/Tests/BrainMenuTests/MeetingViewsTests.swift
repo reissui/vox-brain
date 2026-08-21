@@ -467,6 +467,31 @@ struct MeetingViewsTests {
     }
 
     @Test
+    func completedTranscriptShowsClusteredRemoteSpeakers() throws {
+        let first = try MeetingUtterance(
+            source: .system, startMilliseconds: 0, endMilliseconds: 1_000,
+            text: "First remote", baseSpeakerID: "remote-2"
+        )
+        let second = try MeetingUtterance(
+            source: .system, startMilliseconds: 1_100, endMilliseconds: 2_000,
+            text: "Second remote", baseSpeakerID: "remote-3"
+        )
+        let id = UUID()
+        let record = meeting(id: id, title: "Clustered", start: .now)
+        let detail = MeetingDetailController(
+            meetingID: id,
+            store: MemoryMeetingViewStore(values: [id: StoredMeeting(meeting: record, utterances: [first, second])]),
+            analysisStore: MemoryMeetingViewAnalysisStore(),
+            uploadController: MeetingDetailUploadSpy(),
+            audioController: MeetingDetailAudioSpy(meeting: record),
+            audioChecker: FixedAudioChecker(value: false),
+            clipboard: MeetingClipboardSpy()
+        )
+        detail.load()
+        #expect(detail.viewModel.transcript.map(\.speakerName) == ["Speaker 2", "Speaker 3"])
+    }
+
+    @Test
     func liveTranscriptHealthSummarizesRepeatedFailuresWithoutChangingTranscriptRows() throws {
         let activeMeeting = meeting(
             title: "Failure summary",

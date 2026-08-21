@@ -74,29 +74,11 @@ enum MeetingTranscriptTurnAssembler {
         assignment: SpeakerAssignment?,
         speakers: [String: MeetingSpeaker]
     ) -> (id: String, label: String, provenance: SpeakerAssignmentProvenance) {
-        if let assignment, assignment.provenance == .manual {
-            return (
-                assignment.speakerID,
-                speakers[assignment.speakerID]?.displayName
-                    ?? SpeakerEditor.defaultDisplayName(for: assignment.speakerID),
-                assignment.provenance
-            )
-        }
-
-        // System audio is a single remote participant until a person assigns
-        // otherwise; transcript grouping does not infer diarized speakers.
-        let speakerID: String
-        if utterance.source == .system {
-            speakerID = SpeakerEditor.remoteSpeakerID
-        } else if !utterance.baseSpeakerID.isEmpty {
-            speakerID = utterance.baseSpeakerID
-        } else {
-            speakerID = SpeakerEditor.youSpeakerID
-        }
-        return (
-            speakerID,
-            utterance.humanName ?? SpeakerEditor.defaultDisplayName(for: speakerID),
-            .sourceDefault
+        MeetingSpeakerIdentity.resolved(
+            source: utterance.source,
+            baseSpeakerID: utterance.baseSpeakerID,
+            assignment: assignment,
+            speakers: speakers
         )
     }
 

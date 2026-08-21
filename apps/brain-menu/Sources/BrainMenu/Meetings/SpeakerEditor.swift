@@ -371,7 +371,12 @@ struct SpeakerEditor: Sendable {
                 )
                 ensureSpeaker(canonicalID, fallbackName: utterance.humanName)
             } else {
-                let sourceID = Self.defaultSpeakerID(for: utterance.source)
+                let sourceID = MeetingSpeakerIdentity.resolved(
+                    source: utterance.source,
+                    baseSpeakerID: utterance.baseSpeakerID,
+                    assignment: nil,
+                    speakers: state.speakers
+                ).id
                 let canonicalID = canonicalSpeakerID(for: sourceID)
                 state.assignments[utterance.id] = SpeakerAssignment(
                     speakerID: canonicalID,
@@ -436,23 +441,18 @@ struct SpeakerEditor: Sendable {
         return "\(base)-\(suffix)"
     }
 
-    private static func defaultSpeakerID(for source: MeetingUtteranceSource) -> String {
-        switch source {
-        case .microphone:
-            youSpeakerID
-        case .system:
-            remoteSpeakerID
-        }
-    }
-
     static func defaultDisplayName(for speakerID: String) -> String {
         switch speakerID {
         case youSpeakerID:
-            "You"
+            return "You"
         case remoteSpeakerID:
-            "Remote"
+            return "Remote"
         default:
-            "Speaker"
+            if MeetingSpeakerIdentity.isClusteredID(speakerID),
+               let number = Int(speakerID.dropFirst(MeetingSpeakerIdentity.clusterPrefix.count)) {
+                return "Speaker \(number)"
+            }
+            return "Speaker"
         }
     }
 

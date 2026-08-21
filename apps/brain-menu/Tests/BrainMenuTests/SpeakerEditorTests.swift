@@ -305,6 +305,74 @@ struct SpeakerEditorTests {
     }
 
     @Test
+    func talkTimeSplitsClusteredRemoteSpeakers() throws {
+        let you = try utterance(
+            id: "00000000-0000-0000-0000-000000000071",
+            source: .microphone,
+            start: 0,
+            end: 1_000,
+            text: "me"
+        )
+        let remoteTwo = try utterance(
+            id: "00000000-0000-0000-0000-000000000072",
+            source: .system,
+            start: 0,
+            end: 2_000,
+            text: "a",
+            base: "remote-2"
+        )
+        let remoteThree = try utterance(
+            id: "00000000-0000-0000-0000-000000000073",
+            source: .system,
+            start: 2_000,
+            end: 3_000,
+            text: "b",
+            base: "remote-3"
+        )
+        let chart = TalkTimeCalculator().calculate(utterances: [you, remoteTwo, remoteThree])
+        #expect(Set(chart.data.map(\.speakerID)) == ["you", "remote-2", "remote-3"])
+        #expect(chart.data.first { $0.speakerID == "remote-2" }?.displayName == "Speaker 2")
+        #expect(chart.data.first { $0.speakerID == "remote-3" }?.displayName == "Speaker 3")
+        #expect(chart.data.contains { $0.speakerID == "remote" } == false)
+    }
+
+    @Test
+    func talkTimeKeepsAcceptedSuggestionsAndIgnoresAdvisoryOnes() throws {
+        let accepted = try utterance(
+            id: "00000000-0000-0000-0000-000000000081",
+            source: .system,
+            start: 0,
+            end: 2_000,
+            text: "a",
+            base: "remote-2"
+        )
+        let suggested = try utterance(
+            id: "00000000-0000-0000-0000-000000000082",
+            source: .system,
+            start: 2_000,
+            end: 3_000,
+            text: "b",
+            base: "remote-3"
+        )
+        let chart = TalkTimeCalculator().calculate(
+            utterances: [accepted, suggested],
+            assignments: [
+                accepted.id: SpeakerAssignment(speakerID: "alex", provenance: .aiAccepted),
+                suggested.id: SpeakerAssignment(speakerID: "sam", provenance: .aiSuggestion),
+            ],
+            speakers: [
+                "alex": MeetingSpeaker(id: "alex", displayName: "Alex"),
+                "sam": MeetingSpeaker(id: "sam", displayName: "Sam"),
+            ]
+        )
+
+        #expect(Set(chart.data.map(\.speakerID)) == ["alex", "remote-3"])
+        #expect(chart.data.first { $0.speakerID == "alex" }?.displayName == "Alex")
+        #expect(chart.data.first { $0.speakerID == "alex" }?.durationMilliseconds == 2_000)
+        #expect(chart.data.contains { $0.speakerID == "remote" } == false)
+    }
+
+    @Test
     func zeroSpeechAndChartOrderingAndColorsAreStable() throws {
         let point = try utterance(
             id: "00000000-0000-0000-0000-000000000061",
@@ -375,6 +443,7 @@ struct SpeakerEditorTests {
         start: Int64,
         end: Int64,
         text: String,
+        base: String? = nil,
         baseSpeakerID: String? = nil,
         suppressed: Bool = false
     ) throws -> MeetingUtterance {
@@ -384,7 +453,7 @@ struct SpeakerEditorTests {
             startMilliseconds: start,
             endMilliseconds: end,
             text: text,
-            baseSpeakerID: baseSpeakerID ?? (source == .microphone ? "you" : "remote"),
+            baseSpeakerID: base ?? baseSpeakerID ?? (source == .microphone ? "you" : "remote"),
             suppressed: suppressed
         )
     }

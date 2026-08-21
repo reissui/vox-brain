@@ -58,6 +58,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
     private let scheduleUpload: UploadScheduler
     private let clientFactory: ClientFactory
     private let fileManagerBox: MeetingTranscriptionFileManagerBox
+    private let diarizer: any MeetingSpeakerDiarizing
 
     init(
         store: MeetingStore = MeetingStore(),
@@ -71,7 +72,8 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
                 throw MeetingTranscriptionCoordinatorError.voxTypeUnavailable
             }
             return client
-        }
+        },
+        diarizer: (any MeetingSpeakerDiarizing)? = nil
     ) {
         self.store = store
         self.transcriptArtifactStore = transcriptArtifactStore
@@ -84,6 +86,9 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         }
         fileManagerBox = MeetingTranscriptionFileManagerBox(fileManager)
         self.clientFactory = clientFactory
+        self.diarizer = diarizer ?? MeetingSpeakerDiarizer(
+            embedder: CoreMLSpeakerEmbeddingClient()
+        )
     }
 
     /// Atomically exposes a completed recording as a processing job before any
@@ -257,26 +262,38 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
 
         let resolvedMeeting = meeting
         let utterances = transcript.utterances
+        let spanOutcomes = transcript.finalSpanOutcomes
         let failures = transcript.errors.filter { $0.phase == .final }
         let allFailureDiagnostics = transcript.errors.map(MeetingTranscriptFailureDiagnostic.init)
         let systemicFailures = failures.filter(\.isSystemic)
         let isSuccessful = systemicFailures.isEmpty
             && (utterances.isEmpty ? failures.isEmpty : true)
-        let attempt = Self.makeAttempt(
-            meeting: meeting,
-            spanOutcomes: transcript.finalSpanOutcomes,
-            utterances: utterances,
-            retainedPreviews: utterances.filter { $0.transcriptionPhase == .preview },
-            failures: allFailureDiagnostics,
-            isSuccessful: isSuccessful
-        )
+        // Clustering reads retained audio and runs an on-device encoder. It
+        // shares the persistence hop off the main actor so hangup never blocks
+        // the UI while the final transcript is being frozen.
         let outcome = await Task.detached(
             priority: .utility
-        ) { [store, retention, transcriptArtifactStore] in
-            Self.persistFinalResult(
+        ) { [store, retention, transcriptArtifactStore, diarizer] in
+            let clusteredUtterances = Self.applyingClusters(
+                utterances,
+                capture: capture,
+                isVoiceNote: resolvedMeeting.isVoiceNote,
+                diarizer: diarizer
+            )
+            let attempt = Self.makeAttempt(
+                meeting: resolvedMeeting,
+                spanOutcomes: spanOutcomes,
+                utterances: clusteredUtterances,
+                retainedPreviews: clusteredUtterances.filter {
+                    $0.transcriptionPhase == .preview
+                },
+                failures: allFailureDiagnostics,
+                isSuccessful: isSuccessful
+            )
+            return Self.persistFinalResult(
                 meeting: resolvedMeeting,
                 capture: capture,
-                utterances: utterances,
+                utterances: clusteredUtterances,
                 failures: failures,
                 attempt: attempt,
                 transcriptArtifactStore: transcriptArtifactStore,
@@ -818,6 +835,30 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
             return failed
         } catch {
             return currentRecord(for: meeting.id, fallback: failed, store: store)
+        }
+    }
+
+    private nonisolated static func applyingClusters(
+        _ utterances: [MeetingUtterance],
+        capture: MeetingAudioCaptureSummary,
+        isVoiceNote: Bool,
+        diarizer: any MeetingSpeakerDiarizing
+    ) -> [MeetingUtterance] {
+        guard !isVoiceNote else { return utterances }
+        let map = diarizer.assign(utterances: utterances, capture: capture)
+        guard !map.isEmpty else { return utterances }
+        return utterances.map { utterance in
+            guard utterance.source == .system,
+                  let clustered = map[utterance.id],
+                  MeetingSpeakerIdentity.isClusteredID(clustered) else {
+                return utterance
+            }
+            var updated = utterance
+            updated.baseSpeakerID = clustered
+            // The transcriber's name for this span described the old, merged
+            // remote speaker. Labels for a clustered ID come from the resolver.
+            updated.humanName = nil
+            return updated
         }
     }
 

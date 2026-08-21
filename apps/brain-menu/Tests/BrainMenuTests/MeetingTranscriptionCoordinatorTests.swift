@@ -1273,6 +1273,84 @@ struct MeetingTranscriptionCoordinatorTests {
         #expect(!FileManager.default.fileExists(atPath: tombstone.path))
     }
 
+    @Test
+    func completePersistsClusteredSpeakersOnUtterancesAndAttempt() async throws {
+        let fixture = try MeetingTranscriptionCoordinatorFixture()
+        let capture = try fixture.makeTwoRemoteTurnCapture()
+        let client = CoordinatorSuccessClient()
+        let diarizer = SequentialSystemClusterDiarizer(speakerIDs: ["remote-2", "remote-3"])
+        let coordinator = fixture.coordinator(client: client, diarizer: diarizer)
+        let processing = try coordinator.stage(meeting: fixture.meeting, capture: capture)
+
+        let completed = await coordinator.complete(
+            meeting: processing,
+            capture: capture,
+            transcript: try fixture.transcript(client: client, capture: capture)
+        )
+        let stored = try fixture.store.load(fixture.meeting.id)
+        let attempt = try #require(stored.rawTranscriptArtifacts?.selectedAttempt)
+        let storedSystem = stored.utterances.filter { $0.source == .system }
+        let attemptSystem = attempt.utterances.filter { $0.source == .system }
+
+        #expect(storedSystem.map(\.baseSpeakerID) == ["remote-2", "remote-3"])
+        #expect(attemptSystem.map(\.baseSpeakerID) == ["remote-2", "remote-3"])
+        #expect(storedSystem.allSatisfy { $0.humanName == nil })
+        #expect(stored.utterances.contains { $0.source == .microphone && $0.baseSpeakerID == "you" })
+        #expect(completed.transcriptionState == .completed)
+    }
+
+    @Test
+    func voiceNoteAndMissingDiarizerLeaveRemote() async throws {
+        let voiceFixture = try MeetingTranscriptionCoordinatorFixture()
+        let voiceCapture = try voiceFixture.makeCapture()
+        let client = CoordinatorSuccessClient()
+        let voiceNoteFlag = RecordingDiarizerFlag()
+        var voiceNoteMeeting = voiceFixture.meeting
+        voiceNoteMeeting.recordingKind = .voiceNote
+        let voiceNoteCoordinator = voiceFixture.coordinator(
+            client: client,
+            diarizer: RecordingDiarizer(
+                flag: voiceNoteFlag,
+                speakerIDs: ["remote-2", "remote-3"]
+            )
+        )
+        let voiceNoteProcessing = try voiceNoteCoordinator.stage(
+            meeting: voiceNoteMeeting,
+            capture: voiceCapture
+        )
+        let voiceNoteCompleted = await voiceNoteCoordinator.complete(
+            meeting: voiceNoteProcessing,
+            capture: voiceCapture,
+            transcript: try voiceFixture.transcript(client: client, capture: voiceCapture)
+        )
+
+        #expect(voiceNoteFlag.called == false)
+        #expect(voiceNoteCompleted.transcriptionState == .completed)
+
+        let meetingFixture = try MeetingTranscriptionCoordinatorFixture()
+        let capture = try meetingFixture.makeCapture()
+        let missingTrackFlag = RecordingDiarizerFlag()
+        let meetingCoordinator = meetingFixture.coordinator(
+            client: client,
+            diarizer: RecordingDiarizer(
+                flag: missingTrackFlag,
+                speakerIDs: ["remote-2", "remote-3"],
+                simulateMissingSystemTrack: true
+            )
+        )
+        let processing = try meetingCoordinator.stage(meeting: meetingFixture.meeting, capture: capture)
+        let completed = await meetingCoordinator.complete(
+            meeting: processing,
+            capture: capture,
+            transcript: try meetingFixture.transcript(client: client, capture: capture)
+        )
+        let stored = try meetingFixture.store.load(meetingFixture.meeting.id)
+
+        #expect(missingTrackFlag.called == true)
+        #expect(completed.transcriptionState == .completed)
+        #expect(stored.utterances.contains { $0.source == .system && $0.baseSpeakerID == "remote" })
+    }
+
     private func writeEvidence(_ object: [String: Any], named filename: String) throws {
         guard let directory = ProcessInfo.processInfo.environment["BRAIN_TEST_EVIDENCE_DIR"] else {
             return
@@ -1334,14 +1412,16 @@ private final class MeetingTranscriptionCoordinatorFixture {
         client: any LiveTranscriptionClient,
         retention selectedRetention: AudioRetentionController? = nil,
         transcriptArtifactStore: MeetingTranscriptArtifactStore? = nil,
-        uploadScheduler: @escaping MeetingTranscriptionCoordinator.UploadScheduler = { _ in }
+        uploadScheduler: @escaping MeetingTranscriptionCoordinator.UploadScheduler = { _ in },
+        diarizer: (any MeetingSpeakerDiarizing)? = nil
     ) -> MeetingTranscriptionCoordinator {
         MeetingTranscriptionCoordinator(
             store: store,
             transcriptArtifactStore: transcriptArtifactStore,
             retention: selectedRetention ?? retention,
             uploadScheduler: uploadScheduler,
-            clientFactory: { client }
+            clientFactory: { client },
+            diarizer: diarizer
         )
     }
 
@@ -1385,6 +1465,31 @@ private final class MeetingTranscriptionCoordinatorFixture {
             channelCount: 1,
             interleavedSamples: voicedFrames
         ))
+        return try writer.finalize()
+    }
+
+    /// Two voiced system callbacks separated by more than the span merge
+    /// window, so final transcription plans one utterance per remote turn.
+    func makeTwoRemoteTurnCapture() throws -> MeetingAudioCaptureSummary {
+        let writer = try MeetingAudioWriter(
+            meetingDirectory: meetingDirectory,
+            origin: meeting.startedAt
+        )
+        let voicedFrames = [Float](repeating: 0.25, count: 8_000)
+        for (source, hostTimestamp) in [
+            (MeetingAudioSource.microphone, 100.0),
+            (.system, 100.5),
+            (.system, 103.0),
+        ] {
+            _ = try writer.append(MeetingAudioSampleBuffer(
+                source: source,
+                sourceTimestamp: hostTimestamp - 90,
+                hostTimestamp: hostTimestamp,
+                sampleRate: 16_000,
+                channelCount: 1,
+                interleavedSamples: voicedFrames
+            ))
+        }
         return try writer.finalize()
     }
 
@@ -1483,6 +1588,50 @@ private final class MeetingTranscriptionCoordinatorFixture {
         try store.save(legacy, utterances: utterances)
         try FileManager.default.removeItem(at: currentURL)
         return legacy
+    }
+}
+
+private final class RecordingDiarizerFlag: @unchecked Sendable {
+    var called = false
+}
+
+private struct RecordingDiarizer: MeetingSpeakerDiarizing {
+    let flag: RecordingDiarizerFlag
+    let speakerIDs: [String]
+    var simulateMissingSystemTrack = false
+
+    func assign(
+        utterances: [MeetingUtterance],
+        capture: MeetingAudioCaptureSummary?
+    ) -> [UUID: String] {
+        flag.called = true
+        guard !simulateMissingSystemTrack, capture != nil else { return [:] }
+        let system = utterances
+            .filter { $0.source == .system }
+            .sorted(by: MeetingUtterance.chronologicallyPrecedes)
+        var map: [UUID: String] = [:]
+        for (index, utterance) in system.prefix(speakerIDs.count).enumerated() {
+            map[utterance.id] = speakerIDs[index]
+        }
+        return map
+    }
+}
+
+private struct SequentialSystemClusterDiarizer: MeetingSpeakerDiarizing {
+    let speakerIDs: [String]
+
+    func assign(
+        utterances: [MeetingUtterance],
+        capture: MeetingAudioCaptureSummary?
+    ) -> [UUID: String] {
+        let system = utterances
+            .filter { $0.source == .system }
+            .sorted(by: MeetingUtterance.chronologicallyPrecedes)
+        var map: [UUID: String] = [:]
+        for (index, utterance) in system.prefix(speakerIDs.count).enumerated() {
+            map[utterance.id] = speakerIDs[index]
+        }
+        return map
     }
 }
 
