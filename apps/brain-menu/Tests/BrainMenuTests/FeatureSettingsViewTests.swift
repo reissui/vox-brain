@@ -29,6 +29,8 @@ struct FeatureSettingsViewTests {
         #expect(recommended.engine == .whisper)
         #expect(recommended.recommendation?.detail.contains("dictation") == true)
         #expect(recommended.recommendation?.detail.contains("meeting") == true)
+        #expect(recommended.recommendation?.detail.contains("live preview") == false)
+        #expect(SpeechEngineCatalog.livePreviewModelID == "small.en")
         #expect(multilingual.recommendation?.title == "Multilingual fallback")
         #expect(SpeechEngineCatalog.modelGuideURL.absoluteString
             == "https://voxtype.io/docs/MODEL_SELECTION_GUIDE")
@@ -538,6 +540,45 @@ struct FeatureSettingsViewTests {
         #expect(speech.contains("controller.meetingTerminology.add"))
         #expect(speech.contains("controller.meetingTerminology.replace"))
         #expect(speech.contains("controller.meetingTerminology.remove"))
+        #expect(speech.contains("Section(\"Live captions\")"))
+        #expect(speech.contains("Show captions during meetings"))
+        #expect(speech.contains("Whisper Small"))
+        #expect(speech.contains("dictation and final meeting transcription"))
+        #expect(!speech.contains("live meeting preview, and final"))
+    }
+
+    @Test
+    func liveCaptionsDefaultOffInstallSmallWithoutChangingTheActiveModel() async throws {
+        let suite = "FeatureSettings.LiveCaptions.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let snapshot = ModelInventorySnapshot(availabilityByModelID: [
+            "small.en": .missing,
+            SpeechEngineCatalog.englishDefaultModelID: .ready,
+        ])
+        let inventory = FeatureInventory(snapshot: snapshot)
+        let store = MeetingLiveCaptionsStore(defaults: defaults)
+        let controller = SpeechSettingsController(
+            voxType: nil,
+            inventory: inventory,
+            selections: featureSpeechStore(namespace: "feature.live-captions"),
+            liveCaptions: store,
+            initialSnapshot: snapshot
+        )
+
+        #expect(controller.liveCaptionsEnabled == false)
+        #expect(controller.selection(for: .meetings).modelID
+            == SpeechEngineCatalog.englishDefaultModelID)
+
+        controller.setLiveCaptionsEnabled(true)
+        await controller.waitForPendingLiveCaptionsInstall()
+
+        #expect(controller.liveCaptionsEnabled)
+        #expect(MeetingLiveCaptionsStore(defaults: defaults).isEnabled)
+        #expect(await inventory.installedModelIDs == ["small.en"])
+        #expect(controller.selection(for: .meetings).modelID
+            == SpeechEngineCatalog.englishDefaultModelID)
+        #expect(controller.activeSelection(for: .meetings)?.modelID != "small.en")
     }
 
     private func speechController(

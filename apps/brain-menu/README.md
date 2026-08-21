@@ -17,12 +17,14 @@ approved model. A compatible standalone VoxType installation takes precedence.
 Brain changes only the speech engine or model the user explicitly selects and
 the maximum recording duration when the user starts Live Dictation.
 
-Whisper Large v3 is the single verified fresh-install default for dictation,
-live meeting preview, and final meeting transcription. The other approved
-models remain available as explicit fallbacks. Before recording, Brain attests
-that VoxType's effective model is exactly the requested model; a mismatch is
-shown as a setup failure instead of silently producing differently sourced
-transcripts.
+Whisper Large v3 is the single verified fresh-install default for dictation
+and final meeting transcription. Live meeting captions are off by default so
+recording a call does not compete with Zoom or Meet for the GPU; the full
+transcript is built after you stop. Optional live captions use Whisper Small.
+The other approved models remain available as explicit fallbacks. Before
+recording, Brain attests that VoxType's effective model is exactly the
+requested model; a mismatch is shown as a setup failure instead of silently
+producing differently sourced transcripts.
 
 **Live Dictation** stays active until stopped and uses a configurable global
 shortcut in **Settings → Shortcuts**.

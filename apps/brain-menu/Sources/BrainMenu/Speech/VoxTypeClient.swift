@@ -804,22 +804,33 @@ struct VoxTypeClient: VoxTypeControlling, VoxTypeStatusObserving, Sendable {
     }
 
     func transcribe(wavURL: URL, engine: String) async throws -> String {
+        try await transcribe(wavURL: wavURL, engine: engine, model: nil)
+    }
+
+    func transcribe(wavURL: URL, engine: String, model: String?) async throws -> String {
         guard Self.isSafeEngine(engine) else { throw VoxTypeClientError.invalidEngine }
+        if let model, !Self.isSafeModel(model) {
+            throw VoxTypeClientError.invalidModel
+        }
         guard wavURL.isFileURL,
               wavURL.path.hasPrefix("/"),
               wavURL.pathExtension.lowercased() == "wav" else {
             throw VoxTypeClientError.invalidAudioFile
         }
 
+        var arguments = ["--quiet"]
+        if let model {
+            arguments.append(contentsOf: ["--model", model])
+        }
+        arguments.append(contentsOf: [
+            "transcribe",
+            wavURL.standardizedFileURL.path,
+            "--engine",
+            engine,
+        ])
         let output = try await executeSuccessful(
             .transcribe,
-            arguments: [
-                "--quiet",
-                "transcribe",
-                wavURL.standardizedFileURL.path,
-                "--engine",
-                engine,
-            ],
+            arguments: arguments,
             timeout: Self.transcriptionTimeout,
             requestedEngine: engine
         )
@@ -1048,6 +1059,17 @@ struct VoxTypeClient: VoxTypeControlling, VoxTypeStatusObserving, Sendable {
         guard !engine.isEmpty, engine.utf8.count <= 64 else { return false }
         return engine.utf8.allSatisfy {
             ($0 >= 97 && $0 <= 122) || ($0 >= 48 && $0 <= 57) || $0 == 45
+        }
+    }
+
+    private static func isSafeModel(_ model: String) -> Bool {
+        guard SpeechEngineCatalog.model(id: model) != nil,
+              !model.isEmpty,
+              model.utf8.count <= 64 else {
+            return false
+        }
+        return model.utf8.allSatisfy {
+            ($0 >= 97 && $0 <= 122) || ($0 >= 48 && $0 <= 57) || $0 == 45 || $0 == 46
         }
     }
 

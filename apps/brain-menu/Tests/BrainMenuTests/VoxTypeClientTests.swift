@@ -411,6 +411,57 @@ struct VoxTypeClientTests {
     }
 
     @Test
+    func transcribePassesCatalogModelAsAGlobalOverrideWithoutChangingTheEngine() async throws {
+        let runner = FakeVoxTypeProcessRunner(outputs: [
+            .success(VoxTypeProcessOutput(stdout: "live caption\n")),
+        ])
+        let client = makeClient(runner: runner)
+        let wav = URL(fileURLWithPath: "/private/tmp/preview.wav")
+
+        #expect(try await client.transcribe(
+            wavURL: wav,
+            engine: "whisper",
+            model: "small.en"
+        ) == "live caption")
+        assertSecureRequest(
+            try #require(await runner.requests.first),
+            arguments: [
+                "--quiet",
+                "--model",
+                "small.en",
+                "transcribe",
+                wav.path,
+                "--engine",
+                "whisper",
+            ],
+            scheduling: .background,
+            timeout: VoxTypeClient.transcriptionTimeout
+        )
+    }
+
+    @Test
+    func transcribeRejectsUnsafeModelBeforeRunning() async {
+        let runner = FakeVoxTypeProcessRunner(outputs: [])
+        let client = makeClient(runner: runner)
+
+        await #expect(throws: VoxTypeClientError.invalidModel) {
+            try await client.transcribe(
+                wavURL: URL(fileURLWithPath: "/tmp/audio.wav"),
+                engine: "whisper",
+                model: "small.en; rm"
+            )
+        }
+        await #expect(throws: VoxTypeClientError.invalidModel) {
+            try await client.transcribe(
+                wavURL: URL(fileURLWithPath: "/tmp/audio.wav"),
+                engine: "whisper",
+                model: "not-a-catalog-model"
+            )
+        }
+        #expect(await runner.requests.isEmpty)
+    }
+
+    @Test
     func backgroundSchedulingUsesTheSystemTaskPolicyExecutable() throws {
         let process = Process()
         let request = VoxTypeProcessRequest(

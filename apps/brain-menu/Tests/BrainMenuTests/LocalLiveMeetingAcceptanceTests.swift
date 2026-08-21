@@ -44,9 +44,11 @@ extension AppIntegrationTests {
 
             let meetingStore = MeetingStore(rootURL: fixture.meetings)
             let notesStore = MeetingNotesStore(rootURL: fixture.meetings)
+            let liveCaptions = MeetingLiveCaptionsStore(defaults: defaults)
             let recorder = try LocalLiveMeetingRecorder(
                 root: fixture.meetings,
-                meetingStore: meetingStore
+                meetingStore: meetingStore,
+                liveCaptions: liveCaptions
             )
             let meeting = MeetingController(
                 detector: LocalLiveMeetingDetector(),
@@ -107,9 +109,7 @@ extension AppIntegrationTests {
             #expect(
                 graph.meetingLiveDashboard.transcriptController
                     === recorder.liveTranscriptController)
-            #expect(
-                recorder.liveTranscriptController?.utterances.map(\.text)
-                    == [LocalLiveMeetingVoxTypeClient.previewText])
+            #expect(recorder.liveTranscriptController?.utterances.isEmpty == true)
 
             graph.meetingLiveDashboard.selectTab(.notes)
             #expect(graph.meetingLiveDashboard.selectedTab == .notes)
@@ -323,6 +323,7 @@ extension AppIntegrationTests {
 private final class LocalLiveMeetingRecorder: MeetingRecording {
     private let root: URL
     private let meetingStore: MeetingStore
+    private let liveCaptions: MeetingLiveCaptionsStore
     private let transcript: LiveTranscriptController
     private var request: MeetingRecordingRequest?
     private var writer: MeetingAudioWriter?
@@ -333,14 +334,20 @@ private final class LocalLiveMeetingRecorder: MeetingRecording {
     private(set) var startCount = 0
     var liveTranscriptController: LiveTranscriptController? { transcript }
 
-    init(root: URL, meetingStore: MeetingStore) throws {
+    init(
+        root: URL,
+        meetingStore: MeetingStore,
+        liveCaptions: MeetingLiveCaptionsStore = MeetingLiveCaptionsStore()
+    ) throws {
         self.root = root
         self.meetingStore = meetingStore
+        self.liveCaptions = liveCaptions
         transcript = LiveTranscriptController(
             service: try LiveTranscriptionService(
                 client: LocalLiveMeetingVoxTypeClient(),
                 engine: .whisper,
                 attestedModel: SpeechEngineCatalog.englishDefaultModelID,
+                previewModel: SpeechEngineCatalog.livePreviewModelID,
                 originHostTimestamp: 100,
                 wavDirectory: root.appendingPathComponent("voxtype-live-\(UUID().uuidString)")
             ))
@@ -370,15 +377,17 @@ private final class LocalLiveMeetingRecorder: MeetingRecording {
         let buffer = LocalLiveMeetingRecorder.audioBuffer()
         _ = try writer.append(buffer)
         guard request.recordingKind == .meeting else { return }
-        await transcript.append(buffer)
-        let pause = LocalLiveMeetingRecorder.audioBuffer(
-            hostTimestamp: 110,
-            duration: 1.3,
-            amplitude: 0
-        )
-        _ = try writer.append(pause)
-        await transcript.append(pause)
-        await transcript.waitForPendingPreview()
+        if liveCaptions.isEnabled {
+            await transcript.append(buffer)
+            let pause = LocalLiveMeetingRecorder.audioBuffer(
+                hostTimestamp: 110,
+                duration: 1.3,
+                amplitude: 0
+            )
+            _ = try writer.append(pause)
+            await transcript.append(pause)
+            await transcript.waitForPendingPreview()
+        }
     }
 
     func pause(at date: Date) async throws {}

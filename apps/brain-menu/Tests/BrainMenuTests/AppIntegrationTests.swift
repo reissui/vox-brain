@@ -125,6 +125,8 @@ struct AppIntegrationTests {
         #expect(source.components(separatedBy: "LiveTranscriptController(service:").count - 1 == 1)
         #expect(source.contains("self.transcript = transcript"))
         #expect(source.contains("liveTranscriptControllerHandler?(transcript)"))
+        #expect(source.contains("if liveCaptions.isEnabled"))
+        #expect(source.contains("previewModel: SpeechEngineCatalog.livePreviewModelID"))
         graph.meetingLivePanel.hide()
     }
 

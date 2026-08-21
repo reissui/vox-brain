@@ -611,6 +611,47 @@ struct LiveTranscriptControllerTests {
 
     @Test
     @MainActor
+    func livePreviewUsesTheLightweightModelAndFinalPassDoesNot() async throws {
+        let fixture = try LiveTranscriptFixture()
+        let client = FakeLiveTranscriptionClient()
+        let service = try LiveTranscriptionService(
+            client: client,
+            engine: .whisper,
+            attestedModel: "large-v3",
+            previewModel: SpeechEngineCatalog.livePreviewModelID,
+            originHostTimestamp: 100,
+            wavDirectory: fixture.wavDirectory
+        )
+        let controller = LiveTranscriptController(service: service)
+        await controller.append(fixture.buffer(
+            source: .microphone,
+            hostTimestamp: 100,
+            duration: 4,
+            amplitude: 0.25
+        ))
+        await controller.append(fixture.buffer(
+            source: .microphone,
+            hostTimestamp: 104,
+            duration: 1.3,
+            amplitude: 0
+        ))
+        await controller.waitForPendingPreview()
+        _ = await service.stop(capture: try fixture.captureSummary(buffers: [
+            fixture.buffer(source: .microphone, hostTimestamp: 100, duration: 4, amplitude: 0.25),
+            fixture.buffer(source: .microphone, hostTimestamp: 104, duration: 1.3, amplitude: 0),
+        ]))
+
+        let calls = await client.calls
+        let preview = calls.filter { $0.phase == .preview }
+        let final = calls.filter { $0.phase == .final }
+        #expect(!preview.isEmpty)
+        #expect(preview.allSatisfy { $0.model == SpeechEngineCatalog.livePreviewModelID })
+        #expect(!final.isEmpty)
+        #expect(final.allSatisfy { $0.model == nil })
+    }
+
+    @Test
+    @MainActor
     func overlappingFinalTextUsesEchoDuplicateSuppression() async throws {
         let fixture = try LiveTranscriptFixture()
         let client = FakeLiveTranscriptionClient(fixedFinalText: "shared release decision")
@@ -985,6 +1026,7 @@ struct LiveTranscriptControllerTests {
         #expect(!implementation.contains("partial-json"))
         #expect(service.contains("client.transcribe("))
         #expect(service.contains("engine: engine.rawValue"))
+        #expect(service.contains("model: previewModel"))
     }
 
     private func sourceOrder(_ lhs: MeetingAudioSource, _ rhs: MeetingAudioSource) -> Bool {
@@ -1026,6 +1068,7 @@ private struct RecordedLiveTranscriptionCall: Equatable, Sendable {
     let startMilliseconds: Int64?
     let endMilliseconds: Int64?
     let engine: String
+    let model: String?
     let wasOwnerOnly: Bool
     let hadWAVHeader: Bool
     let wavDataByteCount: Int
@@ -1106,7 +1149,11 @@ private actor FakeLiveTranscriptionClient: LiveTranscriptionClient {
     }
 
     func transcribe(wavURL: URL, engine: String) async throws -> String {
-        let call = try Self.call(wavURL: wavURL, engine: engine)
+        try await transcribe(wavURL: wavURL, engine: engine, model: nil)
+    }
+
+    func transcribe(wavURL: URL, engine: String, model: String?) async throws -> String {
+        let call = try Self.call(wavURL: wavURL, engine: engine, model: model)
         recordedCalls.append(call)
         activeBySource[call.source, default: 0] += 1
         maximumBySource[call.source] = max(
@@ -1170,7 +1217,8 @@ private actor FakeLiveTranscriptionClient: LiveTranscriptionClient {
 
     private static func call(
         wavURL: URL,
-        engine: String
+        engine: String,
+        model: String?
     ) throws -> RecordedLiveTranscriptionCall {
         let components = wavURL.deletingPathExtension().lastPathComponent.split(separator: "-")
         let phase: LiveTranscriptionPhase = components.first == "preview" ? .preview : .final
@@ -1189,6 +1237,7 @@ private actor FakeLiveTranscriptionClient: LiveTranscriptionClient {
             startMilliseconds: start,
             endMilliseconds: end,
             engine: engine,
+            model: model,
             wasOwnerOnly: owner == getuid() && permissions & 0o077 == 0,
             hadWAVHeader: data.count >= 44
                 && String(data: data.prefix(4), encoding: .ascii) == "RIFF"

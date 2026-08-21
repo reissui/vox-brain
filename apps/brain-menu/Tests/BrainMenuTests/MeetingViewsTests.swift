@@ -1309,6 +1309,8 @@ struct MeetingViewsTests {
         )
 
         #expect(live.contains("accessibilityLabel(\"Meeting status\")"))
+        #expect(live.contains("Toggle(\"Live captions\""))
+        #expect(live.contains("emptyTranscriptTitle"))
         #expect(live.contains("accessibilityFocused($accessibilityFocus, equals: .errorSummary)"))
         #expect(live.contains("keyboardShortcut(.defaultAction)"))
         #expect(live.contains("microphoneMissing"))
