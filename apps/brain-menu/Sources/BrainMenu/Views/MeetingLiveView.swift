@@ -127,6 +127,7 @@ struct MeetingLiveSnapshot: Equatable, Sendable {
     let signalStates: [MeetingAudioSource: MeetingAudioSignalState]
     let audioGuidance: [MeetingAudioSource: String]
     let now: Date
+    let liveCaptionsEnabled: Bool
 
     init(
         meeting: MeetingRecord?,
@@ -138,7 +139,8 @@ struct MeetingLiveSnapshot: Equatable, Sendable {
         levels: [MeetingAudioSource: Float],
         signalStates: [MeetingAudioSource: MeetingAudioSignalState] = [:],
         audioGuidance: [MeetingAudioSource: String] = [:],
-        now: Date
+        now: Date,
+        liveCaptionsEnabled: Bool = false
     ) {
         self.meeting = meeting
         self.lifecycleState = lifecycleState
@@ -150,6 +152,7 @@ struct MeetingLiveSnapshot: Equatable, Sendable {
         self.signalStates = signalStates
         self.audioGuidance = audioGuidance
         self.now = now
+        self.liveCaptionsEnabled = liveCaptionsEnabled
     }
 }
 
@@ -167,6 +170,9 @@ struct MeetingLiveViewModel: Equatable, Sendable {
     let transcriptHealth: MeetingLiveTranscriptHealthModel?
     let captureGuidance: [MeetingLiveCaptureGuidanceModel]
     let actions: [MeetingLiveAction]
+    let liveCaptionsEnabled: Bool
+    let emptyTranscriptTitle: String
+    let emptyTranscriptDescription: String
 
     init(snapshot: MeetingLiveSnapshot) {
         title = snapshot.meeting?.title ?? "Live Meeting"
@@ -212,6 +218,21 @@ struct MeetingLiveViewModel: Equatable, Sendable {
         transcriptHealth = Self.transcriptHealth(snapshot.transcriptFailures)
         captureGuidance = Self.captureGuidance(snapshot.audioGuidance)
         actions = Self.actions(snapshot.lifecycleState)
+        liveCaptionsEnabled = snapshot.liveCaptionsEnabled
+        let receiving = isReceivingAudio
+        if snapshot.liveCaptionsEnabled {
+            emptyTranscriptTitle = receiving ? "Audio is being received" : "Waiting for audio"
+            emptyTranscriptDescription = receiving
+                ? "The transcript preview appears after enough speech has been collected."
+                : "Brain has not received microphone or system audio yet."
+        } else {
+            emptyTranscriptTitle = receiving
+                ? "Recording without live captions"
+                : "Waiting for audio"
+            emptyTranscriptDescription = receiving
+                ? "The transcript is built after you stop, so the call stays light. Enable live captions in Settings → Speech."
+                : "Brain has not received microphone or system audio yet."
+        }
     }
 
     @MainActor
@@ -381,24 +402,32 @@ final class MeetingLiveDashboardController {
     let notesController: MeetingNotesController
     private(set) var transcriptController: LiveTranscriptController?
     private(set) var selectedTab: MeetingLiveTab = .transcript
+    private(set) var liveCaptionsEnabled: Bool
+    @ObservationIgnored private let liveCaptions: MeetingLiveCaptionsStore
 
     init(
         meetingController: MeetingController,
-        notesController: MeetingNotesController = MeetingNotesController()
+        notesController: MeetingNotesController = MeetingNotesController(),
+        liveCaptions: MeetingLiveCaptionsStore = MeetingLiveCaptionsStore()
     ) {
         self.meetingController = meetingController
         self.notesController = notesController
         transcriptController = nil
+        self.liveCaptions = liveCaptions
+        liveCaptionsEnabled = liveCaptions.isEnabled
     }
 
     init(
         meetingController: MeetingController,
         transcriptController: LiveTranscriptController,
-        notesController: MeetingNotesController = MeetingNotesController()
+        notesController: MeetingNotesController = MeetingNotesController(),
+        liveCaptions: MeetingLiveCaptionsStore = MeetingLiveCaptionsStore()
     ) {
         self.meetingController = meetingController
         self.transcriptController = transcriptController
         self.notesController = notesController
+        self.liveCaptions = liveCaptions
+        liveCaptionsEnabled = liveCaptions.isEnabled
     }
 
     func attachTranscript(_ transcriptController: LiveTranscriptController?) {
@@ -419,6 +448,11 @@ final class MeetingLiveDashboardController {
         selectedTab = tab
     }
 
+    func setLiveCaptionsEnabled(_ enabled: Bool) {
+        liveCaptions.setEnabled(enabled)
+        liveCaptionsEnabled = enabled
+    }
+
     func receive(_ level: MeetingAudioLevel) {
         // RMS is emitted as a normalized linear value by the writer. A stale
         // source remains visible rather than flickering out between samples.
@@ -433,6 +467,10 @@ final class MeetingLiveDashboardController {
         let currentSignalStates = signalStates.merging(meetingController.audioSignalStates) {
             _, native in native
         }
+        let captions = liveCaptions.isEnabled
+        if liveCaptionsEnabled != captions {
+            liveCaptionsEnabled = captions
+        }
         return MeetingLiveViewModel(snapshot: MeetingLiveSnapshot(
             meeting: meetingController.currentMeeting,
             lifecycleState: meetingController.state,
@@ -443,7 +481,8 @@ final class MeetingLiveDashboardController {
             levels: currentLevels,
             signalStates: currentSignalStates,
             audioGuidance: meetingController.audioGuidance,
-            now: now
+            now: now,
+            liveCaptionsEnabled: liveCaptions.isEnabled
         ))
     }
 
@@ -594,6 +633,14 @@ struct MeetingLiveView: View {
             .accessibilityLabel("Meeting audio status")
             .accessibilityValue(model.audioStatusText)
 
+            Toggle("Live captions", isOn: Binding(
+                get: { controller.liveCaptionsEnabled },
+                set: { controller.setLiveCaptionsEnabled($0) }
+            ))
+            .toggleStyle(.switch)
+            .accessibilityLabel("Live captions during this recording")
+            .accessibilityValue(controller.liveCaptionsEnabled ? "On" : "Off")
+
             ForEach(model.levels) { level in
                 HStack {
                     Text(level.title).frame(width: 100, alignment: .leading)
@@ -647,13 +694,9 @@ struct MeetingLiveView: View {
     private func transcript(_ model: MeetingLiveViewModel) -> some View {
         if model.transcript.isEmpty {
             ContentUnavailableView(
-                model.isReceivingAudio ? "Audio is being received" : "Waiting for audio",
+                model.emptyTranscriptTitle,
                 systemImage: model.isReceivingAudio ? "waveform.badge.checkmark" : "waveform",
-                description: Text(
-                    model.isReceivingAudio
-                        ? "The transcript preview appears after enough speech has been collected."
-                        : "Brain has not received microphone or system audio yet."
-                )
+                description: Text(model.emptyTranscriptDescription)
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {

@@ -278,6 +278,7 @@ final class BrainAppControllerGraph {
             audioCapture: ownership
         )
         let microphoneSelections = MeetingMicrophoneSelectionStore()
+        let liveCaptions = MeetingLiveCaptionsStore()
         let microphoneInventory = CoreAudioMeetingMicrophoneInventory()
         let nativeMeeting: MeetingController
         let nativeNotesStore: any MeetingNotesStoring
@@ -291,6 +292,7 @@ final class BrainAppControllerGraph {
                 ownership: ownership,
                 microphoneSelections: microphoneSelections,
                 microphoneInventory: microphoneInventory,
+                liveCaptions: liveCaptions,
                 modelAttester: modelSource
             )
             nativeMeeting = built.controller
@@ -302,7 +304,8 @@ final class BrainAppControllerGraph {
         meetingNotes = notesController
         let liveDashboard = MeetingLiveDashboardController(
             meetingController: nativeMeeting,
-            notesController: notesController
+            notesController: notesController,
+            liveCaptions: liveCaptions
         )
         meetingLiveDashboard = liveDashboard
         meetingLivePanel = MeetingLivePanelController(dashboardController: liveDashboard)
@@ -341,7 +344,8 @@ final class BrainAppControllerGraph {
             microphoneSelections: microphoneSelections,
             microphoneService: SystemMeetingMicrophoneService(
                 inventoryProvider: microphoneInventory
-            )
+            ),
+            liveCaptions: liveCaptions
         )
         capture.setDeliveryHandler { [weak librarianAI] _ in
             librarianAI?.captureDelivered()
@@ -684,6 +688,7 @@ final class BrainAppControllerGraph {
         ownership: MeetingAudioOwnership,
         microphoneSelections: MeetingMicrophoneSelectionStore,
         microphoneInventory: any MeetingMicrophoneInventoryProviding,
+        liveCaptions: MeetingLiveCaptionsStore,
         modelAttester: (any VoxTypeModelAttesting)?
     ) -> (
         controller: MeetingController,
@@ -713,6 +718,7 @@ final class BrainAppControllerGraph {
             audioMonitor: audioMonitor,
             microphoneSelections: microphoneSelections,
             microphoneInventory: microphoneInventory,
+            liveCaptions: liveCaptions,
             speechEngine: SpeechEngineID.whisper.rawValue,
             speechModel: OnboardingController.defaultMeetingModelID
         )
@@ -732,7 +738,8 @@ final class BrainAppControllerGraph {
         modelActivator: VoxTypeModelActivator?,
         modelSource: VoxTypeModelSourceOfTruth?,
         microphoneSelections: MeetingMicrophoneSelectionStore,
-        microphoneService: any MeetingMicrophoneSettingsServing
+        microphoneService: any MeetingMicrophoneSettingsServing,
+        liveCaptions: MeetingLiveCaptionsStore
     ) -> SpeechSettingsController {
         guard let client else {
             return SpeechSettingsController(
@@ -740,7 +747,8 @@ final class BrainAppControllerGraph {
                 inventory: UnavailableSpeechModelInventory(),
                 selections: SpeechSelectionStore(),
                 microphoneService: microphoneService,
-                microphoneSelectionStore: microphoneSelections
+                microphoneSelectionStore: microphoneSelections,
+                liveCaptions: liveCaptions
             )
         }
         return SpeechSettingsController(
@@ -750,7 +758,8 @@ final class BrainAppControllerGraph {
             modelActivator: modelActivator,
             modelSource: modelSource,
             microphoneService: microphoneService,
-            microphoneSelectionStore: microphoneSelections
+            microphoneSelectionStore: microphoneSelections,
+            liveCaptions: liveCaptions
         )
     }
 }
@@ -875,6 +884,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
     private let audioMonitor: MeetingAudioMonitor
     private let microphoneSelections: MeetingMicrophoneSelectionStore
     private let microphoneInventory: any MeetingMicrophoneInventoryProviding
+    private let liveCaptions: MeetingLiveCaptionsStore
     private let speechEngine: String
     private let speechModel: String
 
@@ -910,6 +920,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         microphoneSelections: MeetingMicrophoneSelectionStore,
         microphoneInventory: any MeetingMicrophoneInventoryProviding =
             CoreAudioMeetingMicrophoneInventory(),
+        liveCaptions: MeetingLiveCaptionsStore = MeetingLiveCaptionsStore(),
         speechEngine: String,
         speechModel: String
     ) {
@@ -919,6 +930,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
         self.audioMonitor = audioMonitor
         self.microphoneSelections = microphoneSelections
         self.microphoneInventory = microphoneInventory
+        self.liveCaptions = liveCaptions
         self.speechEngine = speechEngine
         self.speechModel = speechModel
     }
@@ -994,6 +1006,7 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             client: transcriptionClient,
             engine: engine,
             attestedModel: request.speechModelAttestation?.effectiveSelection.modelID,
+            previewModel: SpeechEngineCatalog.livePreviewModelID,
             originHostTimestamp: ProcessInfo.processInfo.systemUptime,
             wavDirectory: store.directoryURL(for: request.meetingID)
                 .appendingPathComponent(".transcription", isDirectory: true)
@@ -1594,7 +1607,9 @@ private final class BrainNativeMeetingRecorder: MeetingRecording, MeetingMicroph
             do {
                 let result = try await writePipeline.append(buffer)
                 if let level = result.level { audioMonitor.receive(level) }
-                await transcript?.append(buffer)
+                if liveCaptions.isEnabled {
+                    await transcript?.append(buffer)
+                }
             } catch {
                 eventGate?.recordStartupFailure(
                     "Meeting audio could not be written: \(error.localizedDescription)"

@@ -299,9 +299,11 @@ final class SpeechSettingsController {
     @ObservationIgnored private let microphoneService: (any MeetingMicrophoneSettingsServing)?
     @ObservationIgnored private let microphoneSelectionStore: MeetingMicrophoneSelectionStore
     let meetingTerminology: MeetingTerminologyStore
+    let liveCaptions: MeetingLiveCaptionsStore
     @ObservationIgnored private var modelApplicationTask: Task<Void, Never>?
     @ObservationIgnored private var modelApplicationRevision: UInt64 = 0
     @ObservationIgnored private var transientSelections: [SpeechWorkflow: SpeechEngineSelection] = [:]
+    @ObservationIgnored private var liveCaptionsInstallTask: Task<Void, Never>?
 
     init(
         voxType: (any VoxTypeControlling)?,
@@ -313,6 +315,7 @@ final class SpeechSettingsController {
         microphoneService: (any MeetingMicrophoneSettingsServing)? = nil,
         microphoneSelectionStore: MeetingMicrophoneSelectionStore = MeetingMicrophoneSelectionStore(),
         meetingTerminology: MeetingTerminologyStore = MeetingTerminologyStore(),
+        liveCaptions: MeetingLiveCaptionsStore = MeetingLiveCaptionsStore(),
         initialSnapshot: ModelInventorySnapshot = .unknown
     ) {
         self.voxType = voxType
@@ -324,7 +327,9 @@ final class SpeechSettingsController {
         self.microphoneService = microphoneService
         self.microphoneSelectionStore = microphoneSelectionStore
         self.meetingTerminology = meetingTerminology
+        self.liveCaptions = liveCaptions
         microphoneSelection = microphoneSelectionStore.selection
+        liveCaptionsEnabled = liveCaptions.isEnabled
         inventorySnapshot = initialSnapshot
         installationState = voxType == nil ? .missing : .checking
         if voxType == nil {
@@ -356,6 +361,19 @@ final class SpeechSettingsController {
         case .device(let uid):
             microphoneInventory.devices.contains { $0.id == uid }
         }
+    }
+
+    private(set) var liveCaptionsEnabled: Bool
+
+    func setLiveCaptionsEnabled(_ enabled: Bool) {
+        liveCaptions.setEnabled(enabled)
+        liveCaptionsEnabled = enabled
+        guard enabled else { return }
+        liveCaptionsInstallTask = Task { await installModel(SpeechEngineCatalog.livePreviewModelID) }
+    }
+
+    func waitForPendingLiveCaptionsInstall() async {
+        await liveCaptionsInstallTask?.value
     }
 
     func selectMicrophone(_ selection: MeetingMicrophoneSelection) {
@@ -739,6 +757,18 @@ struct SpeechSettingsView: View {
 
             workflowSection(.dictation)
 
+            Section("Live captions") {
+                Toggle("Show captions during meetings", isOn: Binding(
+                    get: { controller.liveCaptionsEnabled },
+                    set: { controller.setLiveCaptionsEnabled($0) }
+                ))
+                .accessibilityLabel("Live captions during meetings")
+                .accessibilityValue(controller.liveCaptionsEnabled ? "On" : "Off")
+                Text("Off by default. Brain records the call and transcribes after you stop, using your selected model. Live captions use Whisper Small so they don't compete with the call.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             terminologySection
 
             Section("Audio Tests") {
@@ -856,7 +886,7 @@ struct SpeechSettingsView: View {
                 }
                 Link("VoxType model guide", destination: SpeechEngineCatalog.modelGuideURL)
                     .font(.caption)
-                Text("This active model is used for dictation, live meeting preview, and final meeting transcription.")
+                Text("This active model is used for dictation and final meeting transcription.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

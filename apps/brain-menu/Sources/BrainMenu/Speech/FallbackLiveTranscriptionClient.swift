@@ -30,15 +30,23 @@ actor FallbackLiveTranscriptionClient: LiveTranscriptionClient {
     }
 
     func transcribe(wavURL: URL, engine: String) async throws -> String {
+        try await transcribe(wavURL: wavURL, engine: engine, model: nil)
+    }
+
+    func transcribe(wavURL: URL, engine: String, model: String?) async throws -> String {
         await acquireTranscriptionSlot()
         defer { releaseTranscriptionSlot() }
         try Task.checkCancellation()
-        return try await transcribeExclusively(wavURL: wavURL, engine: engine)
+        return try await transcribeExclusively(wavURL: wavURL, engine: engine, model: model)
     }
 
-    private func transcribeExclusively(wavURL: URL, engine: String) async throws -> String {
+    private func transcribeExclusively(
+        wavURL: URL,
+        engine: String,
+        model: String?
+    ) async throws -> String {
         guard engine == primaryEngine else {
-            return try await client.transcribe(wavURL: wavURL, engine: engine)
+            return try await client.transcribe(wavURL: wavURL, engine: engine, model: model)
         }
 
         while primaryState == .probing {
@@ -46,14 +54,19 @@ actor FallbackLiveTranscriptionClient: LiveTranscriptionClient {
             try Task.checkCancellation()
         }
         if primaryState == .useFallback {
-            return try await client.transcribe(wavURL: wavURL, engine: fallbackEngine)
+            return try await client.transcribe(
+                wavURL: wavURL,
+                engine: fallbackEngine,
+                model: model
+            )
         }
 
         primaryState = .probing
         do {
             let transcript = try await client.transcribe(
                 wavURL: wavURL,
-                engine: primaryEngine
+                engine: primaryEngine,
+                model: model
             )
             completePrimaryProbe(with: .available)
             return transcript
@@ -62,7 +75,8 @@ actor FallbackLiveTranscriptionClient: LiveTranscriptionClient {
             completePrimaryProbe(with: .useFallback)
             return try await client.transcribe(
                 wavURL: wavURL,
-                engine: fallbackEngine
+                engine: fallbackEngine,
+                model: model
             )
         } catch {
             completePrimaryProbe(with: .available)

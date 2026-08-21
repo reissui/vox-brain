@@ -60,6 +60,9 @@ enum SpeechEngineCatalog {
     /// The one fresh-install default used by every VoxType-backed workflow.
     static let englishDefaultModelID = "large-v3"
     static let multilingualFallbackModelID = "large-v3-turbo"
+    /// Opt-in live meeting captions. Final transcription still uses the
+    /// selected model after the call.
+    static let livePreviewModelID = "small.en"
     static let modelGuideURL = URL(
         string: "https://voxtype.io/docs/MODEL_SELECTION_GUIDE"
     )!
@@ -96,7 +99,10 @@ enum SpeechEngineCatalog {
             supportsBatch: true,
             previewSupport: .chunked,
             diskSizeMB: 466,
-            recommendation: nil
+            recommendation: SpeechModelRecommendation(
+                title: "Live captions",
+                detail: "Used only for optional live meeting captions. Final transcription still uses your selected model after the call."
+            )
         ),
         SpeechModelDescriptor(
             id: "medium.en",
@@ -120,7 +126,7 @@ enum SpeechEngineCatalog {
             diskSizeMB: 3_100,
             recommendation: SpeechModelRecommendation(
                 title: "Recommended",
-                detail: "Brain's verified model for dictation, live preview, and final meeting transcription."
+                detail: "Brain's verified model for dictation and final meeting transcription."
             )
         ),
         SpeechModelDescriptor(

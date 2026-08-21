@@ -22,10 +22,12 @@ analysis → finalized text → local inbox
    **Screen & System Audio Recording**. Accessibility supports selected-text
    context and paste-related features; Brain does not monitor global keys.
 3. Choose a model in Speech Setup. Whisper Large v3 is Brain's single verified
-   default for dictation, live preview, and final meeting transcription. Other
-   approved models, including Whisper Large v3 Turbo, remain explicit
-   fallbacks. Brain blocks recording if VoxType reports a different effective
-   model from the one requested.
+   default for dictation and final meeting transcription. Live captions during a
+   call are off by default so recording does not compete with the meeting app
+   for the GPU; turn them on in **Settings → Speech** to use Whisper Small for
+   preview. Other approved models, including Whisper Large v3 Turbo, remain
+   explicit fallbacks. Brain blocks recording if VoxType reports a different
+   effective model from the one requested.
 4. In **Audio Tests**, confirm microphone input. A pinned input uses its
    persistent Core Audio UID and never silently switches when missing.
 5. Optionally configure and test an AI provider. Brain discloses that finalized

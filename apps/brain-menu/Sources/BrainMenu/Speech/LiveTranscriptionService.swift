@@ -6,10 +6,15 @@ import Foundation
 /// cannot start paste recording, stop it, or reach any focus-changing API.
 protocol LiveTranscriptionClient: Sendable {
     func transcribe(wavURL: URL, engine: String) async throws -> String
+    func transcribe(wavURL: URL, engine: String, model: String?) async throws -> String
     func effectiveEngine(for requestedEngine: String) async -> String
 }
 
 extension LiveTranscriptionClient {
+    func transcribe(wavURL: URL, engine: String, model: String?) async throws -> String {
+        try await transcribe(wavURL: wavURL, engine: engine)
+    }
+
     func effectiveEngine(for requestedEngine: String) async -> String { requestedEngine }
 }
 
@@ -187,6 +192,7 @@ actor LiveTranscriptionService {
 
     let engine: SpeechEngineID
     let attestedModel: String?
+    let previewModel: String?
     let originHostTimestamp: TimeInterval
     private let client: any LiveTranscriptionClient
     private let wavDirectory: URL
@@ -208,6 +214,7 @@ actor LiveTranscriptionService {
         client: any LiveTranscriptionClient,
         engine: SpeechEngineID,
         attestedModel: String? = nil,
+        previewModel: String? = nil,
         originHostTimestamp: TimeInterval,
         wavDirectory: URL,
         fileManager: FileManager = .default
@@ -219,6 +226,7 @@ actor LiveTranscriptionService {
         self.client = client
         self.engine = engine
         self.attestedModel = attestedModel
+        self.previewModel = previewModel
         self.originHostTimestamp = originHostTimestamp
         self.wavDirectory = wavDirectory.standardizedFileURL
         self.fileManager = fileManager
@@ -466,7 +474,8 @@ actor LiveTranscriptionService {
         do {
             let text = try await client.transcribe(
                 wavURL: chunk.wavURL,
-                engine: engine.rawValue
+                engine: engine.rawValue,
+                model: previewModel
             ).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
             return .preview(LiveTranscriptSegment(
