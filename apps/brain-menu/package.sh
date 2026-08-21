@@ -150,6 +150,10 @@ mkdir -p \
   "$voxtype_contents/Resources"
 install -m 0644 "$plist_source" "$staged_app/Contents/Info.plist"
 install -m 0644 "$app_icon" "$staged_app/Contents/Resources/Brain.icns"
+speaker_encoder="$app_dir/Resources/SpeakerEncoder.mlmodelc"
+if [ -d "$speaker_encoder" ]; then
+  cp -R "$speaker_encoder" "$staged_app/Contents/Resources/SpeakerEncoder.mlmodelc"
+fi
 install -m 0755 "$binary" "$staged_app/Contents/MacOS/BrainMenu"
 install -m 0755 "$observer_binary" "$staged_app/Contents/Helpers/BrainDictationObserver"
 install -m 0755 "$updater_binary" "$staged_app/Contents/Helpers/BrainUpdater"

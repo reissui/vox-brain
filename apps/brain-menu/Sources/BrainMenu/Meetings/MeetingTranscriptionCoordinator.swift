@@ -87,7 +87,7 @@ final class MeetingTranscriptionCoordinator: MeetingTranscriptionRetrying {
         fileManagerBox = MeetingTranscriptionFileManagerBox(fileManager)
         self.clientFactory = clientFactory
         self.diarizer = diarizer ?? MeetingSpeakerDiarizer(
-            embedder: MissingSpeakerEmbeddingClient()
+            embedder: CoreMLSpeakerEmbeddingClient()
         )
     }
 
