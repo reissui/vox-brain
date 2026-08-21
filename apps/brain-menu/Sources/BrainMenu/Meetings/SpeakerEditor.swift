@@ -448,11 +448,15 @@ struct SpeakerEditor: Sendable {
     static func defaultDisplayName(for speakerID: String) -> String {
         switch speakerID {
         case youSpeakerID:
-            "You"
+            return "You"
         case remoteSpeakerID:
-            "Remote"
+            return "Remote"
         default:
-            "Speaker"
+            if MeetingSpeakerIdentity.isClusteredID(speakerID),
+               let number = Int(speakerID.dropFirst("remote-".count)) {
+                return "Speaker \(number)"
+            }
+            return "Speaker"
         }
     }
 
