@@ -60,8 +60,12 @@ struct TalkTimeCalculator: Sendable {
         var countsBySpeaker: [String: Int] = [:]
 
         for utterance in utterances where !utterance.suppressed {
-            let speakerID = assignments[utterance.id]?.speakerID
-                ?? defaultSpeakerID(for: utterance.source)
+            let speakerID = MeetingSpeakerIdentity.resolved(
+                source: utterance.source,
+                baseSpeakerID: utterance.baseSpeakerID,
+                assignment: assignments[utterance.id],
+                speakers: speakers
+            ).id
             countsBySpeaker[speakerID, default: 0] += 1
             guard utterance.endMilliseconds > utterance.startMilliseconds else { continue }
             intervalsBySpeaker[speakerID, default: []].append(Interval(
@@ -159,15 +163,6 @@ struct TalkTimeCalculator: Sendable {
             }
         }
         return Self.saturatingAdd(total, current.end - current.start)
-    }
-
-    private func defaultSpeakerID(for source: MeetingUtteranceSource) -> String {
-        switch source {
-        case .microphone:
-            SpeakerEditor.youSpeakerID
-        case .system:
-            SpeakerEditor.remoteSpeakerID
-        }
     }
 
     private static func saturatingAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
